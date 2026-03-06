@@ -1,0 +1,119 @@
+# Capability Spec: Terminal User Interface (TUI)
+
+**Capability**: `tui`
+**Created**: 2026-03-06
+**Status**: Stable
+
+## Overview
+
+The TUI is a ratatui-based terminal dashboard that provides a visual interface for managing
+agent sessions. It launches when the user runs `aoe` without subcommands. All session lifecycle
+operations available via CLI are also available in the TUI, plus additional views (diff, settings).
+
+## Screens / Components
+
+```
+┌─ Home Screen ─────────────────────────────────────────┐
+│  Session List          │  Session Detail / Preview    │
+│  (groups + sessions)   │  (status, path, branch, etc) │
+│                        │                              │
+│  [n]ew  [d]elete  [?]  │  [Enter] attach              │
+│  [t] toggle terminal   │  [D] diff view               │
+│  [s] settings          │  [r] restart                 │
+└────────────────────────┴──────────────────────────────┘
+
+┌─ Diff View ────────────────────────────────────────────┐
+│  File List   │  Diff Content (unified diff)           │
+│              │  (syntax-highlighted, scrollable)       │
+│  [Enter] open in editor                               │
+│  [Esc] back to home                                   │
+└───────────────────────────────────────────────────────┘
+
+┌─ Settings TUI ─────────────────────────────────────────┐
+│  Tabs: General | Session | Sandbox | Worktree |        │
+│        Hooks | Repo | Updates | Sound | Theme          │
+│  Scope: [Tab] toggle Global / Profile                  │
+│  [r] clear profile override, [Esc] save & close       │
+└───────────────────────────────────────────────────────┘
+
+┌─ Creation Dialog ──────────────────────────────────────┐
+│  Title, Path, Tool, Branch, Sandbox options            │
+│  [Enter] create, [Esc] cancel                          │
+└───────────────────────────────────────────────────────┘
+```
+
+## Key Bindings (Home Screen)
+
+| Key | Action |
+|-----|--------|
+| `n` | New session |
+| `Enter` | Attach to selected session |
+| `t` | Toggle terminal view (host or container) |
+| `D` | Open diff view for selected session |
+| `d` | Delete selected session |
+| `r` | Restart selected session |
+| `s` | Open settings |
+| `?` | Show help |
+| `q` / `Ctrl+c` | Quit |
+| `j` / `k` / arrows | Navigate sessions |
+| `g` | Create group |
+| `Tab` | Switch sort order |
+
+## Session List
+
+Sessions are displayed in a list with:
+- Status indicator (color-coded: Running=green, Waiting=yellow, Idle=gray, Error=red)
+- Session title
+- Branch name (if worktree, when `show_branch_in_tui=true`)
+- Project path (abbreviated)
+- Last accessed time
+
+Sessions can be organized into collapsible groups (slash-delimited group paths).
+
+## Polling
+
+Background tasks keep the TUI live:
+- `StatusPoller`: updates session statuses from tmux pane content
+- `CreationPoller`: monitors async session creation progress
+- `DeletionPoller`: monitors async session deletion progress
+
+## Settings TUI
+
+The settings screen supports two scopes:
+- **Global**: edits `~/.agent-of-empires/config.toml`
+- **Profile**: edits the active profile's override config
+
+Fields show visual indicators when a profile override is active. Pressing `r` clears
+the profile override for the selected field. All config sections are represented as tabs.
+
+A **Repo** tab shows and edits `.aoe/config.toml` from the currently selected session's
+project directory. The Repo tab is disabled when no session with a project path is selected.
+
+## Diff View
+
+The diff view shows git changes for the selected session's project:
+- Left pane: list of changed files
+- Right pane: unified diff with syntax highlighting
+- `Enter` on a file: opens the file in `$EDITOR`
+- Compares against a configured default branch (or auto-detected)
+- Configurable context lines
+
+## Functional Requirements
+
+- **FR-001**: The TUI MUST launch without arguments (`aoe` with no subcommand).
+- **FR-002**: Session status MUST update in real-time via background polling.
+- **FR-003**: Attaching to a session MUST detach from the TUI and attach the terminal to the tmux session.
+- **FR-004**: The session list MUST support collapsible group hierarchies.
+- **FR-005**: The diff view MUST open files in `$EDITOR` (or a sensible default).
+- **FR-006**: Settings MUST save immediately on field change (no explicit "save" button except Esc).
+- **FR-007**: Profile override fields MUST be visually distinguished from global-only fields.
+- **FR-008**: The Repo settings tab MUST be disabled when no session is selected.
+- **FR-009**: The TUI MUST function correctly at terminal widths as narrow as 80 columns.
+- **FR-010**: Session creation and deletion MUST show progress feedback during async operations.
+
+## Success Criteria
+
+- **SC-001**: Users can manage all session operations without leaving the TUI.
+- **SC-002**: Status indicators update within one polling interval of the agent state changing.
+- **SC-003**: The diff view accurately reflects uncommitted changes in the session's project.
+- **SC-004**: Settings changes take effect immediately for the next session created.
