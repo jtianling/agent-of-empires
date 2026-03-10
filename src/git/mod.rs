@@ -203,7 +203,7 @@ impl GitWorktree {
     }
 
     /// Prune stale worktree entries whose directories no longer exist on disk.
-    fn prune_worktrees(&self) -> Result<()> {
+    pub fn prune_worktrees(&self) -> Result<()> {
         let output = std::process::Command::new("git")
             .args(["worktree", "prune"])
             .current_dir(&self.repo_path)
@@ -258,7 +258,7 @@ impl GitWorktree {
 
     /// Calculate a relative path from `base` to `target`.
     /// Returns None if the paths have no common ancestor.
-    fn diff_paths(target: &Path, base: &Path) -> Option<PathBuf> {
+    pub(crate) fn diff_paths(target: &Path, base: &Path) -> Option<PathBuf> {
         let mut target_components = target.components().peekable();
         let mut base_components = base.components().peekable();
 

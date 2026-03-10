@@ -10,7 +10,8 @@ use crate::session::{flatten_tree, list_profiles, repo_config, resolve_config, I
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HookTrustAction,
-    InfoDialog, NewSessionData, NewSessionDialog, RenameDialog, UnifiedDeleteDialog,
+    InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction, RenameDialog,
+    UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
@@ -310,6 +311,48 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.profile_picker_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.profile_picker_dialog = None;
+                }
+                DialogResult::Submit(action) => match action {
+                    ProfilePickerAction::Switch(name) => {
+                        self.profile_picker_dialog = None;
+                        return Some(Action::SwitchProfile(name));
+                    }
+                    ProfilePickerAction::Created(name) => {
+                        self.profile_picker_dialog = None;
+                        match crate::session::create_profile(&name) {
+                            Ok(()) => return Some(Action::SwitchProfile(name)),
+                            Err(e) => {
+                                self.info_dialog = Some(InfoDialog::new(
+                                    "Error",
+                                    &format!("Failed to create profile: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                    ProfilePickerAction::Deleted(name) => {
+                        match crate::session::delete_profile(&name) {
+                            Ok(()) => {
+                                self.show_profile_picker();
+                            }
+                            Err(e) => {
+                                self.profile_picker_dialog = None;
+                                self.info_dialog = Some(InfoDialog::new(
+                                    "Error",
+                                    &format!("Failed to delete profile: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                },
+            }
+            return None;
+        }
+
         // Search mode
         if self.search_active {
             match key.code {
@@ -348,9 +391,7 @@ impl HomeView {
                 self.show_help = true;
             }
             KeyCode::Char('P') => {
-                if let Some(next) = self.get_next_profile() {
-                    return Some(Action::SwitchProfile(next));
-                }
+                self.show_profile_picker();
             }
             KeyCode::Char('t') => {
                 self.view_mode = match self.view_mode {
@@ -362,7 +403,7 @@ impl HomeView {
                 // Toggle container/host terminal mode (only in Terminal view for sandboxed sessions)
                 if self.view_mode == ViewMode::Terminal {
                     if let Some(id) = &self.selected_session {
-                        if let Some(inst) = self.instance_map.get(id) {
+                        if let Some(inst) = self.get_instance(id) {
                             if inst.is_sandboxed() {
                                 let id = id.clone();
                                 self.toggle_terminal_mode(&id);
@@ -423,7 +464,7 @@ impl HomeView {
                 let project_path = self
                     .selected_session
                     .as_ref()
-                    .and_then(|id| self.instance_map.get(id))
+                    .and_then(|id| self.get_instance(id))
                     .map(|inst| inst.project_path.clone());
                 match SettingsView::new(self.storage.profile(), project_path) {
                     Ok(view) => self.settings_view = Some(view),
@@ -446,7 +487,7 @@ impl HomeView {
                     return None;
                 };
 
-                let Some(inst) = self.instance_map.get(session_id) else {
+                let Some(inst) = self.get_instance(session_id) else {
                     self.info_dialog =
                         Some(InfoDialog::new("Error", "Could not find session data."));
                     return None;
@@ -466,7 +507,7 @@ impl HomeView {
             }
             KeyCode::Char('x') => {
                 if let Some(session_id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(session_id) {
+                    if let Some(inst) = self.get_instance(session_id) {
                         if inst.status == Status::Stopped || inst.status == Status::Deleting {
                             return None;
                         }
@@ -487,7 +528,7 @@ impl HomeView {
                     return None;
                 }
                 if let Some(session_id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(session_id) {
+                    if let Some(inst) = self.get_instance(session_id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
@@ -539,7 +580,7 @@ impl HomeView {
             }
             KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
@@ -592,7 +633,7 @@ impl HomeView {
             }
             KeyCode::Enter => {
                 if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
@@ -600,7 +641,7 @@ impl HomeView {
                     return match self.view_mode {
                         ViewMode::Agent => Some(Action::AttachSession(id.clone())),
                         ViewMode::Terminal => {
-                            let terminal_mode = if let Some(inst) = self.instance_map.get(id) {
+                            let terminal_mode = if let Some(inst) = self.get_instance(id) {
                                 if inst.is_sandboxed() {
                                     self.get_terminal_mode(id)
                                 } else {
@@ -701,10 +742,7 @@ impl HomeView {
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.group_tree.toggle_collapsed(path);
         self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
-        if let Err(e) = self
-            .storage
-            .save_with_groups(&self.instances, &self.group_tree)
-        {
+        if let Err(e) = self.save() {
             tracing::error!("Failed to save group state: {}", e);
         }
     }
@@ -736,7 +774,7 @@ impl HomeView {
         for (idx, item) in self.flat_items.iter().enumerate() {
             let haystack = match item {
                 Item::Session { id, .. } => {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         format!("{} {}", inst.title, inst.project_path)
                     } else {
                         continue;
@@ -790,7 +828,7 @@ impl HomeView {
         for (idx, item) in self.flat_items.iter().enumerate() {
             let haystack = match item {
                 Item::Session { id, .. } => {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         format!("{} {}", inst.title, inst.project_path)
                     } else {
                         continue;

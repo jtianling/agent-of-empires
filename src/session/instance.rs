@@ -159,6 +159,10 @@ impl Instance {
             .unwrap_or(true)
     }
 
+    pub fn expects_shell(&self) -> bool {
+        crate::tmux::utils::is_shell_command(self.get_tool_command())
+    }
+
     pub fn get_tool_command(&self) -> &str {
         if self.command.is_empty() {
             crate::agents::get_agent(&self.tool)
@@ -324,9 +328,7 @@ impl Instance {
             None
         } else {
             // Start with global+profile hooks as the base
-            let profile = super::config::Config::load()
-                .map(|c| c.default_profile)
-                .unwrap_or_else(|_| "default".to_string());
+            let profile = super::config::resolve_default_profile();
             let mut resolved_on_launch = super::profile_config::resolve_config(&profile)
                 .map(|c| c.hooks.on_launch)
                 .unwrap_or_default();
@@ -348,6 +350,22 @@ impl Instance {
             }
         };
 
+        // Install status-detection hooks for agents that support them
+        let agent = crate::agents::get_agent(&self.tool);
+        if let Some(hook_cfg) = agent.and_then(|a| a.hook_config.as_ref()) {
+            if self.is_sandboxed() {
+                // For sandboxed sessions, hooks are installed via build_container_config
+            } else {
+                // Install hooks in the user's home directory settings
+                if let Some(home) = dirs::home_dir() {
+                    let settings_path = home.join(hook_cfg.settings_rel_path);
+                    if let Err(e) = crate::hooks::install_hooks(&settings_path) {
+                        tracing::warn!("Failed to install agent hooks: {}", e);
+                    }
+                }
+            }
+        }
+
         let cmd = if self.is_sandboxed() {
             let container = self.get_container_for_instance()?;
             // Run on_launch hooks inside the container
@@ -365,7 +383,6 @@ impl Instance {
             }
 
             let sandbox = self.sandbox_info.as_ref().unwrap();
-            let agent = crate::agents::get_agent(&self.tool);
             let base_cmd = if self.extra_args.is_empty() {
                 self.get_tool_command().to_string()
             } else {
@@ -395,12 +412,10 @@ impl Instance {
                 }
             }
 
-            let env_args = build_docker_env_args(sandbox);
-            let env_part = if env_args.is_empty() {
-                String::new()
-            } else {
-                format!("{} ", env_args)
-            };
+            let mut env_args = build_docker_env_args(sandbox);
+            // Pass AOE_INSTANCE_ID into the container
+            env_args = format!("{} -e AOE_INSTANCE_ID={}", env_args, self.id);
+            let env_part = format!("{} ", env_args);
             Some(wrap_command_ignore_suspend(
                 &container.exec_command(Some(&env_part), &tool_cmd),
             ))
@@ -414,6 +429,9 @@ impl Instance {
                 }
             }
 
+            // Track whether this agent supports hooks (needs AOE_INSTANCE_ID)
+            let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
+
             if self.command.is_empty() {
                 crate::agents::get_agent(&self.tool)
                     .filter(|a| a.supports_host_launch)
@@ -423,6 +441,9 @@ impl Instance {
                             cmd = format!("{} {}", cmd, self.extra_args);
                         }
                         let mut env_vars: Vec<(&str, &str)> = Vec::new();
+                        if needs_instance_id {
+                            env_vars.push(("AOE_INSTANCE_ID", &self.id));
+                        }
                         if self.is_yolo_mode() {
                             if let Some(ref yolo) = a.yolo {
                                 match yolo {
@@ -444,6 +465,9 @@ impl Instance {
                 }
                 let agent = crate::agents::get_agent(&self.tool);
                 let mut env_vars: Vec<(&str, &str)> = Vec::new();
+                if needs_instance_id {
+                    env_vars.push(("AOE_INSTANCE_ID", &self.id));
+                }
                 if self.is_yolo_mode() {
                     if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                         match yolo {
@@ -530,6 +554,7 @@ impl Instance {
             self.sandbox_info.as_ref().unwrap(),
             &self.tool,
             self.is_yolo_mode(),
+            &self.id,
         )
     }
 
@@ -570,6 +595,9 @@ impl Instance {
                 container.stop()?;
             }
         }
+
+        crate::hooks::cleanup_hook_status_dir(&self.id);
+
         Ok(())
     }
 
@@ -610,7 +638,19 @@ impl Instance {
             return;
         }
 
-        // Detect status from pane content
+        // Check hook-based status first (more reliable than tmux pane parsing)
+        if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
+            tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
+            self.status = if session.is_pane_dead() {
+                Status::Error
+            } else {
+                hook_status
+            };
+            self.last_error = None;
+            return;
+        }
+
+        // Fall back to tmux pane content detection
         let detected = match session.detect_status(&self.tool) {
             Ok(status) => status,
             Err(_) => Status::Idle,
@@ -622,15 +662,16 @@ impl Instance {
             self.has_custom_command(),
             detected
         );
+        let is_shell_stale = || !self.expects_shell() && session.is_pane_running_shell();
         self.status = match detected {
             Status::Idle if self.has_custom_command() => {
-                if session.is_pane_dead() {
+                if session.is_pane_dead() || is_shell_stale() {
                     Status::Error
                 } else {
                     Status::Unknown
                 }
             }
-            Status::Idle if session.is_pane_dead() => Status::Error,
+            Status::Idle if session.is_pane_dead() || is_shell_stale() => Status::Error,
             other => other,
         };
 
@@ -1071,6 +1112,23 @@ mod tests {
         inst.tool = "unknown_agent".to_string();
         inst.command = "some-binary".to_string();
         assert!(inst.has_custom_command());
+    }
+
+    #[test]
+    fn test_expects_shell() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        assert!(!inst.expects_shell());
+
+        inst.tool = "unknown-tool".to_string();
+        inst.command = String::new();
+        assert!(inst.expects_shell());
+
+        inst.tool = "claude".to_string();
+        inst.command = "bash".to_string();
+        assert!(inst.expects_shell());
+
+        inst.command = "my-agent".to_string();
+        assert!(!inst.expects_shell());
     }
 
     #[test]
