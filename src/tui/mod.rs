@@ -91,6 +91,14 @@ pub async fn run(profile: &str) -> Result<()> {
         }
     }
 
+    // If running inside tmux, temporarily enable mouse so crossterm receives
+    // proper mouse events instead of tmux converting scroll to arrow keys.
+    let saved_tmux_mouse = if std::env::var("TMUX").is_ok() {
+        enable_tmux_mouse()
+    } else {
+        None
+    };
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -107,6 +115,11 @@ pub async fn run(profile: &str) -> Result<()> {
         crate::tmux::utils::cleanup_nested_detach_binding();
     }
 
+    // Restore tmux mouse setting
+    if let Some(original) = saved_tmux_mouse {
+        restore_tmux_mouse(&original);
+    }
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -117,4 +130,40 @@ pub async fn run(profile: &str) -> Result<()> {
     terminal.show_cursor()?;
 
     result
+}
+
+/// Enable tmux mouse mode for the current session, returning the previous value
+/// so it can be restored on exit.
+fn enable_tmux_mouse() -> Option<String> {
+    use std::process::Command;
+
+    // Query current mouse setting
+    let original = Command::new("tmux")
+        .args(["show-option", "-gv", "mouse"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Enable mouse
+    let _ = Command::new("tmux")
+        .args(["set-option", "-g", "mouse", "on"])
+        .output();
+
+    Some(original)
+}
+
+/// Restore the original tmux mouse setting.
+fn restore_tmux_mouse(original: &str) {
+    use std::process::Command;
+
+    if original == "on" {
+        // Already was on, nothing to restore
+        return;
+    }
+
+    let _ = Command::new("tmux")
+        .args(["set-option", "-g", "mouse", original])
+        .output();
 }
