@@ -102,6 +102,11 @@ pub async fn run(profile: &str) -> Result<()> {
     let mut app = App::new(profile, available_tools)?;
     let result = app.run(&mut terminal).await;
 
+    // Clean up the nested-detach tmux hook if we set one up during this run.
+    if std::env::var("TMUX").is_ok() {
+        crate::tmux::utils::cleanup_nested_detach_binding();
+    }
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(

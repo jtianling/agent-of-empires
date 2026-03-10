@@ -402,13 +402,47 @@ pub fn user_has_tmux_config() -> bool {
     false
 }
 
+/// Check if the user's tmux config file contains status bar related settings.
+/// Looks for common status bar directives like `status-right`, `status-left`,
+/// `status-style`, `status-format`, `status-position`, or `set.*status `.
+fn user_tmux_config_has_status_bar() -> bool {
+    let paths: Vec<std::path::PathBuf> = if let Some(home) = dirs::home_dir() {
+        vec![
+            home.join(".tmux.conf"),
+            home.join(".config").join("tmux").join("tmux.conf"),
+        ]
+    } else {
+        return false;
+    };
+
+    for path in paths {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if trimmed.contains("status-right")
+                    || trimmed.contains("status-left")
+                    || trimmed.contains("status-style")
+                    || trimmed.contains("status-format")
+                    || trimmed.contains("status-position")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Determine if status bar styling should be applied based on config and environment.
 pub fn should_apply_tmux_status_bar() -> bool {
     let config = Config::load().unwrap_or_default();
     match config.tmux.status_bar {
         TmuxStatusBarMode::Enabled => true,
         TmuxStatusBarMode::Disabled => false,
-        TmuxStatusBarMode::Auto => !user_has_tmux_config(),
+        TmuxStatusBarMode::Auto => !user_tmux_config_has_status_bar(),
     }
 }
 

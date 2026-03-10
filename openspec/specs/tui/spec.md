@@ -103,6 +103,7 @@ The diff view shows git changes for the selected session's project:
 - **FR-001**: The TUI MUST launch without arguments (`aoe` with no subcommand).
 - **FR-002**: Session status MUST update in real-time via background polling.
 - **FR-003**: Attaching to a session MUST detach from the TUI and attach the terminal to the tmux session.
+- **FR-003a**: When AoE runs inside an existing tmux session, `Ctrl+b d` inside a managed session (`aoe_*`) MUST switch back to the previous session rather than fully detaching the tmux client. If no previous session exists, it SHALL fall back to normal detach. This binding MUST revert to default `detach-client` when the user switches to a non-AoE session, and the hook MUST be cleaned up when the TUI exits.
 - **FR-004**: The session list MUST support collapsible group hierarchies.
 - **FR-005**: The diff view MUST open files in `$EDITOR` (or a sensible default).
 - **FR-006**: Settings MUST save immediately on field change (no explicit "save" button except Esc).

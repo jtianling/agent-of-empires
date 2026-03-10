@@ -101,6 +101,8 @@ pub struct NewSessionData {
     pub extra_args: String,
     /// Command override for the agent binary (replaces the default binary)
     pub command_override: String,
+    /// Whether to reuse an existing worktree instead of failing
+    pub reuse_worktree: bool,
 }
 
 /// Spinner frames for loading animation
@@ -172,6 +174,9 @@ pub struct NewSessionDialog {
     /// Inline confirmation for creating a non-existent directory.
     /// None = inactive, Some(true) = Yes selected, Some(false) = No selected.
     pub(super) confirm_create_dir: Option<bool>,
+    /// Whether the user has been warned about reusing an existing worktree.
+    /// On first Enter the warning is shown; on second Enter the session is created with reuse.
+    pub(super) confirm_reuse_worktree: bool,
 }
 
 /// Shared logic for handling key events in an editable list (env keys or env values).
@@ -393,6 +398,7 @@ impl NewSessionDialog {
             path_ghost: None,
             group_ghost: None,
             confirm_create_dir: None,
+            confirm_reuse_worktree: false,
         }
     }
 
@@ -593,6 +599,7 @@ impl NewSessionDialog {
             path_ghost: None,
             group_ghost: None,
             confirm_create_dir: None,
+            confirm_reuse_worktree: false,
         }
     }
 
@@ -645,6 +652,7 @@ impl NewSessionDialog {
             path_ghost: None,
             group_ghost: None,
             confirm_create_dir: None,
+            confirm_reuse_worktree: false,
         }
     }
 
@@ -694,6 +702,7 @@ impl NewSessionDialog {
         if self.branch_picker.is_active() {
             if let ListPickerResult::Selected(value) = self.branch_picker.handle_key(key) {
                 self.worktree_branch = Input::new(value);
+                self.confirm_reuse_worktree = false;
             }
             return DialogResult::Continue;
         }
@@ -807,6 +816,18 @@ impl NewSessionDialog {
                     self.confirm_create_dir = Some(false);
                     return DialogResult::Continue;
                 }
+                // Check for worktree reuse: if a worktree branch is specified,
+                // compute the path and warn once before allowing reuse.
+                if !self.confirm_reuse_worktree {
+                    if let Some(existing_path) = self.check_worktree_exists() {
+                        self.confirm_reuse_worktree = true;
+                        self.error_message = Some(format!(
+                            "Worktree already exists at {}. Press Enter again to reuse it.",
+                            existing_path
+                        ));
+                        return DialogResult::Continue;
+                    }
+                }
                 self.build_submit_result()
             }
             KeyCode::Tab | KeyCode::Down => {
@@ -912,6 +933,7 @@ impl NewSessionDialog {
                     self.current_input_mut()
                         .handle_event(&crossterm::event::Event::Key(key));
                     self.error_message = None;
+                    self.confirm_reuse_worktree = false;
                     if self.focused_field == self.path_field() {
                         self.path_invalid_flash_until = None;
                         self.recompute_path_ghost();
@@ -1103,6 +1125,44 @@ impl NewSessionDialog {
         }
     }
 
+    /// Check if the worktree path for the current branch already exists on disk.
+    /// Returns `Some(path_display)` if it exists, `None` otherwise.
+    fn check_worktree_exists(&self) -> Option<String> {
+        use crate::git::GitWorktree;
+
+        let branch = self.worktree_branch.value().trim();
+        if branch.is_empty() {
+            return None;
+        }
+
+        let path_str = self.path.value().trim().to_string();
+        let resolved = path_input::expand_tilde(&path_str);
+        let path = std::path::PathBuf::from(&resolved);
+
+        if !GitWorktree::is_git_repo(&path) {
+            return None;
+        }
+
+        let main_repo_path = GitWorktree::find_main_repo(&path).ok()?;
+        let git_wt = GitWorktree::new(main_repo_path.clone()).ok()?;
+
+        let config = resolve_config(self.selected_profile()).unwrap_or_default();
+        let is_bare = GitWorktree::is_bare_repo(&main_repo_path);
+        let template = if is_bare {
+            &config.worktree.bare_repo_path_template
+        } else {
+            &config.worktree.path_template
+        };
+
+        // Use a dummy session_id since we just need to check existence
+        let worktree_path = git_wt.compute_path(branch, template, "00000000").ok()?;
+        if worktree_path.exists() {
+            Some(worktree_path.display().to_string())
+        } else {
+            None
+        }
+    }
+
     fn build_submit_result(&self) -> DialogResult<NewSessionData> {
         let title_value = self.title.value().trim();
         let final_title = if title_value.is_empty() {
@@ -1135,6 +1195,7 @@ impl NewSessionDialog {
             },
             extra_args: self.extra_args.value().trim().to_string(),
             command_override: self.command_override.value().trim().to_string(),
+            reuse_worktree: self.confirm_reuse_worktree,
         })
     }
 

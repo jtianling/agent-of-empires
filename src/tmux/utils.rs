@@ -1,5 +1,58 @@
 //! tmux utility functions
 
+use std::process::Command;
+
+/// Hook index used for the aoe-specific `client-session-changed` hook.
+/// A high index avoids collisions with user-defined hooks.
+const AOE_HOOK: &str = "client-session-changed[99]";
+
+/// Sets up a tmux hook that dynamically rebinds `Ctrl+b d` based on the
+/// current session:
+///
+/// - **aoe sessions** (`aoe_*`): switch back to the previous session
+///   (falls back to detach if there is no previous session).
+/// - **Other sessions**: normal `detach-client` behavior is restored.
+///
+/// Uses a `client-session-changed` hook so the binding is only active while
+/// inside an aoe session and automatically reverts when switching away.
+pub fn setup_nested_detach_binding() {
+    // Install a hook that rebinds `d` whenever the active session changes.
+    Command::new("tmux")
+        .args([
+            "set-hook",
+            "-g",
+            AOE_HOOK,
+            r#"if-shell "tmux display-message -p '#{session_name}' | grep -q '^aoe_'" "bind-key d run-shell 'tmux switch-client -l 2>/dev/null || tmux detach-client'" "bind-key d detach-client""#,
+        ])
+        .output()
+        .ok();
+
+    // Apply the binding immediately for the current aoe session.
+    // The hook only fires on *subsequent* session switches.
+    Command::new("tmux")
+        .args([
+            "bind-key",
+            "d",
+            "run-shell",
+            r#"tmux switch-client -l 2>/dev/null || tmux detach-client"#,
+        ])
+        .output()
+        .ok();
+}
+
+/// Removes the hook installed by [`setup_nested_detach_binding`] and restores
+/// the default `Ctrl+b d` binding.
+pub fn cleanup_nested_detach_binding() {
+    Command::new("tmux")
+        .args(["set-hook", "-gu", AOE_HOOK])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "d", "detach-client"])
+        .output()
+        .ok();
+}
+
 pub fn strip_ansi(content: &str) -> String {
     let mut result = content.to_string();
 

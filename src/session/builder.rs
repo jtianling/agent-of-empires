@@ -33,6 +33,8 @@ pub struct InstanceParams {
     pub extra_args: String,
     /// Command override for the agent binary (replaces the default binary)
     pub command_override: String,
+    /// Whether to reuse an existing worktree instead of failing
+    pub reuse_worktree: bool,
 }
 
 /// Result of building an instance, tracking what was created for cleanup purposes.
@@ -110,7 +112,51 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
                 let session_id = uuid::Uuid::new_v4().to_string();
                 let worktree_path = git_wt.compute_path(branch, template, &session_id[..8])?;
 
-                git_wt.create_worktree(branch, &worktree_path, false)?;
+                if worktree_path.exists() && params.reuse_worktree {
+                    final_path = worktree_path.to_string_lossy().to_string();
+                    worktree_info = Some(WorktreeInfo {
+                        branch: branch.clone(),
+                        main_repo_path: main_repo_path.to_string_lossy().to_string(),
+                        managed_by_aoe: false,
+                        created_at: Utc::now(),
+                        cleanup_on_delete: false,
+                    });
+                } else {
+                    git_wt.create_worktree(branch, &worktree_path, false)?;
+
+                    final_path = worktree_path.to_string_lossy().to_string();
+                    created_worktree = Some(CreatedWorktree {
+                        path: worktree_path,
+                        main_repo_path: main_repo_path.clone(),
+                    });
+                    worktree_info = Some(WorktreeInfo {
+                        branch: branch.clone(),
+                        main_repo_path: main_repo_path.to_string_lossy().to_string(),
+                        managed_by_aoe: true,
+                        created_at: Utc::now(),
+                        cleanup_on_delete: true,
+                    });
+                }
+            }
+        } else {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let worktree_path = git_wt.compute_path(branch, template, &session_id[..8])?;
+
+            if worktree_path.exists() {
+                if params.reuse_worktree {
+                    final_path = worktree_path.to_string_lossy().to_string();
+                    worktree_info = Some(WorktreeInfo {
+                        branch: branch.clone(),
+                        main_repo_path: main_repo_path.to_string_lossy().to_string(),
+                        managed_by_aoe: false,
+                        created_at: Utc::now(),
+                        cleanup_on_delete: false,
+                    });
+                } else {
+                    bail!("Worktree already exists at {}", worktree_path.display());
+                }
+            } else {
+                git_wt.create_worktree(branch, &worktree_path, true)?;
 
                 final_path = worktree_path.to_string_lossy().to_string();
                 created_worktree = Some(CreatedWorktree {
@@ -125,28 +171,6 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
                     cleanup_on_delete: true,
                 });
             }
-        } else {
-            let session_id = uuid::Uuid::new_v4().to_string();
-            let worktree_path = git_wt.compute_path(branch, template, &session_id[..8])?;
-
-            if worktree_path.exists() {
-                bail!("Worktree already exists at {}", worktree_path.display());
-            }
-
-            git_wt.create_worktree(branch, &worktree_path, true)?;
-
-            final_path = worktree_path.to_string_lossy().to_string();
-            created_worktree = Some(CreatedWorktree {
-                path: worktree_path,
-                main_repo_path: main_repo_path.clone(),
-            });
-            worktree_info = Some(WorktreeInfo {
-                branch: branch.clone(),
-                main_repo_path: main_repo_path.to_string_lossy().to_string(),
-                managed_by_aoe: true,
-                created_at: Utc::now(),
-                cleanup_on_delete: true,
-            });
         }
     }
 

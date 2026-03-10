@@ -65,6 +65,10 @@ pub struct AddArgs {
     /// Override the agent binary command
     #[arg(long)]
     cmd_override: Option<String>,
+
+    /// Reuse an existing worktree instead of failing (use with --worktree)
+    #[arg(long)]
+    reuse_worktree: bool,
 }
 
 pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
@@ -109,27 +113,39 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         let worktree_path = git_wt.compute_path(branch, template, session_id_short)?;
 
         if worktree_path.exists() {
-            bail!(
-                "Worktree already exists at {}\nTip: Use 'aoe add {}' to add the existing worktree",
-                worktree_path.display(),
-                worktree_path.display()
-            );
+            if args.reuse_worktree {
+                println!("Reusing existing worktree at: {}", worktree_path.display());
+                path = worktree_path;
+                worktree_info_opt = Some(WorktreeInfo {
+                    branch: branch.to_string(),
+                    main_repo_path: main_repo_path.to_string_lossy().to_string(),
+                    managed_by_aoe: false,
+                    created_at: Utc::now(),
+                    cleanup_on_delete: false,
+                });
+            } else {
+                bail!(
+                    "Worktree already exists at {}\nTip: Use 'aoe add --worktree {} --reuse-worktree' to reuse it",
+                    worktree_path.display(),
+                    branch
+                );
+            }
+        } else {
+            println!("Creating worktree at: {}", worktree_path.display());
+            git_wt.create_worktree(branch, &worktree_path, args.create_branch)?;
+
+            path = worktree_path;
+
+            worktree_info_opt = Some(WorktreeInfo {
+                branch: branch.to_string(),
+                main_repo_path: main_repo_path.to_string_lossy().to_string(),
+                managed_by_aoe: true,
+                created_at: Utc::now(),
+                cleanup_on_delete: true,
+            });
+
+            println!("✓ Worktree created successfully");
         }
-
-        println!("Creating worktree at: {}", worktree_path.display());
-        git_wt.create_worktree(branch, &worktree_path, args.create_branch)?;
-
-        path = worktree_path;
-
-        worktree_info_opt = Some(WorktreeInfo {
-            branch: branch.to_string(),
-            main_repo_path: main_repo_path.to_string_lossy().to_string(),
-            managed_by_aoe: true,
-            created_at: Utc::now(),
-            cleanup_on_delete: true,
-        });
-
-        println!("✓ Worktree created successfully");
     }
 
     let storage = Storage::new(profile)?;

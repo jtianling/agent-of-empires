@@ -112,6 +112,7 @@ impl CreationPoller {
             extra_env: data.extra_env,
             extra_args: data.extra_args,
             command_override: data.command_override,
+            reuse_worktree: data.reuse_worktree,
         };
 
         let build_result = match builder::build_instance(params, &existing_titles) {

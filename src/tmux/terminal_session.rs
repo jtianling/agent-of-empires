@@ -108,7 +108,9 @@ impl TerminalSession {
                 .args(["switch-client", "-t", &self.name])
                 .status()?;
 
-            if !status.success() {
+            if status.success() {
+                super::utils::setup_nested_detach_binding();
+            } else {
                 let status = Command::new("tmux")
                     .args(["attach-session", "-t", &self.name])
                     .status()?;
@@ -255,7 +257,9 @@ impl ContainerTerminalSession {
                 .args(["switch-client", "-t", &self.name])
                 .status()?;
 
-            if !status.success() {
+            if status.success() {
+                super::utils::setup_nested_detach_binding();
+            } else {
                 let status = Command::new("tmux")
                     .args(["attach-session", "-t", &self.name])
                     .status()?;

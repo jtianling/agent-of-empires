@@ -141,7 +141,11 @@ impl Session {
                 .args(["switch-client", "-t", &self.name])
                 .status()?;
 
-            if !status.success() {
+            if status.success() {
+                // Rebind Ctrl+b d so pressing it inside a managed session returns
+                // to the previous session rather than fully detaching the client.
+                super::utils::setup_nested_detach_binding();
+            } else {
                 // Fall back to attach-session if switch-client fails.
                 // This handles cases where TMUX env var is inherited but we're
                 // not actually inside a tmux client (e.g., terminal spawned

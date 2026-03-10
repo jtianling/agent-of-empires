@@ -1136,3 +1136,66 @@ fn test_sandbox_config_mode_enter_on_image_returns_to_main() {
     assert!(matches!(result, DialogResult::Continue));
     assert!(!dialog.sandbox_config_mode);
 }
+
+// --- Worktree reuse confirmation tests ---
+
+#[test]
+fn test_reuse_worktree_second_enter_submits_with_flag() {
+    let mut dialog = single_tool_dialog();
+    dialog.worktree_branch = Input::new("feat/test".to_string());
+    // Simulate the state after first Enter showed the warning
+    dialog.confirm_reuse_worktree = true;
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    match result {
+        DialogResult::Submit(data) => {
+            assert!(data.reuse_worktree);
+            assert_eq!(data.worktree_branch, Some("feat/test".to_string()));
+        }
+        _ => panic!("Expected Submit on second Enter"),
+    }
+}
+
+#[test]
+fn test_reuse_worktree_flag_false_when_not_confirmed() {
+    let mut dialog = single_tool_dialog();
+    dialog.worktree_branch = Input::new("feat/test".to_string());
+    // confirm_reuse_worktree is false by default
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    match result {
+        DialogResult::Submit(data) => {
+            assert!(!data.reuse_worktree);
+        }
+        _ => panic!("Expected Submit"),
+    }
+}
+
+#[test]
+fn test_reuse_worktree_confirmation_cleared_on_text_input() {
+    let mut dialog = single_tool_dialog();
+    // worktree field: title=0, path=1, yolo=2, worktree=3
+    dialog.focused_field = 3;
+    dialog.confirm_reuse_worktree = true;
+    dialog.error_message = Some("Worktree exists".to_string());
+
+    dialog.handle_key(key(KeyCode::Char('a')));
+
+    assert!(!dialog.confirm_reuse_worktree);
+    assert!(dialog.error_message.is_none());
+}
+
+#[test]
+fn test_reuse_worktree_confirmation_cleared_on_branch_picker_select() {
+    let mut dialog = single_tool_dialog();
+    dialog.confirm_reuse_worktree = true;
+    dialog
+        .branch_picker
+        .activate(vec!["main".to_string(), "dev".to_string()]);
+
+    // Select first item with Enter
+    dialog.handle_key(key(KeyCode::Enter));
+
+    assert!(!dialog.confirm_reuse_worktree);
+    assert_eq!(dialog.worktree_branch.value(), "main");
+}

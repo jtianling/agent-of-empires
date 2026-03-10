@@ -422,6 +422,7 @@ impl Instance {
                         if !self.extra_args.is_empty() {
                             cmd = format!("{} {}", cmd, self.extra_args);
                         }
+                        let mut env_vars: Vec<(&str, &str)> = Vec::new();
                         if self.is_yolo_mode() {
                             if let Some(ref yolo) = a.yolo {
                                 match yolo {
@@ -429,32 +430,33 @@ impl Instance {
                                         cmd = format!("{} {}", cmd, flag);
                                     }
                                     crate::agents::YoloMode::EnvVar(key, value) => {
-                                        cmd = format!("{}={} {}", key, value, cmd);
+                                        env_vars.push((key, value));
                                     }
                                 }
                             }
                         }
-                        wrap_command_ignore_suspend(&cmd)
+                        wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
                     })
             } else {
                 let mut cmd = self.command.clone();
                 if !self.extra_args.is_empty() {
                     cmd = format!("{} {}", cmd, self.extra_args);
                 }
+                let agent = crate::agents::get_agent(&self.tool);
+                let mut env_vars: Vec<(&str, &str)> = Vec::new();
                 if self.is_yolo_mode() {
-                    let agent = crate::agents::get_agent(&self.tool);
                     if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                         match yolo {
                             crate::agents::YoloMode::CliFlag(flag) => {
                                 cmd = format!("{} {}", cmd, flag);
                             }
                             crate::agents::YoloMode::EnvVar(key, value) => {
-                                cmd = format!("{}={} {}", key, value, cmd);
+                                env_vars.push((key, value));
                             }
                         }
                     }
                 }
-                Some(wrap_command_ignore_suspend(&cmd))
+                Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
             }
         };
 
@@ -661,9 +663,25 @@ fn generate_id() -> String {
 /// Uses POSIX-standard `stty susp undef` which works on both Linux and macOS.
 /// Single quotes in `cmd` are escaped with the `'\''` technique to prevent
 /// breaking out of the outer `bash -c '...'` wrapper.
+///
+/// Environment variables are exported before `exec` because `exec VAR=val cmd`
+/// is not portable and fails in many shells.
 fn wrap_command_ignore_suspend(cmd: &str) -> String {
+    wrap_command_ignore_suspend_with_env(cmd, &[])
+}
+
+fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) -> String {
     let escaped = cmd.replace('\'', "'\\''");
-    format!("bash -c 'stty susp undef; exec {}'", escaped)
+    // Place env vars before `bash -c` so they're parsed at the outer shell
+    // level, avoiding quoting conflicts with the inner single-quoted string.
+    let env_prefix = env_vars
+        .iter()
+        .map(|(k, v)| {
+            let escaped_v = v.replace('\'', "'\\''");
+            format!("{}='{}' ", k, escaped_v)
+        })
+        .collect::<String>();
+    format!("{}bash -c 'stty susp undef; exec {}'", env_prefix, escaped)
 }
 
 #[cfg(test)]
@@ -800,6 +818,35 @@ mod tests {
         inst.tool = "claude".to_string();
         inst.command = "claude --resume abc123".to_string();
         assert_eq!(inst.get_tool_command(), "claude --resume abc123");
+    }
+
+    #[test]
+    fn test_wrap_command_ignore_suspend_basic() {
+        assert_eq!(
+            wrap_command_ignore_suspend("opencode"),
+            "bash -c 'stty susp undef; exec opencode'"
+        );
+    }
+
+    #[test]
+    fn test_wrap_command_ignore_suspend_with_env() {
+        let result = wrap_command_ignore_suspend_with_env(
+            "opencode",
+            &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)],
+        );
+        // Env vars are placed before bash -c, not inside the single-quoted string
+        assert_eq!(
+            result,
+            r#"OPENCODE_PERMISSION='{"*":"allow"}' bash -c 'stty susp undef; exec opencode'"#
+        );
+    }
+
+    #[test]
+    fn test_wrap_command_ignore_suspend_with_env_no_vars() {
+        assert_eq!(
+            wrap_command_ignore_suspend_with_env("claude", &[]),
+            wrap_command_ignore_suspend("claude"),
+        );
     }
 
     // Tests for Status enum
