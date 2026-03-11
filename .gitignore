@@ -1,6 +1,5 @@
 # Claude artifacts (allow .claude/skills/ for cross-agent skills)
 .claude/*
-!.claude/skills/
 # Rust build artifacts
 /target/
 # Documentation build output
@@ -57,3 +56,4 @@ sdd-*/
 
 debug.log
 website/.next/
+test/
