@@ -56,6 +56,9 @@ pub struct AgentDef {
     /// hooks into the agent's settings file so status is written to a file instead
     /// of being parsed from tmux pane content.
     pub hook_config: Option<AgentHookConfig>,
+    /// Whether this agent sets its own terminal/pane title via OSC 0.
+    /// When false, AoE manages the pane title based on detected status.
+    pub sets_own_title: bool,
 }
 
 pub const AGENTS: &[AgentDef] = &[
@@ -73,6 +76,7 @@ pub const AGENTS: &[AgentDef] = &[
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".claude/settings.json",
         }),
+        sets_own_title: true,
     },
     AgentDef {
         name: "opencode",
@@ -86,6 +90,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_opencode_status,
         container_env: &[],
         hook_config: None,
+        sets_own_title: false,
     },
     AgentDef {
         name: "vibe",
@@ -99,6 +104,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_vibe_status,
         container_env: &[],
         hook_config: None,
+        sets_own_title: false,
     },
     AgentDef {
         name: "codex",
@@ -114,6 +120,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_codex_status,
         container_env: &[],
         hook_config: None,
+        sets_own_title: false,
     },
     AgentDef {
         name: "gemini",
@@ -127,6 +134,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_gemini_status,
         container_env: &[],
         hook_config: None,
+        sets_own_title: true,
     },
     AgentDef {
         name: "shell",
@@ -140,6 +148,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_terminal_status,
         container_env: &[],
         hook_config: None,
+        sets_own_title: false,
     },
     AgentDef {
         name: "cursor",
@@ -155,6 +164,7 @@ pub const AGENTS: &[AgentDef] = &[
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".cursor/settings.json",
         }),
+        sets_own_title: false,
     },
 ];
 

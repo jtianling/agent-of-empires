@@ -28,6 +28,7 @@ pub struct AgentDef {
     pub detect_status: fn(&str) -> Status,  // parse pane content -> Status
     pub container_env: &'static [(&'static str, &'static str)],  // always-injected env vars
     pub hook_config: Option<HookConfig>,  // optional hook configuration
+    pub sets_own_title: bool,  // agent sets terminal/pane title via OSC 0
 }
 ```
 
@@ -47,15 +48,15 @@ EnvVar(key, value)   -- prepend env var to command (e.g. "OPENCODE_PERMISSION=..
 
 ## Registered Agents
 
-| Name | Binary | YOLO | Instruction Flag | Host Launch | Notes |
-|------|--------|------|-----------------|-------------|-------|
-| `claude` | `claude` | `--dangerously-skip-permissions` | `--append-system-prompt {}` | Yes | Default agent |
-| `opencode` | `opencode` | `OPENCODE_PERMISSION={"*":"allow"}` | None | No | Container-only |
-| `vibe` | `vibe` | `--agent auto-approve` | None | Yes | Detection: `vibe --version` |
-| `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--config developer_instructions={}` | Yes | |
-| `gemini` | `gemini` | `--approval-mode yolo` | None | Yes | |
-| `shell` | `shell` | None | None | Yes | Plain shell, no status detection. Alias: `terminal` |
-| `cursor` | `agent` | `--yolo` | None | Yes | Binary is `agent`, aliases: `["agent"]` |
+| Name | Binary | YOLO | Instruction Flag | Host Launch | Own Title | Notes |
+|------|--------|------|-----------------|-------------|-----------|-------|
+| `claude` | `claude` | `--dangerously-skip-permissions` | `--append-system-prompt {}` | Yes | Yes | Default agent |
+| `opencode` | `opencode` | `OPENCODE_PERMISSION={"*":"allow"}` | None | No | No | Container-only |
+| `vibe` | `vibe` | `--agent auto-approve` | None | Yes | No | Detection: `vibe --version` |
+| `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--config developer_instructions={}` | Yes | No | |
+| `gemini` | `gemini` | `--approval-mode yolo` | None | Yes | Yes | |
+| `shell` | `shell` | None | None | Yes | No | Plain shell, no status detection. Alias: `terminal` |
+| `cursor` | `agent` | `--yolo` | None | Yes | No | Binary is `agent`, aliases: `["agent"]` |
 
 ## Name Resolution
 
@@ -81,6 +82,8 @@ Agents may declare env vars that are always injected into container sessions:
 - **FR-005**: The `instruction_flag` template MUST use `{}` as the placeholder for the escaped instruction text.
 - **FR-006**: Agents with `supports_host_launch: false` MUST only be launched inside containers.
 - **FR-007**: Adding a new agent MUST NOT require changes outside `src/agents.rs` and `src/tmux/status_detection.rs`.
+- **FR-008**: Agents with `sets_own_title: false` SHALL have their tmux pane title managed by AoE based on detected status. AoE SHALL prefix the title with a waiting icon when the agent's status is `Waiting`.
+- **FR-009**: Agents with `sets_own_title: true` (claude, gemini) SHALL NOT have their pane title overwritten by AoE.
 
 ### Requirement: All agents MUST have a yolo mode configured
 All agents MUST have a `yolo` mode configured, except for non-agent tools (e.g., shell) where `yolo: None` is permitted.

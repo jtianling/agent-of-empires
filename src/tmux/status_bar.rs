@@ -84,6 +84,23 @@ pub fn apply_mouse_option(session_name: &str, enabled: bool) -> Result<()> {
     set_session_option(session_name, "mouse", value)
 }
 
+/// Set the pane title for a tmux session via `select-pane -T`.
+///
+/// This gives agents that don't set their own OSC 0 title (e.g. Codex CLI)
+/// a useful default instead of showing the hostname.
+fn set_initial_pane_title(session_name: &str, title: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["select-pane", "-t", session_name, "-T", title])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("Failed to set pane title for {}: {}", session_name, stderr);
+    }
+
+    Ok(())
+}
+
 /// Apply all configured tmux options to a session.
 /// This is a unified entry point that applies status bar styling and mouse settings.
 pub fn apply_all_tmux_options(
@@ -104,6 +121,13 @@ pub fn apply_all_tmux_options(
         if let Err(e) = apply_mouse_option(session_name, mouse_enabled) {
             tracing::debug!("Failed to apply tmux mouse option: {}", e);
         }
+    }
+
+    // Set an initial pane title so agents that don't write their own OSC 0
+    // (e.g. Codex CLI) show something meaningful instead of the hostname.
+    // Agents that do set titles (Claude Code, Gemini) will overwrite this.
+    if let Err(e) = set_initial_pane_title(session_name, title) {
+        tracing::debug!("Failed to set initial pane title: {}", e);
     }
 }
 

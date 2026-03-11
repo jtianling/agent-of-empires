@@ -4,12 +4,14 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::prelude::*;
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use super::home::{HomeView, TerminalMode};
 use super::styles::load_theme;
 use super::styles::Theme;
+use super::tab_title;
 use crate::session::{get_update_settings, load_config, save_config, Storage};
 use crate::tmux::AvailableTools;
 use crate::update::{check_for_update, UpdateInfo};
@@ -60,6 +62,10 @@ pub struct App {
     launch_dir: PathBuf,
     /// Last time a redraw was triggered by a tick event (to throttle animations)
     last_tick_redraw: std::time::Instant,
+    /// Last written tab title, for deduplication
+    last_tab_title: String,
+    /// Whether dynamic tab titles are enabled
+    dynamic_tab_title: bool,
 }
 
 /// Check if the app version changed and return the previous version if changelog should be shown.
@@ -110,6 +116,8 @@ impl App {
             save_config(&config)?;
         }
 
+        let dynamic_tab_title = config.app_state.dynamic_tab_title;
+
         Ok(Self {
             home,
             should_quit: false,
@@ -119,6 +127,8 @@ impl App {
             update_rx: None,
             launch_dir,
             last_tick_redraw: std::time::Instant::now(),
+            last_tab_title: String::new(),
+            dynamic_tab_title,
         })
     }
 
@@ -131,6 +141,13 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
+        // Set initial tab title
+        if self.dynamic_tab_title {
+            let title = tab_title::compute_title(self.home.tab_title_state());
+            let _ = tab_title::set_terminal_title(&mut io::stdout(), title);
+            self.last_tab_title = title.to_string();
+        }
+
         // Initial render
         terminal.clear()?;
         crossterm::execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
@@ -233,6 +250,15 @@ impl App {
                 self.home.reload()?;
                 last_disk_refresh = std::time::Instant::now();
                 refresh_needed = true;
+            }
+
+            // Update tab title if state changed
+            if self.dynamic_tab_title {
+                let title = tab_title::compute_title(self.home.tab_title_state());
+                if title != self.last_tab_title {
+                    let _ = tab_title::set_terminal_title(&mut io::stdout(), title);
+                    self.last_tab_title = title.to_string();
+                }
             }
 
             // Single draw after all refreshes to avoid flicker
@@ -420,6 +446,14 @@ impl App {
             }
             Action::SetTheme(name) => {
                 self.set_theme(&name);
+                // Refresh dynamic_tab_title in case it was toggled in settings
+                if let Ok(Some(config)) = load_config() {
+                    self.dynamic_tab_title = config.app_state.dynamic_tab_title;
+                    if !self.dynamic_tab_title {
+                        let _ = tab_title::clear_terminal_title(&mut io::stdout());
+                        self.last_tab_title.clear();
+                    }
+                }
             }
         }
         Ok(())

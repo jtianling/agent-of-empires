@@ -54,7 +54,13 @@ Detects Vibe-specific patterns.
 
 ### Codex
 
-Detects Codex CLI state indicators.
+Codex CLI uses a Rust-based ink TUI. Detection patterns are based on its actual terminal output:
+- `Running`: `esc to interrupt` in last lines, or bullet spinner `\u{2022}` / `\u{25e6}` at line start
+- `Waiting` (approval): `Press enter to confirm`, or `\u{203a}` (single right-pointing angle) followed by numbered options (`1.`, `2.`, `3.`)
+- `Waiting` (input): `\u{203a}` prompt character at the start of a line in the last 5 lines
+- `Idle`: none of the above match
+
+Note: Codex uses `\u{203a}` (not ASCII `>`) as its prompt, and `\u{2022}`/`\u{25e6}` (not braille) as its spinner.
 
 ### Gemini
 
@@ -82,6 +88,17 @@ Status polling runs as a background task in the TUI. The interval is configurabl
 The TUI re-renders when status changes are detected.
 
 For CLI `status` command, status is read from persisted storage (not live-polled).
+
+## Managed Pane Titles
+
+For agents that do not set their own terminal title via OSC 0 (`sets_own_title: false` in agent registry), the status poller actively manages the tmux pane title using `select-pane -T`:
+
+- `Status::Waiting` -> pane title set to `\u{270b} <session title>` (hand icon prefix)
+- Any other status -> pane title set to `<session title>` (plain)
+
+Title updates are deduplicated (only written when the desired title differs from the last set value) to avoid unnecessary tmux calls. An initial pane title is also set at session creation time via `apply_all_tmux_options`.
+
+Agents with `sets_own_title: true` (claude, gemini) set their own pane title and are not managed by this mechanism.
 
 ## Error Caching
 

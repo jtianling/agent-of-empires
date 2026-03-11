@@ -16,6 +16,8 @@ pub struct StatusUpdate {
     pub id: String,
     pub status: Status,
     pub last_error: Option<String>,
+    /// The pane title set by the agent via OSC 0 (e.g. "* Claude Code")
+    pub pane_title: Option<String>,
 }
 
 /// Background thread that polls session status without blocking the UI
@@ -49,6 +51,9 @@ impl StatusPoller {
         // Initialize to the past so the first check runs immediately
         let mut last_container_check = Instant::now() - container_check_interval;
         let mut container_states: HashMap<String, bool> = HashMap::new();
+        // Track pane titles we've set for agents that don't manage their own,
+        // so we only call tmux select-pane when the title actually changes.
+        let mut managed_pane_titles: HashMap<String, String> = HashMap::new();
 
         while let Ok(instances) = request_rx.recv() {
             crate::tmux::refresh_session_cache();
@@ -78,6 +83,7 @@ impl StatusPoller {
                                         id: inst.id,
                                         status: Status::Error,
                                         last_error: Some("Container is not running".to_string()),
+                                        pane_title: None,
                                     };
                                 }
                             }
@@ -86,10 +92,34 @@ impl StatusPoller {
 
                     inst.update_status();
 
+                    // Read the pane title the agent set via OSC 0
+                    let pane_title = inst.tmux_session().ok().and_then(|s| s.pane_title());
+
+                    // For agents that don't set their own title, manage the pane
+                    // title based on detected status (e.g. add ✋ when waiting).
+                    let agent_manages_title =
+                        crate::agents::get_agent(&inst.tool).is_some_and(|a| a.sets_own_title);
+                    if !agent_manages_title {
+                        let desired = match inst.status {
+                            Status::Waiting => format!("\u{270b} {}", inst.title),
+                            _ => inst.title.clone(),
+                        };
+                        let last = managed_pane_titles.get(&inst.id);
+                        if last.map_or(true, |prev| *prev != desired) {
+                            let session_name =
+                                crate::tmux::Session::generate_name(&inst.id, &inst.title);
+                            let _ = std::process::Command::new("tmux")
+                                .args(["select-pane", "-t", &session_name, "-T", &desired])
+                                .output();
+                            managed_pane_titles.insert(inst.id.clone(), desired);
+                        }
+                    }
+
                     StatusUpdate {
                         id: inst.id,
                         status: inst.status,
                         last_error: inst.last_error,
+                        pane_title,
                     }
                 })
                 .collect();

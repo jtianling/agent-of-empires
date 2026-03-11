@@ -694,6 +694,8 @@ impl SettingsView {
                     h.on_launch = None;
                 }
             }
+            // Global-only field, no profile override to clear
+            FieldKey::DynamicTabTitle => {}
         }
 
         // Sync repo_config when in Repo scope

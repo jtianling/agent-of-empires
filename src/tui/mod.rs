@@ -10,6 +10,7 @@ mod home;
 pub mod settings;
 mod status_poller;
 mod styles;
+pub(crate) mod tab_title;
 
 pub use app::*;
 
@@ -96,11 +97,27 @@ pub async fn run(profile: &str) -> Result<()> {
 
     // If running inside tmux, temporarily enable mouse so crossterm receives
     // proper mouse events instead of tmux converting scroll to arrow keys.
-    let saved_tmux_mouse = if std::env::var("TMUX").is_ok() {
-        enable_tmux_mouse()
+    // Also enable set-titles so OSC 0 title changes propagate to the outer
+    // terminal (e.g. Alacritty).
+    let (saved_tmux_mouse, saved_tmux_titles) = if std::env::var("TMUX").is_ok() {
+        (enable_tmux_mouse(), enable_tmux_titles())
     } else {
-        None
+        (None, None)
     };
+
+    // Install panic hook that clears the tab title and restores the terminal
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = tab_title::clear_terminal_title(&mut io::stdout());
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+        original_hook(info);
+    }));
 
     // Setup terminal
     enable_raw_mode()?;
@@ -122,6 +139,14 @@ pub async fn run(profile: &str) -> Result<()> {
     if let Some(original) = saved_tmux_mouse {
         restore_tmux_mouse(&original);
     }
+
+    // Restore tmux set-titles setting
+    if let Some(original) = saved_tmux_titles {
+        restore_tmux_titles(&original);
+    }
+
+    // Clear terminal tab title before restoring terminal
+    let _ = tab_title::clear_terminal_title(&mut io::stdout());
 
     // Restore terminal
     disable_raw_mode()?;
@@ -168,5 +193,65 @@ fn restore_tmux_mouse(original: &str) {
 
     let _ = Command::new("tmux")
         .args(["set-option", "-g", "mouse", original])
+        .output();
+}
+
+/// Saved tmux title settings for restoration on exit.
+struct TmuxTitleState {
+    set_titles: String,
+    set_titles_string: String,
+}
+
+/// Enable tmux `set-titles` and simplify `set-titles-string` to just `#T`
+/// (the pane title) so our OSC 0 title appears cleanly in the outer terminal.
+fn enable_tmux_titles() -> Option<TmuxTitleState> {
+    use std::process::Command;
+
+    let query = |opt: &str| -> String {
+        Command::new("tmux")
+            .args(["show-option", "-gv", opt])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    let state = TmuxTitleState {
+        set_titles: query("set-titles"),
+        set_titles_string: query("set-titles-string"),
+    };
+
+    let _ = Command::new("tmux")
+        .args(["set-option", "-g", "set-titles", "on"])
+        .output();
+
+    // Use just the pane title so our title shows cleanly (e.g. "✋ AoE")
+    // instead of the default format that buries it in tmux metadata.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-g", "set-titles-string", "#T"])
+        .output();
+
+    Some(state)
+}
+
+/// Restore the original tmux title settings.
+fn restore_tmux_titles(saved: &TmuxTitleState) {
+    use std::process::Command;
+
+    if saved.set_titles != "on" {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-g", "set-titles", &saved.set_titles])
+            .output();
+    }
+
+    // Always restore set-titles-string since we changed it
+    let _ = Command::new("tmux")
+        .args([
+            "set-option",
+            "-g",
+            "set-titles-string",
+            &saved.set_titles_string,
+        ])
         .output();
 }

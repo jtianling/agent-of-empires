@@ -247,8 +247,7 @@ pub fn detect_vibe_status(raw_content: &str) -> Status {
 }
 
 pub fn detect_codex_status(raw_content: &str) -> Status {
-    let content = raw_content.to_lowercase();
-    let lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<&str> = raw_content.lines().collect();
     let non_empty_lines: Vec<&str> = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
@@ -265,69 +264,44 @@ pub fn detect_codex_status(raw_content: &str) -> Status {
         .join("\n");
     let last_lines_lower = last_lines.to_lowercase();
 
-    // RUNNING: Codex shows "esc to interrupt" or similar when processing
-    if last_lines_lower.contains("esc to interrupt")
-        || last_lines_lower.contains("ctrl+c to interrupt")
-        || last_lines_lower.contains("working")
-        || last_lines_lower.contains("thinking")
-    {
+    // RUNNING: Codex shows "• Working (Xs • esc to interrupt)" while processing.
+    // The bullet spinner (U+2022) is Codex-specific and more reliable than
+    // matching the generic word "working" which appears in normal output.
+    if last_lines_lower.contains("esc to interrupt") {
         return Status::Running;
     }
-
-    for line in &lines {
-        for spinner in SPINNER_CHARS {
-            if line.contains(spinner) {
-                return Status::Running;
-            }
+    // Codex uses • (U+2022) / ◦ (U+25E6) as its spinner, not braille chars.
+    for line in non_empty_lines.iter().rev().take(10) {
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
+        if trimmed.starts_with('\u{2022}') || trimmed.starts_with('\u{25E6}') {
+            return Status::Running;
         }
     }
 
-    // WAITING: Approval prompts (Codex uses ask-for-approval modes)
-    let approval_prompts = [
-        "approve",
-        "allow",
-        "(y/n)",
-        "[y/n]",
-        "continue?",
-        "proceed?",
-        "execute?",
-        "run command?",
-    ];
-    for prompt in &approval_prompts {
-        if last_lines_lower.contains(prompt) {
-            return Status::Waiting;
-        }
-    }
-
-    // WAITING: Selection menus
-    if last_lines_lower.contains("enter to select") || last_lines_lower.contains("esc to cancel") {
+    // WAITING: Approval dialogs -- "Press enter to confirm or esc to cancel"
+    if last_lines_lower.contains("press enter to confirm") {
         return Status::Waiting;
     }
 
-    // WAITING: Numbered selection
-    for line in &lines {
-        let trimmed = line.trim();
-        if trimmed.starts_with("❯") && trimmed.len() > 2 {
-            let after_cursor = trimmed.get(3..).unwrap_or("").trim_start();
-            if after_cursor.starts_with("1.")
-                || after_cursor.starts_with("2.")
-                || after_cursor.starts_with("3.")
-            {
+    // WAITING: Approval selection list -- lines like "› 1. Yes, proceed (y)"
+    for line in non_empty_lines.iter().rev().take(15) {
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
+        if trimmed.starts_with('\u{203a}') {
+            let after = trimmed.get(3..).unwrap_or("").trim_start();
+            if after.starts_with("1.") || after.starts_with("2.") || after.starts_with("3.") {
                 return Status::Waiting;
             }
         }
     }
 
-    // WAITING: Input prompt ready
-    for line in non_empty_lines.iter().rev().take(10) {
-        let clean_line = strip_ansi(line).trim().to_string();
-        if clean_line == ">" || clean_line == "> " || clean_line == "codex>" {
-            return Status::Waiting;
-        }
-        if clean_line.starts_with("> ")
-            && !clean_line.to_lowercase().contains("esc")
-            && clean_line.len() < 100
-        {
+    // WAITING: Input prompt -- Codex uses › (U+203A) as its prompt character.
+    // Check only the last few lines to avoid matching › in older output.
+    for line in non_empty_lines.iter().rev().take(5) {
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
+        if trimmed.starts_with('\u{203a}') {
             return Status::Waiting;
         }
     }
@@ -536,37 +510,64 @@ mod tests {
 
     #[test]
     fn test_detect_codex_status_running() {
+        // "esc to interrupt" is the primary running indicator
+        assert_eq!(
+            detect_codex_status("\u{2022} Working (5s \u{2022} esc to interrupt)"),
+            Status::Running
+        );
         assert_eq!(
             detect_codex_status("processing request\nesc to interrupt"),
             Status::Running
         );
+        // Bullet spinner (U+2022) at line start
         assert_eq!(
-            detect_codex_status("thinking about your request"),
+            detect_codex_status("\u{2022} Working (12s)"),
             Status::Running
         );
-        assert_eq!(detect_codex_status("working on task"), Status::Running);
-        assert_eq!(detect_codex_status("generating ⠋"), Status::Running);
+        // Hollow bullet spinner (U+25E6) at line start
+        assert_eq!(
+            detect_codex_status("\u{25e6} Working (3s)"),
+            Status::Running
+        );
     }
 
     #[test]
     fn test_detect_codex_status_waiting() {
+        // Input prompt with › (U+203A)
         assert_eq!(
-            detect_codex_status("run this command? (y/n)"),
+            detect_codex_status("some output\n\u{203a} Ask Codex to do anything"),
             Status::Waiting
         );
-        assert_eq!(detect_codex_status("approve changes?"), Status::Waiting);
+        assert_eq!(detect_codex_status("done!\n\u{203a} "), Status::Waiting);
+        // Approval dialog
         assert_eq!(
-            detect_codex_status("execute this action? [y/n]"),
+            detect_codex_status(
+                "Would you like to run the following command?\n\u{203a} 1. Yes, proceed (y)\n  2. No (esc)\n\nPress enter to confirm or esc to cancel"
+            ),
             Status::Waiting
         );
-        assert_eq!(detect_codex_status("ready\ncodex>"), Status::Waiting);
-        assert_eq!(detect_codex_status("done\n>"), Status::Waiting);
+        // "Press enter to confirm" alone
+        assert_eq!(
+            detect_codex_status("some dialog\nPress enter to confirm or esc to cancel"),
+            Status::Waiting
+        );
     }
 
     #[test]
     fn test_detect_codex_status_idle() {
         assert_eq!(detect_codex_status("file saved"), Status::Idle);
         assert_eq!(detect_codex_status("random output text"), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_codex_status_running_beats_prompt() {
+        // When both spinner and › prompt are visible, Running wins
+        assert_eq!(
+            detect_codex_status(
+                "\u{2022} Working (5s \u{2022} esc to interrupt)\n  \u{2514} Reading file\n\u{203a} "
+            ),
+            Status::Running
+        );
     }
 
     #[test]

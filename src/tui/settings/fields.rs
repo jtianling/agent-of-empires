@@ -84,6 +84,8 @@ pub enum FieldKey {
     // Hooks
     HookOnCreate,
     HookOnLaunch,
+    // General (app state)
+    DynamicTabTitle,
 }
 
 /// Resolve a field value from global config and optional profile override.
@@ -275,15 +277,26 @@ fn build_theme_fields(
         },
     );
 
-    vec![SettingField {
-        key: FieldKey::ThemeName,
-        label: "Theme",
-        description: "Color theme for the TUI",
-        value: FieldValue::Select { selected, options },
-        category: SettingsCategory::Theme,
-        has_override,
-        inherited_display: inherited,
-    }]
+    vec![
+        SettingField {
+            key: FieldKey::ThemeName,
+            label: "Theme",
+            description: "Color theme for the TUI",
+            value: FieldValue::Select { selected, options },
+            category: SettingsCategory::Theme,
+            has_override,
+            inherited_display: inherited,
+        },
+        SettingField {
+            key: FieldKey::DynamicTabTitle,
+            label: "Dynamic Tab Title",
+            description: "Update terminal tab title to reflect TUI state",
+            value: FieldValue::Bool(global.app_state.dynamic_tab_title),
+            category: SettingsCategory::Theme,
+            has_override: false,
+            inherited_display: None,
+        },
+    ]
 }
 
 fn build_updates_fields(
@@ -1217,6 +1230,8 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         // Hooks
         (FieldKey::HookOnCreate, FieldValue::List(v)) => config.hooks.on_create = v.clone(),
         (FieldKey::HookOnLaunch, FieldValue::List(v)) => config.hooks.on_launch = v.clone(),
+        // General (app state)
+        (FieldKey::DynamicTabTitle, FieldValue::Bool(v)) => config.app_state.dynamic_tab_title = *v,
         _ => {}
     }
 }
