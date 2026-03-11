@@ -340,6 +340,11 @@ pub fn detect_cursor_status(_content: &str) -> Status {
     Status::Idle
 }
 
+/// Terminal sessions are plain shells -- no meaningful status to detect.
+pub fn detect_terminal_status(_content: &str) -> Status {
+    Status::Idle
+}
+
 pub fn detect_gemini_status(raw_content: &str) -> Status {
     let content = raw_content.to_lowercase();
     let lines: Vec<&str> = content.lines().collect();
@@ -407,9 +412,10 @@ mod tests {
 
     #[test]
     fn test_detect_claude_status_is_stub() {
-        // Claude/Cursor use hook-based detection; the stub always returns Idle
+        // Claude/Cursor/Terminal use hook-based or stub detection; always returns Idle
         assert_eq!(detect_claude_status("anything"), Status::Idle);
         assert_eq!(detect_cursor_status("anything"), Status::Idle);
+        assert_eq!(detect_terminal_status("anything"), Status::Idle);
     }
 
     #[test]

@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+     Running unittests src/lib.rs (target/debug/deps/agent_of_empires-0581ac2a23970729)
+
+running 8 tests
+test agents::tests::test_get_agent_known ... ok
+test agents::tests::test_all_agents_have_yolo_support ... ok
+test session::instance::tests::test_all_agents_have_yolo_support ... ok
+test agents::tests::test_get_agent_unknown ... ok
+test agents::tests::test_settings_index_roundtrip ... ok
+test agents::tests::test_resolve_tool_name ... ok
+test agents::tests::test_agent_names ... ok
+test tui::settings::fields::tests::test_default_tool_options_include_all_registered_agents ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 834 filtered out; finished in 0.00s
+

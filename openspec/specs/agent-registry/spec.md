@@ -27,6 +27,7 @@ pub struct AgentDef {
     pub supports_host_launch: bool,   // can run directly on host (not just in container)
     pub detect_status: fn(&str) -> Status,  // parse pane content -> Status
     pub container_env: &'static [(&'static str, &'static str)],  // always-injected env vars
+    pub hook_config: Option<HookConfig>,  // optional hook configuration
 }
 ```
 
@@ -53,6 +54,7 @@ EnvVar(key, value)   -- prepend env var to command (e.g. "OPENCODE_PERMISSION=..
 | `vibe` | `vibe` | `--agent auto-approve` | None | Yes | Detection: `vibe --version` |
 | `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--config developer_instructions={}` | Yes | |
 | `gemini` | `gemini` | `--approval-mode yolo` | None | Yes | |
+| `terminal` | `terminal` | None | None | Yes | Plain shell, no status detection |
 | `cursor` | `agent` | `--yolo` | None | Yes | Binary is `agent`, aliases: `["agent"]` |
 
 ## Name Resolution
@@ -72,13 +74,39 @@ Agents may declare env vars that are always injected into container sessions:
 
 ## Functional Requirements
 
-- **FR-001**: All agents MUST have a `yolo` mode configured (no agent without auto-approve support).
+- **FR-001**: All agents MUST have a `yolo` mode configured, except for non-agent tools (e.g., terminal) where `yolo: None` is permitted.
 - **FR-002**: Status detection functions MUST accept raw (non-lowercased) pane content.
 - **FR-003**: Agent availability MUST be detected at runtime, not hardcoded.
 - **FR-004**: Name resolution MUST be case-insensitive (command is lowercased before matching).
 - **FR-005**: The `instruction_flag` template MUST use `{}` as the placeholder for the escaped instruction text.
 - **FR-006**: Agents with `supports_host_launch: false` MUST only be launched inside containers.
 - **FR-007**: Adding a new agent MUST NOT require changes outside `src/agents.rs` and `src/tmux/status_detection.rs`.
+
+### Requirement: All agents MUST have a yolo mode configured
+All agents MUST have a `yolo` mode configured, except for non-agent tools (e.g., terminal) where `yolo: None` is permitted.
+
+#### Scenario: Agent tools have YOLO support
+- **WHEN** iterating over agent entries in the registry (excluding terminal)
+- **THEN** each entry has `yolo.is_some() == true`
+
+#### Scenario: Terminal tool has no YOLO
+- **WHEN** querying the terminal entry's YOLO mode
+- **THEN** it returns `None`
+
+### Requirement: Terminal entry in registry
+The agent registry SHALL include a `terminal` entry with `name: "terminal"`, positioned after `gemini` and before `cursor` in the `AGENTS` array.
+
+#### Scenario: Terminal is registered
+- **WHEN** looking up agent by name "terminal"
+- **THEN** an `AgentDef` is returned with `name == "terminal"`
+
+#### Scenario: Registry order includes terminal
+- **WHEN** listing all agent names in registry order
+- **THEN** the list is `["claude", "opencode", "vibe", "codex", "gemini", "terminal", "cursor"]`
+
+#### Scenario: Settings index accounts for terminal
+- **WHEN** converting "terminal" to a settings index
+- **THEN** the result is `6` (gemini=5, terminal=6, cursor=7)
 
 ## Settings Index Convention
 
@@ -90,7 +118,7 @@ The settings TUI uses a 1-based index for agent selection:
 
 ## Success Criteria
 
-- **SC-001**: All 6 currently registered agents have full behavior coverage (detection, YOLO, status).
+- **SC-001**: All 7 currently registered agents have full behavior coverage (detection, YOLO, status).
 - **SC-002**: A new agent can be added by modifying only the registry and status detection.
 - **SC-003**: `resolve_tool_name("")` returns `"claude"` (default fallback).
 - **SC-004**: Agent availability detection is fast enough to run at TUI startup without perceptible delay.

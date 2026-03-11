@@ -141,7 +141,8 @@ const KNOWN_SHELLS: &[&str] = &[
 
 pub(crate) fn is_shell_command(cmd: &str) -> bool {
     let normalized = cmd.strip_prefix('-').unwrap_or(cmd);
-    KNOWN_SHELLS.contains(&normalized)
+    let basename = normalized.rsplit('/').next().unwrap_or(normalized);
+    KNOWN_SHELLS.contains(&basename)
 }
 
 pub fn is_pane_running_shell(session_name: &str) -> bool {

@@ -1,0 +1,40 @@
+┌ Agent of Empires [default] ─────┐┌ Preview ──────────────────────────────────────────────────────────────────────────┐
+│                                 ││                            Select a session to preview                            │
+│         No sessions yet         ││                                                                                   │
+│                                 ││                                                                                   │
+│     Press 'n' to create one     ││                                                                                   │
+│   or 'agent-of-empires add .'   ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                   ┌ New Session ─────────────────────────────────────────────────────────────────┐                   │
+│                   │                                                                              │                   │
+│                   │ Title:                                                                       │                   │
+│                   │                                                                              │                   │
+│                   │ Path: /Users/jtianling/workspace/agent-of-empires                            │                   │
+│                   │                                                                              │                   │
+│                   │ Tool: ● claude  ○ opencode  ○ codex  ○ gemini  ○ terminal                    │                   │
+│                   │                                                                              │                   │
+│                   │ YOLO Mode: [ ] Skip permission prompts                                       │                   │
+│                   │                                                                              │                   │
+│                   │ Worktree Branch: (leave empty to skip worktree)                              │                   │
+│                   │                                                                              │                   │
+│                   │ Sandbox: [ ] Run in Docker                                                   │                   │
+│                   │                                                                              │                   │
+│                   │ Group:                                                                       │                   │
+│                   │                                                                              │                   │
+│                   │ Tab next  ←/→ tool  Enter create  ? help  Esc cancel                         │                   │
+│                   │                                                                              │                   │
+│                   └──────────────────────────────────────────────────────────────────────────────┘                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+│                                 ││                                                                                   │
+└─────────────────────────────────┘└───────────────────────────────────────────────────────────────────────────────────┘
+ [Agent] │ j/k Nav │ t View │ n New │ / Search │ D Diff │ ? Help │ q Quit
+ update available 0.14.0 -> 0.15.0

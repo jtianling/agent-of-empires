@@ -465,6 +465,10 @@ impl NewSessionDialog {
         self.available_profiles.len() > 1
     }
 
+    pub(super) fn is_terminal_selected(&self) -> bool {
+        self.available_tools.get(self.tool_index).copied() == Some("terminal")
+    }
+
     /// The field index of the path field (shifts based on whether profile picker is visible)
     fn path_field(&self) -> usize {
         if self.has_profile_selection() {
@@ -721,8 +725,10 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
-        // Field order: [profile], title, path, [tool], yolo, worktree,
+        let is_terminal = self.is_terminal_selected();
+        // Field order: [profile], title, path, [tool], [yolo], [worktree],
         //   [new_branch], [sandbox], group
+        // YOLO and worktree fields are hidden when terminal is selected.
         // Tool config (extra_args, command_override) is in a Ctrl+P overlay on tool field.
         // Sandbox sub-options are in a separate sandbox_config_mode overlay.
         let profile_field = if has_profile_selection { 0 } else { usize::MAX };
@@ -735,28 +741,37 @@ impl NewSessionDialog {
         } else {
             usize::MAX
         };
-        let yolo_mode_field = fi;
-        let worktree_field = yolo_mode_field + 1;
-        let new_branch_field = if has_worktree {
-            worktree_field + 1
-        } else {
-            usize::MAX
-        };
-        let mut next = if has_worktree {
-            new_branch_field + 1
-        } else {
-            worktree_field + 1
-        };
-        let sandbox_field = if has_sandbox {
-            let f = next;
-            next += 1;
+        let yolo_mode_field = if !is_terminal {
+            let f = fi;
+            fi += 1;
             f
         } else {
             usize::MAX
         };
-        let group_field = next;
-        next += 1;
-        let max_field = next;
+        let worktree_field = if !is_terminal {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let new_branch_field = if !is_terminal && has_worktree {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let sandbox_field = if has_sandbox {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let group_field = fi;
+        fi += 1;
+        let max_field = fi;
 
         // Ctrl+P opens a context-sensitive picker
         if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1098,31 +1113,38 @@ impl NewSessionDialog {
                 .cloned()
                 .unwrap_or_default(),
         );
+        // Reset agent-specific fields when switching to terminal
+        if tool == "terminal" {
+            self.yolo_mode = false;
+            self.worktree_branch = Input::default();
+            self.create_new_branch = true;
+        }
     }
 
     fn current_input_mut(&mut self) -> &mut Input {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_worktree = !self.worktree_branch.value().is_empty();
+        let is_terminal = self.is_terminal_selected();
         let base = if self.has_profile_selection() { 1 } else { 0 };
 
-        // Field layout: [profile], title, path, [tool], yolo, worktree,
+        // Field layout: [profile], title, path, [tool], [yolo], [worktree],
         //   [new_branch], [sandbox], group
-        let yolo_mode_field = base + 2 + if has_tool_selection { 1 } else { 0 };
-        let worktree_field = yolo_mode_field + 1;
-        let new_branch_field = if has_worktree {
-            worktree_field + 1
+        let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
+        let worktree_field = if !is_terminal {
+            fi += 1; // yolo
+            let f = fi;
+            fi += 1;
+            if has_worktree {
+                fi += 1; // new_branch
+            }
+            f
         } else {
             usize::MAX
         };
-        let mut next = if has_worktree {
-            new_branch_field + 1
-        } else {
-            worktree_field + 1
-        };
         if self.docker_available {
-            next += 1; // sandbox checkbox
+            fi += 1; // sandbox checkbox
         }
-        let group_field = next;
+        let group_field = fi;
 
         let path_field = self.path_field();
         let title_field = if self.has_profile_selection() { 1 } else { 0 };

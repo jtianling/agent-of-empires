@@ -210,6 +210,11 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
             instance.command = cmd_override.clone();
         }
     }
+    // For terminal sessions, default to the user's shell
+    if params.tool == "terminal" && instance.command.is_empty() {
+        instance.command = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    }
+
     if !params.extra_args.is_empty() {
         instance.extra_args = params.extra_args;
     } else if let Some(extra) = config.session.agent_extra_args.get(&params.tool) {

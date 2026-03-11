@@ -1,0 +1,24 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/agent_of_empires-0581ac2a23970729)
+
+running 17 tests
+test tmux::status_detection::tests::test_detect_claude_status_is_stub ... ok
+test tmux::status_detection::tests::test_detect_status_from_content_unknown_tool_returns_idle ... ok
+test tmux::status_detection::tests::test_detect_codex_status_running ... ok
+test tmux::status_detection::tests::test_detect_opencode_status_running ... ok
+test tmux::status_detection::tests::test_detect_gemini_status_running ... ok
+test tmux::status_detection::tests::test_detect_vibe_status_waiting ... ok
+test tmux::status_detection::tests::test_detect_opencode_status_numbered_selection ... ok
+test tmux::status_detection::tests::test_detect_opencode_status_idle ... ok
+test tmux::status_detection::tests::test_detect_gemini_status_waiting ... ok
+test tmux::status_detection::tests::test_detect_opencode_status_double_prompt ... ok
+test tmux::status_detection::tests::test_detect_opencode_status_completion_with_prompt ... ok
+test tmux::status_detection::tests::test_detect_opencode_status_waiting ... ok
+test tmux::status_detection::tests::test_detect_codex_status_waiting ... ok
+test tmux::status_detection::tests::test_detect_gemini_status_idle ... ok
+test tmux::status_detection::tests::test_detect_codex_status_idle ... ok
+test tmux::status_detection::tests::test_detect_vibe_status_running ... ok
+test tmux::status_detection::tests::test_detect_vibe_status_idle ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 825 filtered out; finished in 0.00s
+

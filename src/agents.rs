@@ -129,6 +129,19 @@ pub const AGENTS: &[AgentDef] = &[
         hook_config: None,
     },
     AgentDef {
+        name: "terminal",
+        binary: "terminal",
+        aliases: &[],
+        detection: DetectionMethod::Which("sh"),
+        yolo: None,
+        instruction_flag: None,
+        set_default_command: false,
+        supports_host_launch: true,
+        detect_status: status_detection::detect_terminal_status,
+        container_env: &[],
+        hook_config: None,
+    },
+    AgentDef {
         name: "cursor",
         binary: "agent",
         aliases: &["agent"],
@@ -207,6 +220,7 @@ mod tests {
         assert_eq!(get_agent("vibe").unwrap().binary, "vibe");
         assert_eq!(get_agent("codex").unwrap().binary, "codex");
         assert_eq!(get_agent("gemini").unwrap().binary, "gemini");
+        assert_eq!(get_agent("terminal").unwrap().binary, "terminal");
         assert_eq!(get_agent("cursor").unwrap().binary, "agent");
     }
 
@@ -220,7 +234,7 @@ mod tests {
         let names = agent_names();
         assert_eq!(
             names,
-            vec!["claude", "opencode", "vibe", "codex", "gemini", "cursor"]
+            vec!["claude", "opencode", "vibe", "codex", "gemini", "terminal", "cursor"]
         );
     }
 
@@ -231,6 +245,7 @@ mod tests {
         assert_eq!(resolve_tool_name("mistral-vibe"), Some("vibe"));
         assert_eq!(resolve_tool_name("codex"), Some("codex"));
         assert_eq!(resolve_tool_name("gemini"), Some("gemini"));
+        assert_eq!(resolve_tool_name("terminal"), Some("terminal"));
         assert_eq!(resolve_tool_name("cursor"), Some("cursor"));
         assert_eq!(resolve_tool_name(""), Some("claude"));
         assert_eq!(resolve_tool_name("agent"), Some("cursor"));
@@ -242,18 +257,27 @@ mod tests {
         assert_eq!(settings_index_from_name(None), 0);
         assert_eq!(settings_index_from_name(Some("claude")), 1);
         assert_eq!(settings_index_from_name(Some("gemini")), 5);
-        assert_eq!(settings_index_from_name(Some("cursor")), 6);
+        assert_eq!(settings_index_from_name(Some("terminal")), 6);
+        assert_eq!(settings_index_from_name(Some("cursor")), 7);
 
         assert_eq!(name_from_settings_index(0), None);
         assert_eq!(name_from_settings_index(1), Some("claude"));
         assert_eq!(name_from_settings_index(5), Some("gemini"));
-        assert_eq!(name_from_settings_index(6), Some("cursor"));
+        assert_eq!(name_from_settings_index(6), Some("terminal"));
+        assert_eq!(name_from_settings_index(7), Some("cursor"));
         assert_eq!(name_from_settings_index(99), None);
     }
 
     #[test]
     fn test_all_agents_have_yolo_support() {
         for agent in AGENTS {
+            if agent.name == "terminal" {
+                assert!(
+                    agent.yolo.is_none(),
+                    "Terminal should not have YOLO mode configured"
+                );
+                continue;
+            }
             assert!(
                 agent.yolo.is_some(),
                 "Agent '{}' should have YOLO mode configured",

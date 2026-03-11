@@ -31,6 +31,7 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
+        let is_terminal = self.is_terminal_selected();
         let dialog_width = 80;
 
         // Build constraints dynamically based on visible fields only
@@ -42,10 +43,12 @@ impl NewSessionDialog {
             Constraint::Length(2), // Title
             Constraint::Length(2), // Path
             Constraint::Length(2), // Tool (always shown, interactive or not)
-            Constraint::Length(2), // YOLO mode checkbox (always visible)
-            Constraint::Length(2), // Worktree Branch
         ]);
-        if has_worktree {
+        if !is_terminal {
+            constraints.push(Constraint::Length(2)); // YOLO mode checkbox
+            constraints.push(Constraint::Length(2)); // Worktree Branch
+        }
+        if !is_terminal && has_worktree {
             constraints.push(Constraint::Length(2)); // New Branch checkbox
         }
         if has_sandbox {
@@ -101,22 +104,36 @@ impl NewSessionDialog {
         // Field index calculations (must match handle_key)
         let base = if has_profile_selection { 1 } else { 0 };
         let title_field = base;
-        let yolo_mode_field = base + 2 + if has_tool_selection { 1 } else { 0 };
-        let worktree_field = yolo_mode_field + 1;
-        let new_branch_field = worktree_field + 1;
-        let mut next_field_idx = if has_worktree {
-            new_branch_field + 1
-        } else {
-            worktree_field + 1
-        };
-        let sandbox_field = if has_sandbox {
-            let f = next_field_idx;
-            next_field_idx += 1;
+        let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
+        let yolo_mode_field = if !is_terminal {
+            let f = fi;
+            fi += 1;
             f
         } else {
             usize::MAX
         };
-        let group_field = next_field_idx;
+        let worktree_field = if !is_terminal {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let new_branch_field = if !is_terminal && has_worktree {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let sandbox_field = if has_sandbox {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let group_field = fi;
 
         // Profile picker (only when multiple profiles)
         if has_profile_selection {
@@ -214,8 +231,8 @@ impl NewSessionDialog {
         }
         ci += 1;
 
-        // YOLO Mode checkbox
-        {
+        // YOLO Mode checkbox (hidden for terminal)
+        if !is_terminal {
             let is_yolo_focused = self.focused_field == yolo_mode_field;
             let yolo_label_style = if is_yolo_focused {
                 Style::default().fg(theme.accent).underlined()
@@ -247,25 +264,27 @@ impl NewSessionDialog {
             ci += 1;
         }
 
-        // Worktree Branch
-        let worktree_placeholder = if self.focused_field == worktree_field {
-            Some("(leave empty to skip | Ctrl+P to browse branches)")
-        } else {
-            Some("(leave empty to skip worktree)")
-        };
-        render_text_field(
-            frame,
-            chunks[ci],
-            "Worktree Branch:",
-            &self.worktree_branch,
-            self.focused_field == worktree_field,
-            worktree_placeholder,
-            theme,
-        );
-        ci += 1;
+        // Worktree Branch (hidden for terminal)
+        if !is_terminal {
+            let worktree_placeholder = if self.focused_field == worktree_field {
+                Some("(leave empty to skip | Ctrl+P to browse branches)")
+            } else {
+                Some("(leave empty to skip worktree)")
+            };
+            render_text_field(
+                frame,
+                chunks[ci],
+                "Worktree Branch:",
+                &self.worktree_branch,
+                self.focused_field == worktree_field,
+                worktree_placeholder,
+                theme,
+            );
+            ci += 1;
+        }
 
-        // New Branch checkbox (only when worktree is set)
-        if has_worktree {
+        // New Branch checkbox (only when worktree is set, hidden for terminal)
+        if !is_terminal && has_worktree {
             let is_nb_focused = self.focused_field == new_branch_field;
             let nb_label_style = if is_nb_focused {
                 Style::default().fg(theme.accent).underlined()
