@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::prelude::*;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,8 +47,6 @@ where
         let _ = event::read();
     }
 
-    terminal.clear()?;
-
     Ok(result)
 }
 
@@ -59,6 +58,8 @@ pub struct App {
     update_info: Option<UpdateInfo>,
     update_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<UpdateInfo>>>,
     launch_dir: PathBuf,
+    /// Last time a redraw was triggered by a tick event (to throttle animations)
+    last_tick_redraw: std::time::Instant,
 }
 
 /// Check if the app version changed and return the previous version if changelog should be shown.
@@ -117,6 +118,7 @@ impl App {
             update_info: None,
             update_rx: None,
             launch_dir,
+            last_tick_redraw: std::time::Instant::now(),
         })
     }
 
@@ -131,7 +133,9 @@ impl App {
     ) -> Result<()> {
         // Initial render
         terminal.clear()?;
+        crossterm::execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
         terminal.draw(|f| self.render(f))?;
+        crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
 
         // Refresh tmux session cache
         crate::tmux::refresh_session_cache();
@@ -153,10 +157,13 @@ impl App {
         const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
         loop {
+            let mut refresh_needed = false;
+
             // Force full redraw if needed (e.g., after returning from tmux)
             if self.needs_redraw {
                 terminal.clear()?;
                 self.needs_redraw = false;
+                refresh_needed = true;
             }
 
             // Poll with short timeout for responsive input
@@ -164,22 +171,15 @@ impl App {
                 match event::read()? {
                     Event::Key(key) => {
                         self.handle_key(key, terminal).await?;
-
-                        // Draw immediately after input for responsiveness
-                        terminal.draw(|f| self.render(f))?;
+                        refresh_needed = true;
 
                         if self.should_quit {
                             break;
                         }
-                        continue; // Skip status refresh this iteration for responsiveness
                     }
                     Event::Mouse(mouse) => {
                         self.handle_mouse(mouse, terminal).await?;
-
-                        // Draw immediately after input for responsiveness
-                        terminal.draw(|f| self.render(f))?;
-
-                        continue;
+                        refresh_needed = true;
                     }
                     _ => {}
                 }
@@ -187,11 +187,10 @@ impl App {
 
             // Check for update result (non-blocking)
             if self.poll_update_check() {
-                self.needs_redraw = true;
+                refresh_needed = true;
             }
 
             // Periodic refreshes (only when no input pending)
-            let mut refresh_needed = false;
 
             // Request status refresh every interval (non-blocking)
             if last_status_refresh.elapsed() >= STATUS_REFRESH_INTERVAL {
@@ -218,6 +217,14 @@ impl App {
 
             // Tick dialog animations/timers (spinner, transient flashes)
             if self.home.tick_dialog() {
+                // Throttle animation redraws to ~10Hz to prevent flicker in tmux
+                if self.last_tick_redraw.elapsed() >= Duration::from_millis(100) {
+                    refresh_needed = true;
+                }
+            }
+
+            // Check for internal redraw requests (e.g., from preview refresh during render)
+            if self.home.check_redraw() {
                 refresh_needed = true;
             }
 
@@ -230,7 +237,44 @@ impl App {
 
             // Single draw after all refreshes to avoid flicker
             if refresh_needed {
+                // Pre-calculate layout to get preview dimensions for cache refresh
+                let size = terminal.size()?;
+                let area = Rect::new(0, 0, size.width, size.height);
+
+                // This mimics the constraints in render.rs to get the same preview area
+                let main_constraints = if self.update_info.is_some() {
+                    vec![
+                        Constraint::Min(0),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ]
+                } else {
+                    vec![Constraint::Min(0), Constraint::Length(1)]
+                };
+                let main_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(main_constraints)
+                    .split(area);
+                let chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Length(self.home.list_width),
+                        Constraint::Min(40),
+                    ])
+                    .split(main_chunks[0]);
+
+                let preview_area = chunks[1];
+
+                // Settle all state (including tmux captures) BEFORE drawing
+                self.home
+                    .update_caches(preview_area.width, preview_area.height);
+
+                crossterm::execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
                 terminal.draw(|f| self.render(f))?;
+                crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
+
+                // Reset animation timer if this was a tick-induced redraw
+                self.last_tick_redraw = std::time::Instant::now();
             }
 
             if self.should_quit {

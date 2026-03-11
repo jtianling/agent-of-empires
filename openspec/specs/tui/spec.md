@@ -112,7 +112,15 @@ The diff view shows git changes for the selected session's project:
 - **FR-008**: The Repo settings tab MUST be disabled when no session is selected.
 - **FR-009**: The TUI MUST function correctly at terminal widths as narrow as 80 columns.
 - **FR-010**: Session creation and deletion MUST show progress feedback during async operations.
-- **FR-011**: The creation dialog's default project path MUST be the directory where the user launched `aoe`, not the process's current working directory at dialog open time. The launch directory SHALL be captured once at TUI startup and reused for all subsequent session creation dialogs.
+- [x] - **FR-011**: The creation dialog's default project path MUST be the directory where the user launched `aoe`, not the process's current working directory at dialog open time. The launch directory SHALL be captured once at TUI startup and reused for all subsequent session creation dialogs.
+- **FR-012**: The TUI MUST implement rendering optimizations to prevent visible flickering when running inside a `tmux` session.
+- **FR-012a**: When the TUI renders a frame in a terminal that supports Synchronized Output, it SHALL use the terminal's synchronized update sequences to ensure the frame is displayed atomically.
+- **FR-012b**: The TUI SHALL batch state changes and perform at most one `terminal.draw()` call per loop iteration to avoid redundant redraw operations.
+- **FR-012c**: The TUI SHALL NOT call `terminal.clear()` during its normal event loop unless the terminal state is explicitly known to be corrupted or after returning from an external full-screen process.
+- **FR-012d**: The TUI MUST throttle the frequency of redraws triggered by purely visual animations (like spinners) to prevent visual artifacts, with a maximum redraw rate of 10Hz (100ms interval) for such events.
+- **FR-012e**: The TUI main loop MUST ensure that all internal state updates, cache refreshes, and terminal status checks are completed *before* initiating a draw operation to ensure the UI is rendered from a settled state.
+- **FR-013**: The TUI SHALL optimize the session preview refresh rate and rendering to reduce the performance impact of background `tmux capture-pane` calls.
+- **FR-013a**: The TUI SHALL throttle background refreshes of the preview content to a stable rate (e.g., 250ms interval) and only trigger TUI redraws when the content has actually changed.
 
 ## Success Criteria
 

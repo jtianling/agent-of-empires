@@ -356,7 +356,7 @@ impl HomeView {
     }
 
     /// Refresh preview cache if needed (session changed, dimensions changed, or timer expired)
-    fn refresh_preview_cache_if_needed(&mut self, width: u16, height: u16) {
+    pub(super) fn refresh_preview_cache_if_needed(&mut self, width: u16, height: u16) -> bool {
         const PREVIEW_REFRESH_MS: u128 = 250; // Refresh preview 4x/second max
 
         let needs_refresh = match &self.selected_session {
@@ -371,19 +371,30 @@ impl HomeView {
         if needs_refresh {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
-                    self.preview_cache.content = inst
+                    let new_content = inst
                         .capture_output_with_size(height as usize, width, height)
                         .unwrap_or_default();
+
+                    let changed = new_content != self.preview_cache.content
+                        || self.preview_cache.session_id.as_ref() != Some(id);
+
+                    self.preview_cache.content = new_content;
                     self.preview_cache.session_id = Some(id.clone());
                     self.preview_cache.dimensions = (width, height);
                     self.preview_cache.last_refresh = Instant::now();
+                    return changed;
                 }
             }
         }
+        false
     }
 
     /// Refresh terminal preview cache if needed (for host terminals)
-    fn refresh_terminal_preview_cache_if_needed(&mut self, width: u16, height: u16) {
+    pub(super) fn refresh_terminal_preview_cache_if_needed(
+        &mut self,
+        width: u16,
+        height: u16,
+    ) -> bool {
         const PREVIEW_REFRESH_MS: u128 = 250;
 
         let needs_refresh = match &self.selected_session {
@@ -403,20 +414,31 @@ impl HomeView {
         if needs_refresh {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
-                    self.terminal_preview_cache.content = inst
+                    let new_content = inst
                         .terminal_tmux_session()
                         .and_then(|s| s.capture_pane(height as usize))
                         .unwrap_or_default();
+
+                    let changed = new_content != self.terminal_preview_cache.content
+                        || self.terminal_preview_cache.session_id.as_ref() != Some(id);
+
+                    self.terminal_preview_cache.content = new_content;
                     self.terminal_preview_cache.session_id = Some(id.clone());
                     self.terminal_preview_cache.dimensions = (width, height);
                     self.terminal_preview_cache.last_refresh = Instant::now();
+                    return changed;
                 }
             }
         }
+        false
     }
 
     /// Refresh container terminal preview cache if needed
-    fn refresh_container_terminal_preview_cache_if_needed(&mut self, width: u16, height: u16) {
+    pub(super) fn refresh_container_terminal_preview_cache_if_needed(
+        &mut self,
+        width: u16,
+        height: u16,
+    ) -> bool {
         const PREVIEW_REFRESH_MS: u128 = 250;
 
         let needs_refresh = match &self.selected_session {
@@ -436,16 +458,23 @@ impl HomeView {
         if needs_refresh {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
-                    self.container_terminal_preview_cache.content = inst
+                    let new_content = inst
                         .container_terminal_tmux_session()
                         .and_then(|s| s.capture_pane(height as usize))
                         .unwrap_or_default();
+
+                    let changed = new_content != self.container_terminal_preview_cache.content
+                        || self.container_terminal_preview_cache.session_id.as_ref() != Some(id);
+
+                    self.container_terminal_preview_cache.content = new_content;
                     self.container_terminal_preview_cache.session_id = Some(id.clone());
                     self.container_terminal_preview_cache.dimensions = (width, height);
                     self.container_terminal_preview_cache.last_refresh = Instant::now();
+                    return changed;
                 }
             }
         }
+        false
     }
 
     fn render_preview(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -468,9 +497,6 @@ impl HomeView {
 
         match self.view_mode {
             ViewMode::Agent => {
-                // Refresh cache before borrowing from instance_map to avoid borrow conflicts
-                self.refresh_preview_cache_if_needed(inner.width, inner.height);
-
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
                         Preview::render_with_cache(
@@ -503,22 +529,6 @@ impl HomeView {
                     } else {
                         TerminalMode::Host
                     };
-
-                    // Refresh the appropriate cache before borrowing instance
-                    match terminal_mode {
-                        TerminalMode::Container => {
-                            self.refresh_container_terminal_preview_cache_if_needed(
-                                inner.width,
-                                inner.height,
-                            );
-                        }
-                        TerminalMode::Host => {
-                            self.refresh_terminal_preview_cache_if_needed(
-                                inner.width,
-                                inner.height,
-                            );
-                        }
-                    }
 
                     // Now borrow instance for rendering
                     if let Some(inst) = self.get_instance(&id) {

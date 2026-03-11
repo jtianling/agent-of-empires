@@ -640,7 +640,7 @@ impl HomeView {
                         }
                     }
                     return match self.view_mode {
-                        ViewMode::Agent => Some(Action::AttachSession(id.clone())),
+                        ViewMode::Agent => Some(Action::AttachSession(id.to_string())),
                         ViewMode::Terminal => {
                             let terminal_mode = if let Some(inst) = self.get_instance(id) {
                                 if inst.is_sandboxed() {
@@ -651,7 +651,7 @@ impl HomeView {
                             } else {
                                 TerminalMode::Host
                             };
-                            Some(Action::AttachTerminal(id.clone(), terminal_mode))
+                            Some(Action::AttachTerminal(id.to_string(), terminal_mode))
                         }
                     };
                 } else if let Some(Item::Group { path, .. }) = self.flat_items.get(self.cursor) {
@@ -670,7 +670,7 @@ impl HomeView {
                     path, collapsed, ..
                 }) = self.flat_items.get(self.cursor)
                 {
-                    if !collapsed {
+                    if !*collapsed {
                         let path = path.clone();
                         self.toggle_group_collapsed(&path);
                     }

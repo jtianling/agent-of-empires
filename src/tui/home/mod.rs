@@ -175,9 +175,64 @@ pub struct HomeView {
 
     // Resizable list column width (percentage-like units)
     pub(super) list_width: u16,
+
+    /// Flag to indicate that a refresh is needed due to internal state changes (e.g., preview update)
+    pub(super) needs_redraw: bool,
 }
 
 impl HomeView {
+    /// Check if an internal redraw was requested (e.g., from render logic)
+    pub fn check_redraw(&mut self) -> bool {
+        let redraw = self.needs_redraw;
+        self.needs_redraw = false;
+        redraw
+    }
+
+    /// Update preview caches for the currently selected session and view mode.
+    /// This should be called before rendering to ensure all data is pre-fetched.
+    pub fn update_caches(&mut self, width: u16, height: u16) {
+        // Adjust width/height for border
+        let inner_width = width.saturating_sub(2);
+        let inner_height = height.saturating_sub(2);
+
+        match self.view_mode {
+            ViewMode::Agent => {
+                if self.refresh_preview_cache_if_needed(inner_width, inner_height) {
+                    self.needs_redraw = true;
+                }
+            }
+            ViewMode::Terminal => {
+                let selected_id = self.selected_session.clone();
+                if let Some(id) = selected_id {
+                    let terminal_mode = if let Some(inst) = self.get_instance(&id) {
+                        if inst.is_sandboxed() {
+                            self.get_terminal_mode(&id)
+                        } else {
+                            TerminalMode::Host
+                        }
+                    } else {
+                        TerminalMode::Host
+                    };
+
+                    let changed = match terminal_mode {
+                        TerminalMode::Container => self
+                            .refresh_container_terminal_preview_cache_if_needed(
+                                inner_width,
+                                inner_height,
+                            ),
+                        TerminalMode::Host => {
+                            self.refresh_terminal_preview_cache_if_needed(inner_width, inner_height)
+                        }
+                    };
+
+                    if changed {
+                        self.needs_redraw = true;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(
         storage: Storage,
         available_tools: AvailableTools,
@@ -262,6 +317,7 @@ impl HomeView {
             list_width: user_config
                 .and_then(|c| c.app_state.home_list_width)
                 .unwrap_or(35),
+            needs_redraw: false,
         };
 
         view.update_selected();
