@@ -37,8 +37,7 @@ fn test_initial_state() {
     assert_eq!(dialog.group.value(), "");
     assert_eq!(dialog.focused_field, 0);
     assert_eq!(dialog.tool_index, 0);
-    assert_eq!(dialog.profile_index, 0);
-    assert_eq!(dialog.selected_profile(), "default");
+    assert_eq!(dialog.profile, "default");
 }
 
 #[test]
@@ -1004,59 +1003,17 @@ fn test_confirm_create_failure_shows_error() {
     assert!(dialog.confirm_create_dir.is_none());
 }
 
-// --- Profile picker tests ---
+// --- Profile tests ---
 
 #[test]
-fn test_profile_cycling() {
+fn test_profile_always_current() {
     let mut dialog = single_tool_dialog();
-    dialog.available_profiles = vec![
-        "default".to_string(),
-        "work".to_string(),
-        "personal".to_string(),
-    ];
-    dialog.profile_index = 0;
-    dialog.focused_field = 0; // profile field
+    assert_eq!(dialog.profile, "default");
 
-    // Right cycles forward
-    dialog.handle_key(key(KeyCode::Right));
-    assert_eq!(dialog.selected_profile(), "work");
-
-    dialog.handle_key(key(KeyCode::Right));
-    assert_eq!(dialog.selected_profile(), "personal");
-
-    // Wraps around
-    dialog.handle_key(key(KeyCode::Right));
-    assert_eq!(dialog.selected_profile(), "default");
-
-    // Left cycles backward
-    dialog.handle_key(key(KeyCode::Left));
-    assert_eq!(dialog.selected_profile(), "personal");
-}
-
-#[test]
-fn test_profile_single_profile_no_cycle() {
-    let mut dialog = single_tool_dialog();
-    dialog.available_profiles = vec!["default".to_string()];
-    dialog.profile_index = 0;
-    dialog.focused_field = 0;
-
-    dialog.handle_key(key(KeyCode::Right));
-    assert_eq!(dialog.selected_profile(), "default");
-    assert_eq!(dialog.profile_index, 0);
-}
-
-#[test]
-fn test_profile_included_in_submit() {
-    let mut dialog = single_tool_dialog();
-    dialog.available_profiles = vec!["default".to_string(), "work".to_string()];
-    dialog.focused_field = 0;
-
-    dialog.handle_key(key(KeyCode::Right)); // switch to "work"
     let result = dialog.handle_key(key(KeyCode::Enter));
-
     match result {
         DialogResult::Submit(data) => {
-            assert_eq!(data.profile, "work");
+            assert_eq!(data.profile, "default");
         }
         _ => panic!("Expected Submit"),
     }

@@ -58,15 +58,14 @@ fn test_delete_profile() -> Result<()> {
 
 #[test]
 #[serial]
-fn test_cannot_delete_default_profile() -> Result<()> {
+fn test_can_delete_default_profile() -> Result<()> {
     let _temp = setup_temp_home();
 
-    let result = delete_profile("default");
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Cannot delete the default profile"));
+    let _ = Storage::new("default")?;
+    assert!(list_profiles()?.contains(&"default".to_string()));
+
+    delete_profile("default")?;
+    assert!(!list_profiles()?.contains(&"default".to_string()));
 
     Ok(())
 }

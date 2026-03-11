@@ -340,11 +340,10 @@ impl HomeView {
                                 self.show_profile_picker();
                             }
                             Err(e) => {
-                                self.profile_picker_dialog = None;
-                                self.info_dialog = Some(InfoDialog::new(
-                                    "Error",
-                                    &format!("Failed to delete profile: {}", e),
-                                ));
+                                self.show_profile_picker();
+                                if let Some(ref mut picker) = self.profile_picker_dialog {
+                                    picker.set_error(format!("Failed to delete '{}': {}", name, e));
+                                }
                             }
                         }
                     }
@@ -437,14 +436,11 @@ impl HomeView {
                         .map(|g| g.path.clone())
                         .collect();
                     let current_profile = self.storage.profile().to_string();
-                    let profiles =
-                        list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
                     self.new_dialog = Some(NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_titles,
                         existing_groups,
                         &current_profile,
-                        profiles,
                         &self.launch_dir,
                     ));
                 }

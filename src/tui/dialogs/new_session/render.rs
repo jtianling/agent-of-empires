@@ -27,7 +27,6 @@ impl NewSessionDialog {
             return;
         }
 
-        let has_profile_selection = self.has_profile_selection();
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
@@ -36,9 +35,6 @@ impl NewSessionDialog {
 
         // Build constraints dynamically based on visible fields only
         let mut constraints = Vec::new();
-        if has_profile_selection {
-            constraints.push(Constraint::Length(2)); // Profile
-        }
         constraints.extend([
             Constraint::Length(2), // Title
             Constraint::Length(2), // Path
@@ -102,9 +98,8 @@ impl NewSessionDialog {
         let mut ci = 0; // chunk index
 
         // Field index calculations (must match handle_key)
-        let base = if has_profile_selection { 1 } else { 0 };
-        let title_field = base;
-        let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
+        let title_field: usize = 0;
+        let mut fi: usize = 2 + if has_tool_selection { 1 } else { 0 };
         let yolo_mode_field = if !is_terminal {
             let f = fi;
             fi += 1;
@@ -135,12 +130,6 @@ impl NewSessionDialog {
         };
         let group_field = fi;
 
-        // Profile picker (only when multiple profiles)
-        if has_profile_selection {
-            self.render_profile_field(frame, chunks[ci], theme);
-            ci += 1;
-        }
-
         // Title
         render_text_field(
             frame,
@@ -163,7 +152,7 @@ impl NewSessionDialog {
         ci += 1;
 
         // Tool (always shown, interactive or read-only)
-        let tool_field = base + 2;
+        let tool_field: usize = 2;
         let is_tool_focused = has_tool_selection && self.focused_field == tool_field;
         if has_tool_selection {
             let label_style = if is_tool_focused {
@@ -469,34 +458,6 @@ impl NewSessionDialog {
         if self.dir_picker.is_active() {
             self.dir_picker.render(frame, area, theme);
         }
-    }
-
-    fn render_profile_field(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let is_focused = self.focused_field == 0;
-        let label_style = if is_focused {
-            Style::default().fg(theme.accent).underlined()
-        } else {
-            Style::default().fg(theme.text)
-        };
-
-        let selected = self.selected_profile();
-        let profile_style = if is_focused {
-            Style::default().fg(theme.accent).bold()
-        } else {
-            Style::default().fg(theme.accent)
-        };
-
-        let mut spans = vec![Span::styled("Profile:", label_style), Span::raw(" ")];
-
-        if self.available_profiles.len() > 1 {
-            spans.push(Span::styled("< ", Style::default().fg(theme.dimmed)));
-            spans.push(Span::styled(selected, profile_style));
-            spans.push(Span::styled(" >", Style::default().fg(theme.dimmed)));
-        } else {
-            spans.push(Span::styled(selected, profile_style));
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_path_field(
@@ -899,11 +860,9 @@ impl NewSessionDialog {
         let show_sandbox_options_help = has_sandbox && self.sandbox_enabled;
 
         let dialog_width: u16 = HELP_DIALOG_WIDTH;
-        let has_profile_selection = self.has_profile_selection();
         // Base fields: Title, Path, YOLO, Worktree, New Branch, Group + close hint
         let base_height: u16 = 20;
         let dialog_height: u16 = base_height
-            + if has_profile_selection { 3 } else { 0 }
             + if has_tool_selection { 3 } else { 0 }
             + if has_sandbox { 3 } else { 0 }
             + if show_sandbox_options_help { 12 } else { 0 };
@@ -924,8 +883,8 @@ impl NewSessionDialog {
         let mut lines: Vec<Line> = Vec::new();
 
         for (idx, help) in FIELD_HELP.iter().enumerate() {
-            if idx == 0 && !has_profile_selection {
-                continue; // Profile
+            if idx == 0 {
+                continue; // Profile field removed
             }
             // idx 1 (Title), idx 2 (Path) always shown
             if idx == 3 && !has_tool_selection {

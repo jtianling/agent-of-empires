@@ -110,8 +110,6 @@ pub(super) const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
 pub struct NewSessionDialog {
     pub(super) profile: String,
-    pub(super) available_profiles: Vec<String>,
-    pub(super) profile_index: usize,
     pub(super) title: Input,
     pub(super) path: Input,
     pub(super) group: Input,
@@ -297,7 +295,6 @@ impl NewSessionDialog {
         existing_titles: Vec<String>,
         existing_groups: Vec<String>,
         profile: &str,
-        available_profiles: Vec<String>,
         launch_dir: &std::path::Path,
     ) -> Self {
         let current_dir = launch_dir.to_string_lossy().to_string();
@@ -345,15 +342,8 @@ impl NewSessionDialog {
             (Vec::new(), Vec::new())
         };
 
-        let profile_index = available_profiles
-            .iter()
-            .position(|p| p == profile)
-            .unwrap_or(0);
-
         Self {
             profile: profile.to_string(),
-            available_profiles,
-            profile_index,
             title: Input::default(),
             path: Input::new(current_dir),
             group: Input::default(),
@@ -457,91 +447,12 @@ impl NewSessionDialog {
         changed
     }
 
-    pub(super) fn selected_profile(&self) -> &str {
-        &self.available_profiles[self.profile_index]
-    }
-
-    pub(super) fn has_profile_selection(&self) -> bool {
-        self.available_profiles.len() > 1
-    }
-
     pub(super) fn is_terminal_selected(&self) -> bool {
         self.available_tools.get(self.tool_index).copied() == Some("shell")
     }
 
-    /// The field index of the path field (shifts based on whether profile picker is visible)
     fn path_field(&self) -> usize {
-        if self.has_profile_selection() {
-            2
-        } else {
-            1
-        }
-    }
-
-    /// Re-resolve config defaults when the profile changes.
-    /// Resets tool, yolo, sandbox, and env settings but preserves user inputs
-    /// (title, path, group, worktree).
-    fn reload_config_defaults(&mut self) {
-        let profile = self.selected_profile().to_string();
-        self.profile = profile.clone();
-        let config = resolve_config(&profile).unwrap_or_default();
-
-        // Reset tool index
-        self.tool_index = if let Some(ref default_tool) = config.session.default_tool {
-            self.available_tools
-                .iter()
-                .position(|&t| t == default_tool.as_str())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        // Reset sandbox/yolo defaults
-        self.yolo_mode = config.session.yolo_mode_default;
-        self.sandbox_enabled = self.docker_available && config.sandbox.enabled_by_default;
-
-        // Reset sandbox image from resolved config (includes profile overrides)
-        self.sandbox_image = Input::new(config.sandbox.default_image.clone());
-
-        // Reset env entries and inherited settings
-        if self.sandbox_enabled {
-            self.extra_env = config.sandbox.environment.clone();
-            self.inherited_settings = build_inherited_settings(&config.sandbox);
-        } else {
-            self.extra_env.clear();
-            self.inherited_settings.clear();
-        }
-
-        // Reset extra args and command override for new default tool
-        let selected_tool = self
-            .available_tools
-            .get(self.tool_index)
-            .copied()
-            .unwrap_or("claude");
-        self.extra_args = Input::new(
-            config
-                .session
-                .agent_extra_args
-                .get(selected_tool)
-                .cloned()
-                .unwrap_or_default(),
-        );
-        self.command_override = Input::new(
-            config
-                .session
-                .agent_command_override
-                .get(selected_tool)
-                .cloned()
-                .unwrap_or_default(),
-        );
-        self.tool_config_mode = false;
-        self.tool_config_focused_field = 0;
-
-        // Reset expanded states
-        self.env_list_expanded = false;
-        self.env_editing_input = None;
-        self.sandbox_config_mode = false;
-        self.sandbox_focused_field = 0;
+        1
     }
 
     #[cfg(test)]
@@ -557,8 +468,6 @@ impl NewSessionDialog {
 
         Self {
             profile: "default".to_string(),
-            available_profiles: vec!["default".to_string()],
-            profile_index: 0,
             title: Input::default(),
             path: Input::new(path),
             group: Input::default(),
@@ -610,8 +519,6 @@ impl NewSessionDialog {
     pub(super) fn new_with_tools(tools: Vec<&'static str>, path: String) -> Self {
         Self {
             profile: "default".to_string(),
-            available_profiles: vec!["default".to_string()],
-            profile_index: 0,
             title: Input::default(),
             path: Input::new(path),
             group: Input::default(),
@@ -721,19 +628,13 @@ impl NewSessionDialog {
             return DialogResult::Continue;
         }
 
-        let has_profile_selection = self.available_profiles.len() > 1;
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
-        // Field order: [profile], title, path, [tool], [yolo], [worktree],
+        // Field order: title, path, [tool], [yolo], [worktree],
         //   [new_branch], [sandbox], group
-        // YOLO and worktree fields are hidden when terminal is selected.
-        // Tool config (extra_args, command_override) is in a Ctrl+P overlay on tool field.
-        // Sandbox sub-options are in a separate sandbox_config_mode overlay.
-        let profile_field = if has_profile_selection { 0 } else { usize::MAX };
-        let mut fi = if has_profile_selection { 1 } else { 0 }; // next field index
-        fi += 2; // title + path
+        let mut fi: usize = 2; // title + path
         let tool_field = if has_tool_selection {
             let f = fi;
             fi += 1;
@@ -880,24 +781,6 @@ impl NewSessionDialog {
                 }
                 DialogResult::Continue
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if self.focused_field == profile_field =>
-            {
-                if self.available_profiles.len() > 1 {
-                    if key.code == KeyCode::Left {
-                        self.profile_index = if self.profile_index == 0 {
-                            self.available_profiles.len() - 1
-                        } else {
-                            self.profile_index - 1
-                        };
-                    } else {
-                        self.profile_index =
-                            (self.profile_index + 1) % self.available_profiles.len();
-                    }
-                    self.reload_config_defaults();
-                }
-                DialogResult::Continue
-            }
             KeyCode::Left | KeyCode::Right if self.focused_field == tool_field => {
                 self.tool_index = (self.tool_index + 1) % self.available_tools.len();
                 self.reload_tool_config();
@@ -938,8 +821,7 @@ impl NewSessionDialog {
                 DialogResult::Continue
             }
             _ => {
-                if self.focused_field != profile_field
-                    && self.focused_field != tool_field
+                if self.focused_field != tool_field
                     && self.focused_field != new_branch_field
                     && self.focused_field != sandbox_field
                     && self.focused_field != yolo_mode_field
@@ -1090,8 +972,7 @@ impl NewSessionDialog {
     }
 
     fn reload_tool_config(&mut self) {
-        let profile = self.selected_profile().to_string();
-        let config = resolve_config(&profile).unwrap_or_default();
+        let config = resolve_config(&self.profile).unwrap_or_default();
         let tool = self
             .available_tools
             .get(self.tool_index)
@@ -1125,7 +1006,7 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
-        let base = if self.has_profile_selection() { 1 } else { 0 };
+        let base = 0;
 
         // Field layout: [profile], title, path, [tool], [yolo], [worktree],
         //   [new_branch], [sandbox], group
@@ -1147,7 +1028,7 @@ impl NewSessionDialog {
         let group_field = fi;
 
         let path_field = self.path_field();
-        let title_field = if self.has_profile_selection() { 1 } else { 0 };
+        let title_field = 0;
         match self.focused_field {
             n if n == title_field => &mut self.title,
             n if n == path_field => &mut self.path,
@@ -1178,7 +1059,7 @@ impl NewSessionDialog {
         let main_repo_path = GitWorktree::find_main_repo(&path).ok()?;
         let git_wt = GitWorktree::new(main_repo_path.clone()).ok()?;
 
-        let config = resolve_config(self.selected_profile()).unwrap_or_default();
+        let config = resolve_config(&self.profile).unwrap_or_default();
         let is_bare = GitWorktree::is_bare_repo(&main_repo_path);
         let template = if is_bare {
             &config.worktree.bare_repo_path_template
@@ -1210,7 +1091,7 @@ impl NewSessionDialog {
             Some(worktree_value.to_string())
         };
         DialogResult::Submit(NewSessionData {
-            profile: self.selected_profile().to_string(),
+            profile: self.profile.clone(),
             title: final_title,
             path: self.path.value().trim().to_string(),
             group: self.group.value().trim().to_string(),

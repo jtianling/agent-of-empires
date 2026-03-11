@@ -61,13 +61,16 @@ impl ProfilePickerDialog {
         }
     }
 
+    pub fn set_error(&mut self, msg: String) {
+        self.error = Some(msg);
+    }
+
     fn selected_profile(&self) -> Option<&ProfileEntry> {
         self.profiles.get(self.selected)
     }
 
     fn can_delete_selected(&self) -> bool {
-        self.selected_profile()
-            .is_some_and(|p| !p.is_active && p.name != "default")
+        self.selected_profile().is_some_and(|p| !p.is_active)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<ProfilePickerAction> {
@@ -79,6 +82,7 @@ impl ProfilePickerDialog {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> DialogResult<ProfilePickerAction> {
+        self.error = None;
         match key.code {
             KeyCode::Esc => DialogResult::Cancel,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -210,8 +214,9 @@ impl ProfilePickerDialog {
     fn render_list(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let max_visible: usize = 8;
         let list_height = self.profiles.len().min(max_visible) as u16;
-        // list + hint (1) + borders (2) + margin (2)
-        let dialog_height = (list_height + 5).min(area.height);
+        let has_error = self.error.is_some();
+        // list + hint (1) + error (0 or 1) + borders (2) + margin (2)
+        let dialog_height = (list_height + 5 + if has_error { 1 } else { 0 }).min(area.height);
         let dialog_width: u16 = 40;
 
         let dialog_area = super::centered_rect(area, dialog_width, dialog_height);
@@ -226,13 +231,14 @@ impl ProfilePickerDialog {
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
 
+        let mut constraints = vec![Constraint::Min(1), Constraint::Length(1)];
+        if has_error {
+            constraints.push(Constraint::Length(1));
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([
-                Constraint::Min(1),    // profile list
-                Constraint::Length(1), // hint
-            ])
+            .constraints(constraints)
             .split(inner);
 
         // Profile list with scrolling
@@ -301,6 +307,13 @@ impl ProfilePickerDialog {
             Span::raw(" close"),
         ]);
         frame.render_widget(Paragraph::new(Line::from(hint_spans)), chunks[1]);
+
+        if let Some(err) = &self.error {
+            frame.render_widget(
+                Paragraph::new(err.as_str()).style(Style::default().fg(theme.error)),
+                chunks[2],
+            );
+        }
     }
 
     fn render_create(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -591,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_not_allowed_on_default() {
+    fn test_delete_allowed_on_inactive_default() {
         let profiles = vec![
             ProfileEntry {
                 name: "default".to_string(),
@@ -610,7 +623,7 @@ mod tests {
         assert_eq!(dialog.selected, 0);
 
         dialog.handle_key(key(KeyCode::Char('d')));
-        assert!(matches!(dialog.mode, Mode::List));
+        assert!(matches!(dialog.mode, Mode::ConfirmDelete));
     }
 
     #[test]

@@ -242,6 +242,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
+            .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .output()
             .expect("failed to run tmux new-session");
 
@@ -387,6 +388,7 @@ last_seen_version = "{}"
             .env("HOME", self.home_dir.path())
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
+            .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .output()
             .expect("failed to run aoe CLI")
     }
