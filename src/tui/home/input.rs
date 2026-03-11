@@ -445,6 +445,7 @@ impl HomeView {
                         existing_groups,
                         &current_profile,
                         profiles,
+                        &self.launch_dir,
                     ));
                 }
             }

@@ -58,6 +58,7 @@ pub struct App {
     needs_redraw: bool,
     update_info: Option<UpdateInfo>,
     update_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<UpdateInfo>>>,
+    launch_dir: PathBuf,
 }
 
 /// Check if the app version changed and return the previous version if changelog should be shown.
@@ -76,9 +77,13 @@ pub fn check_version_change() -> Result<Option<String>> {
 }
 
 impl App {
-    pub fn new(profile: &str, available_tools: AvailableTools) -> Result<Self> {
+    pub fn new(
+        profile: &str,
+        available_tools: AvailableTools,
+        launch_dir: PathBuf,
+    ) -> Result<Self> {
         let storage = Storage::new(profile)?;
-        let mut home = HomeView::new(storage, available_tools)?;
+        let mut home = HomeView::new(storage, available_tools, launch_dir.clone())?;
 
         // Check if we need to show welcome or changelog dialogs
         let mut config = load_config()?.unwrap_or_default();
@@ -111,6 +116,7 @@ impl App {
             needs_redraw: true,
             update_info: None,
             update_rx: None,
+            launch_dir,
         })
     }
 
@@ -337,7 +343,7 @@ impl App {
             Action::SwitchProfile(profile) => {
                 let storage = Storage::new(&profile)?;
                 let tools = self.home.available_tools();
-                self.home = HomeView::new(storage, tools)?;
+                self.home = HomeView::new(storage, tools, self.launch_dir.clone())?;
             }
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;

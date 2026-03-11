@@ -31,7 +31,7 @@ fn create_test_env_empty() -> TestEnv {
     setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -49,7 +49,7 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     storage.save(&instances).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -73,7 +73,7 @@ fn create_test_env_with_groups() -> TestEnv {
     storage.save(&instances).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -104,7 +104,7 @@ fn create_test_env_with_mixed_sessions() -> TestEnv {
     storage.save_with_groups(&instances, &group_tree).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -187,6 +187,7 @@ fn test_has_dialog_returns_true_for_new_dialog() {
         Vec::new(),
         "default",
         vec!["default".to_string()],
+        &std::env::current_dir().unwrap_or_default(),
     ));
     assert!(env.view.has_dialog());
 }
@@ -765,7 +766,8 @@ fn test_uppercase_p_picker_switch_profile() {
 
     let storage = Storage::new("first").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
-    let mut view = HomeView::new(storage, tools).unwrap();
+    let mut view =
+        HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
 
     // Open picker
     view.handle_key(key(KeyCode::Char('P')));
@@ -905,7 +907,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     storage.save_with_groups(&instances, &group_tree).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -935,7 +937,7 @@ fn test_group_has_managed_worktrees() {
     storage.save(&[inst1, inst2]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
 
     assert!(view.group_has_managed_worktrees("work", "work/"));
     assert!(!view.group_has_managed_worktrees("other", "other/"));
@@ -968,7 +970,7 @@ fn test_group_has_containers() {
     storage.save(&[inst1, inst2]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
 
     assert!(view.group_has_containers("work", "work/"));
     assert!(!view.group_has_containers("other", "other/"));
@@ -1084,7 +1086,8 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
     storage.save(&[inst1]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let mut view = HomeView::new(storage, tools).unwrap();
+    let mut view =
+        HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
 
     // Select the work group
     view.cursor = 0;
@@ -1131,7 +1134,8 @@ fn test_delete_group_with_sessions_respects_container_option() {
     storage.save(&[inst1]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let mut view = HomeView::new(storage, tools).unwrap();
+    let mut view =
+        HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
 
     // Select the work group
     view.cursor = 0;

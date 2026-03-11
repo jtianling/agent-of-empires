@@ -27,6 +27,9 @@ use crate::session::get_update_settings;
 use crate::update::check_for_update;
 
 pub async fn run(profile: &str) -> Result<()> {
+    // Capture the directory where the user launched aoe, before anything changes cwd
+    let launch_dir = std::env::current_dir().unwrap_or_default();
+
     // Run pending migrations with a spinner so users see progress
     if migrations::has_pending_migrations() {
         const SPINNER_FRAMES: &[char] = &['◐', '◓', '◑', '◒'];
@@ -107,7 +110,7 @@ pub async fn run(profile: &str) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run
-    let mut app = App::new(profile, available_tools)?;
+    let mut app = App::new(profile, available_tools, launch_dir)?;
     let result = app.run(&mut terminal).await;
 
     // Clean up the nested-detach tmux hook if we set one up during this run.

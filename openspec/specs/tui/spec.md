@@ -112,6 +112,7 @@ The diff view shows git changes for the selected session's project:
 - **FR-008**: The Repo settings tab MUST be disabled when no session is selected.
 - **FR-009**: The TUI MUST function correctly at terminal widths as narrow as 80 columns.
 - **FR-010**: Session creation and deletion MUST show progress feedback during async operations.
+- **FR-011**: The creation dialog's default project path MUST be the directory where the user launched `aoe`, not the process's current working directory at dialog open time. The launch directory SHALL be captured once at TUI startup and reused for all subsequent session creation dialogs.
 
 ## Success Criteria
 

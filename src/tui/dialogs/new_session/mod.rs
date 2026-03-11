@@ -298,10 +298,9 @@ impl NewSessionDialog {
         existing_groups: Vec<String>,
         profile: &str,
         available_profiles: Vec<String>,
+        launch_dir: &std::path::Path,
     ) -> Self {
-        let current_dir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let current_dir = launch_dir.to_string_lossy().to_string();
 
         let available_tools = tools.available_list();
         let docker_available = containers::get_container_runtime().is_available();

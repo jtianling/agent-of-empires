@@ -135,6 +135,9 @@ pub struct HomeView {
     // Tool availability
     pub(super) available_tools: AvailableTools,
 
+    // Directory where aoe was launched (for new session defaults)
+    pub(super) launch_dir: std::path::PathBuf,
+
     // Performance: background status polling
     pub(super) status_poller: StatusPoller,
     pub(super) pending_status_refresh: bool,
@@ -175,7 +178,11 @@ pub struct HomeView {
 }
 
 impl HomeView {
-    pub fn new(storage: Storage, available_tools: AvailableTools) -> anyhow::Result<Self> {
+    pub fn new(
+        storage: Storage,
+        available_tools: AvailableTools,
+        launch_dir: std::path::PathBuf,
+    ) -> anyhow::Result<Self> {
         let (instances, groups) = storage.load_with_groups()?;
 
         let instance_map: HashMap<String, Instance> = instances
@@ -236,6 +243,7 @@ impl HomeView {
             search_matches: Vec::new(),
             search_match_index: 0,
             available_tools,
+            launch_dir,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
             deletion_poller: DeletionPoller::new(),
