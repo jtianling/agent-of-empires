@@ -211,7 +211,7 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
         }
     }
     // For terminal sessions, default to the user's shell
-    if params.tool == "terminal" && instance.command.is_empty() {
+    if params.tool == "shell" && instance.command.is_empty() {
         instance.command = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     }
 

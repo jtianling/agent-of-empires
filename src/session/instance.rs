@@ -750,10 +750,10 @@ mod tests {
     #[test]
     fn test_all_agents_have_yolo_support() {
         for agent in crate::agents::AGENTS {
-            if agent.name == "terminal" {
+            if agent.name == "shell" {
                 assert!(
                     agent.yolo.is_none(),
-                    "Terminal should not have YOLO mode configured"
+                    "Shell should not have YOLO mode configured"
                 );
                 continue;
             }

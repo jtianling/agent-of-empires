@@ -466,7 +466,7 @@ impl NewSessionDialog {
     }
 
     pub(super) fn is_terminal_selected(&self) -> bool {
-        self.available_tools.get(self.tool_index).copied() == Some("terminal")
+        self.available_tools.get(self.tool_index).copied() == Some("shell")
     }
 
     /// The field index of the path field (shifts based on whether profile picker is visible)
@@ -1113,8 +1113,8 @@ impl NewSessionDialog {
                 .cloned()
                 .unwrap_or_default(),
         );
-        // Reset agent-specific fields when switching to terminal
-        if tool == "terminal" {
+        // Reset agent-specific fields when switching to shell
+        if tool == "shell" {
             self.yolo_mode = false;
             self.worktree_branch = Input::default();
             self.create_new_branch = true;
