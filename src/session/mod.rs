@@ -35,10 +35,12 @@ pub use repo_config::{
 pub use storage::Storage;
 
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 
 pub const DEFAULT_PROFILE: &str = "default";
+const AUTO_PROFILE_PREFIX: &str = "auto-";
 
 pub fn get_app_dir() -> Result<PathBuf> {
     let dir = get_app_dir_path()?;
@@ -115,10 +117,6 @@ pub fn create_profile(name: &str) -> Result<()> {
 }
 
 pub fn delete_profile(name: &str) -> Result<()> {
-    if name == DEFAULT_PROFILE {
-        anyhow::bail!("Cannot delete the default profile");
-    }
-
     let base = get_app_dir()?;
     let profile_dir = base.join("profiles").join(name);
 
@@ -166,4 +164,323 @@ pub fn set_default_profile(name: &str) -> Result<()> {
     config.default_profile = name.to_string();
     save_config(&config)?;
     Ok(())
+}
+
+pub fn resolve_profile(explicit: Option<String>) -> String {
+    if let Some(p) = explicit {
+        return p;
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let dir_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    let sanitized = sanitize_profile_name(dir_name);
+    let hash = short_hash(&cwd.to_string_lossy());
+    if sanitized.is_empty() {
+        format!("{AUTO_PROFILE_PREFIX}{hash}")
+    } else {
+        format!("{AUTO_PROFILE_PREFIX}{sanitized}-{hash}")
+    }
+}
+
+fn sanitize_profile_name(name: &str) -> String {
+    let lowered = name.to_lowercase();
+    let replaced: String = lowered
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let collapsed = replaced
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    collapsed
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    format!("{:02x}{:02x}", result[0], result[1])
+}
+
+pub fn register_instance(profile: &str) {
+    let Ok(profile_dir) = get_profile_dir(profile) else {
+        return;
+    };
+    let instances_dir = profile_dir.join(".instances");
+    let _ = fs::create_dir_all(&instances_dir);
+    let pid = std::process::id();
+    let _ = fs::write(instances_dir.join(pid.to_string()), "");
+}
+
+pub fn unregister_instance(profile: &str) {
+    let Ok(base) = get_app_dir() else { return };
+    let instances_dir = base.join("profiles").join(profile).join(".instances");
+    let pid = std::process::id();
+    let _ = fs::remove_file(instances_dir.join(pid.to_string()));
+}
+
+pub fn cleanup_stale_instances(profile: &str) {
+    let Ok(base) = get_app_dir() else { return };
+    let instances_dir = base.join("profiles").join(profile).join(".instances");
+    if !instances_dir.exists() {
+        return;
+    }
+    let entries = match fs::read_dir(&instances_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if let Ok(pid) = name.parse::<u32>() {
+                if !is_process_alive(pid) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+pub fn has_other_instances(profile: &str) -> bool {
+    let Ok(base) = get_app_dir() else {
+        return false;
+    };
+    let instances_dir = base.join("profiles").join(profile).join(".instances");
+    if !instances_dir.exists() {
+        return false;
+    }
+    let my_pid = std::process::id();
+    let entries = match fs::read_dir(&instances_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if let Ok(pid) = name.parse::<u32>() {
+                if pid != my_pid && is_process_alive(pid) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+    signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+}
+
+pub fn cleanup_empty_profile(profile: &str) {
+    if has_other_instances(profile) {
+        return;
+    }
+    let storage = match Storage::new(profile) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let sessions = match storage.load() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if sessions.is_empty() {
+        let _ = delete_profile(profile);
+    }
+}
+
+pub fn check_migration_hint(resolved_profile: &str) {
+    if resolved_profile == DEFAULT_PROFILE || !resolved_profile.starts_with(AUTO_PROFILE_PREFIX) {
+        return;
+    }
+
+    let Ok(base) = get_app_dir() else { return };
+    let default_dir = base.join("profiles").join(DEFAULT_PROFILE);
+    if !default_dir.exists() {
+        return;
+    }
+
+    let default_has_sessions = Storage::new(DEFAULT_PROFILE)
+        .ok()
+        .and_then(|s| s.load().ok())
+        .map(|sessions| !sessions.is_empty())
+        .unwrap_or(false);
+
+    if !default_has_sessions {
+        return;
+    }
+
+    let resolved_dir = base.join("profiles").join(resolved_profile);
+    let resolved_is_empty = if resolved_dir.exists() {
+        Storage::new(resolved_profile)
+            .ok()
+            .and_then(|s| s.load().ok())
+            .map(|sessions| sessions.is_empty())
+            .unwrap_or(true)
+    } else {
+        true
+    };
+
+    if resolved_is_empty {
+        eprintln!(
+            "Hint: Your existing sessions are in the 'default' profile. \
+             Use `aoe -p default` to access them."
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn test_sanitize_profile_name_basic() {
+        assert_eq!(sanitize_profile_name("project-a"), "project-a");
+        assert_eq!(sanitize_profile_name("MyProject"), "myproject");
+        assert_eq!(sanitize_profile_name("hello world"), "hello-world");
+    }
+
+    #[test]
+    fn test_sanitize_profile_name_special_chars() {
+        assert_eq!(sanitize_profile_name("My Project!!"), "my-project");
+        assert_eq!(sanitize_profile_name("foo@bar#baz"), "foo-bar-baz");
+        assert_eq!(sanitize_profile_name("---leading---"), "leading");
+        assert_eq!(sanitize_profile_name("a--b"), "a-b");
+    }
+
+    #[test]
+    fn test_sanitize_profile_name_unicode() {
+        assert_eq!(sanitize_profile_name("项目"), "");
+        assert_eq!(sanitize_profile_name("project-项目"), "project");
+        assert_eq!(sanitize_profile_name("café"), "caf");
+    }
+
+    #[test]
+    fn test_sanitize_profile_name_empty() {
+        assert_eq!(sanitize_profile_name(""), "");
+        assert_eq!(sanitize_profile_name("---"), "");
+        assert_eq!(sanitize_profile_name("!!!"), "");
+    }
+
+    #[test]
+    fn test_short_hash_deterministic() {
+        let h1 = short_hash("/home/user/project-a");
+        let h2 = short_hash("/home/user/project-a");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 4);
+    }
+
+    #[test]
+    fn test_short_hash_different_inputs() {
+        let h1 = short_hash("/home/user/project-a");
+        let h2 = short_hash("/home/user/project-b");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_short_hash_hex_format() {
+        let h = short_hash("test");
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_resolve_profile_explicit() {
+        let result = resolve_profile(Some("myprofile".to_string()));
+        assert_eq!(result, "myprofile");
+    }
+
+    #[test]
+    fn test_resolve_profile_directory_based() {
+        let result = resolve_profile(None);
+        assert!(result.starts_with("auto-"));
+        assert!(result.len() > 5);
+    }
+
+    #[test]
+    #[serial]
+    fn test_register_and_unregister_instance() {
+        let test_profile = "test-instance-tracking";
+        let _ = delete_profile(test_profile);
+        create_profile(test_profile).unwrap();
+
+        register_instance(test_profile);
+
+        let base = get_app_dir().unwrap();
+        let instances_dir = base.join("profiles").join(test_profile).join(".instances");
+        let pid = std::process::id();
+        assert!(instances_dir.join(pid.to_string()).exists());
+
+        unregister_instance(test_profile);
+        assert!(!instances_dir.join(pid.to_string()).exists());
+
+        let _ = delete_profile(test_profile);
+    }
+
+    #[test]
+    #[serial]
+    fn test_has_other_instances_false_when_alone() {
+        let test_profile = "test-has-other-alone";
+        let _ = delete_profile(test_profile);
+        create_profile(test_profile).unwrap();
+
+        register_instance(test_profile);
+        assert!(!has_other_instances(test_profile));
+
+        unregister_instance(test_profile);
+        let _ = delete_profile(test_profile);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_instances() {
+        let test_profile = "test-stale-cleanup";
+        let _ = delete_profile(test_profile);
+        create_profile(test_profile).unwrap();
+
+        let base = get_app_dir().unwrap();
+        let instances_dir = base.join("profiles").join(test_profile).join(".instances");
+        fs::create_dir_all(&instances_dir).unwrap();
+
+        // Write a fake PID file for a non-existent process
+        let fake_pid = 99999999u32;
+        fs::write(instances_dir.join(fake_pid.to_string()), "").unwrap();
+        assert!(instances_dir.join(fake_pid.to_string()).exists());
+
+        cleanup_stale_instances(test_profile);
+        assert!(!instances_dir.join(fake_pid.to_string()).exists());
+
+        let _ = delete_profile(test_profile);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_empty_profile_respects_other_instances() {
+        let test_profile = "test-cleanup-multi";
+        let _ = delete_profile(test_profile);
+        create_profile(test_profile).unwrap();
+
+        // Register our instance
+        register_instance(test_profile);
+
+        let base = get_app_dir().unwrap();
+        let instances_dir = base.join("profiles").join(test_profile).join(".instances");
+        // Use parent PID as a fake "other instance" (always alive and accessible)
+        let parent_pid = std::os::unix::process::parent_id();
+        fs::write(instances_dir.join(parent_pid.to_string()), "").unwrap();
+
+        // cleanup should not delete because has_other_instances returns true
+        cleanup_empty_profile(test_profile);
+        assert!(base.join("profiles").join(test_profile).exists());
+
+        let _ = fs::remove_file(instances_dir.join(parent_pid.to_string()));
+        unregister_instance(test_profile);
+
+        // Now cleanup should delete (no sessions, no other instances)
+        cleanup_empty_profile(test_profile);
+        assert!(!base.join("profiles").join(test_profile).exists());
+    }
 }

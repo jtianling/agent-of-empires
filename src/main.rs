@@ -2,6 +2,7 @@
 
 use agent_of_empires::cli::{self, Cli, Commands};
 use agent_of_empires::migrations;
+use agent_of_empires::session;
 use agent_of_empires::tui;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -33,10 +34,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sounds { command }) => return cli::sounds::run(command).await,
         Some(Commands::Uninstall(args)) => return cli::uninstall::run(args).await,
+        Some(Commands::Profile { command }) => return cli::profile::run(command).await,
         _ => {}
     }
 
-    let profile = cli.profile.unwrap_or_default();
+    let profile = session::resolve_profile(cli.profile);
+    session::check_migration_hint(&profile);
 
     // TUI mode handles migrations with a spinner; CLI runs them silently
     if cli.command.is_some() {
@@ -50,9 +53,15 @@ async fn main() -> Result<()> {
         Some(Commands::Status(args)) => cli::status::run(&profile, args).await,
         Some(Commands::Session { command }) => cli::session::run(&profile, command).await,
         Some(Commands::Group { command }) => cli::group::run(&profile, command).await,
-        Some(Commands::Profile { command }) => cli::profile::run(command).await,
         Some(Commands::Worktree { command }) => cli::worktree::run(&profile, command).await,
-        None => tui::run(&profile).await,
+        None => {
+            session::cleanup_stale_instances(&profile);
+            session::register_instance(&profile);
+            let result = tui::run(&profile).await;
+            session::unregister_instance(&profile);
+            session::cleanup_empty_profile(&profile);
+            result
+        }
         _ => unreachable!(),
     }
 }
