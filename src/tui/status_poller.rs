@@ -89,15 +89,14 @@ impl StatusPoller {
 
                     inst.update_status();
 
-                    // For agents that don't set their own title, manage the pane
-                    // title based on detected status (e.g. add ✋ when waiting).
+                    // For agents that don't set their own title, keep the pane
+                    // title aligned with the session title. Codex is handled by
+                    // its dedicated tmux monitor so the dashboard poller does
+                    // not race the live waiting indicator.
                     let agent_manages_title =
                         crate::agents::get_agent(&inst.tool).is_some_and(|a| a.sets_own_title);
-                    if !agent_manages_title {
-                        let desired = match inst.status {
-                            Status::Waiting => format!("\u{270b} {}", inst.title),
-                            _ => inst.title.clone(),
-                        };
+                    if !agent_manages_title && inst.tool != "codex" {
+                        let desired = inst.title.clone();
                         let last = managed_pane_titles.get(&inst.id);
                         if last.map_or(true, |prev| *prev != desired) {
                             let session_name =

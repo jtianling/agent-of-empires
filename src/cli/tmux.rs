@@ -10,6 +10,8 @@ pub enum TmuxCommands {
     /// Add this to your ~/.tmux.conf:
     ///   set -g status-right "#(aoe tmux status)"
     Status(TmuxStatusArgs),
+    #[command(hide = true, name = "monitor-codex-title")]
+    CodexTitleMonitor(CodexTitleMonitorArgs),
 }
 
 #[derive(Args)]
@@ -17,6 +19,12 @@ pub struct TmuxStatusArgs {
     /// Output format (text or json)
     #[arg(short, long, default_value = "text")]
     format: String,
+}
+
+#[derive(Args)]
+pub struct CodexTitleMonitorArgs {
+    #[arg(long)]
+    session: String,
 }
 
 pub fn run_status(args: TmuxStatusArgs) -> Result<()> {
@@ -54,4 +62,8 @@ pub fn run_status(args: TmuxStatusArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn run_codex_title_monitor(args: CodexTitleMonitorArgs) -> Result<()> {
+    crate::tmux::status_bar::run_codex_title_monitor(&args.session)
 }

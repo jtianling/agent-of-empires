@@ -276,3 +276,85 @@ fn test_started_session_enables_tmux_title_passthrough() {
     assert_eq!(runtime_title, "Runtime Title");
     h.kill_tmux_target(&tmux_name);
 }
+
+#[test]
+#[serial]
+fn test_codex_session_waiting_title_uses_hand_icon() {
+    crate::harness::require_tmux!();
+
+    let h = TuiTestHarness::new("cli_codex_waiting_title");
+    let project = h.project_path();
+
+    let add_output = h.run_cli(&[
+        "add",
+        project.to_str().unwrap(),
+        "-t",
+        "Codex Wait Title",
+        "-c",
+        "codex",
+        "--cmd-override",
+        "sh",
+    ]);
+    assert!(
+        add_output.status.success(),
+        "aoe add failed: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let start_output = h.run_cli_in_tmux(&["session", "start", "Codex Wait Title"]);
+    assert!(
+        start_output.status.success(),
+        "aoe session start failed: {}",
+        String::from_utf8_lossy(&start_output.stderr)
+    );
+
+    let sessions = read_sessions_json(&h);
+    let session = &sessions[0];
+    let session_id = session["id"].as_str().expect("session id");
+    let session_title = session["title"].as_str().expect("session title");
+    let tmux_name = agent_of_empires::tmux::Session::generate_name(session_id, session_title);
+
+    let mut pane_title = String::new();
+    for _ in 0..20 {
+        pane_title = h.tmux_display_message(&tmux_name, "#{pane_title}");
+        if pane_title == "Codex Wait Title" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(pane_title, "Codex Wait Title");
+
+    h.type_text_to_target(
+        &tmux_name,
+        "printf '› Ask Codex to do anything\\n'; sleep 2",
+    );
+    h.send_keys_to_target(&tmux_name, "Enter");
+
+    let mut waiting_title = String::new();
+    for _ in 0..40 {
+        waiting_title = h.tmux_display_message(&tmux_name, "#{pane_title}");
+        if waiting_title == "✋ Codex Wait Title" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(waiting_title, "✋ Codex Wait Title");
+
+    h.type_text_to_target(
+        &tmux_name,
+        "i=1; while [ $i -le 80 ]; do echo file-saved-$i; i=$((i+1)); done",
+    );
+    h.send_keys_to_target(&tmux_name, "Enter");
+
+    let mut resumed_title = String::new();
+    for _ in 0..40 {
+        resumed_title = h.tmux_display_message(&tmux_name, "#{pane_title}");
+        if resumed_title == "Codex Wait Title" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(resumed_title, "Codex Wait Title");
+
+    h.kill_tmux_target(&tmux_name);
+}

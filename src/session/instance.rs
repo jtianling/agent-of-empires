@@ -499,6 +499,11 @@ impl Instance {
     fn apply_tmux_options(&self) {
         let name = tmux::Session::generate_name(&self.id, &self.title);
         self.apply_session_tmux_options(&name, &self.title);
+        if self.tool == "codex" {
+            if let Err(e) = tmux::status_bar::ensure_codex_title_monitor(&name, &self.title) {
+                tracing::debug!("Failed to refresh Codex title monitor: {}", e);
+            }
+        }
     }
 
     fn apply_terminal_tmux_options(&self) {

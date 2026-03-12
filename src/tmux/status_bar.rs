@@ -1,13 +1,29 @@
 //! tmux status bar configuration for aoe sessions
 
 use anyhow::Result;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::session::Status;
 
 const ACTIVE_PANE_TITLE_FORMAT: &str = "#T";
+const CODEX_TITLE_MONITOR_PID_OPTION: &str = "@aoe_codex_title_monitor_pid";
+const CODEX_TITLE_MONITOR_TITLE_OPTION: &str = "@aoe_codex_title_monitor_title";
+const CODEX_TITLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const CODEX_WAITING_TITLE_PREFIX: &str = "\u{270b} ";
 
 /// Information about a sandboxed session for status bar display.
 pub struct SandboxDisplay {
     pub container_name: String,
+}
+
+pub fn managed_agent_pane_title(tool: &str, title: &str, status: Status) -> String {
+    if tool == "codex" && status == Status::Waiting {
+        format!("{}{}", CODEX_WAITING_TITLE_PREFIX, title)
+    } else {
+        title.to_string()
+    }
 }
 
 /// Apply aoe-styled status bar configuration to a tmux session.
@@ -114,13 +130,132 @@ fn enable_title_passthrough(session_name: &str) -> Result<()> {
 /// This gives agents that don't set their own OSC 0 title (e.g. Codex CLI)
 /// a useful default instead of showing the hostname.
 fn set_initial_pane_title(session_name: &str, title: &str) -> Result<()> {
+    set_pane_title(session_name, title)
+}
+
+fn set_pane_title(target: &str, title: &str) -> Result<()> {
     let output = Command::new("tmux")
-        .args(["select-pane", "-t", session_name, "-T", title])
+        .args(["select-pane", "-t", target, "-T", title])
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::debug!("Failed to set pane title for {}: {}", session_name, stderr);
+        tracing::debug!("Failed to set pane title for {}: {}", target, stderr);
+    }
+
+    Ok(())
+}
+
+fn unset_session_option(session_name: &str, option: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-option", "-t", session_name, "-u", option])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("Failed to unset tmux option {}: {}", option, stderr);
+    }
+
+    Ok(())
+}
+
+fn session_exists(session_name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn capture_pane(target: &str, lines: usize) -> Result<String> {
+    let output = Command::new("tmux")
+        .args([
+            "capture-pane",
+            "-t",
+            target,
+            "-p",
+            "-S",
+            &format!("-{}", lines),
+        ])
+        .output()?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+fn pid_is_running(pid: &str) -> bool {
+    if pid.trim().is_empty() {
+        return false;
+    }
+
+    Command::new("/bin/kill")
+        .args(["-0", pid])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+pub fn ensure_codex_title_monitor(session_name: &str, title: &str) -> Result<()> {
+    set_session_option(session_name, CODEX_TITLE_MONITOR_TITLE_OPTION, title)?;
+
+    if get_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION)
+        .as_deref()
+        .is_some_and(pid_is_running)
+    {
+        return Ok(());
+    }
+
+    let current_exe = std::env::current_exe()?;
+    let mut child = Command::new(current_exe);
+    child
+        .args(["tmux", "monitor-codex-title", "--session", session_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let monitor = child.spawn()?;
+    set_session_option(
+        session_name,
+        CODEX_TITLE_MONITOR_PID_OPTION,
+        &monitor.id().to_string(),
+    )?;
+    Ok(())
+}
+
+pub fn run_codex_title_monitor(session_name: &str) -> Result<()> {
+    let pid = std::process::id().to_string();
+    let startup_deadline = Instant::now() + Duration::from_secs(2);
+    let mut last_title: Option<String> = None;
+
+    while session_exists(session_name) {
+        match get_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION) {
+            Some(owner) if owner == pid => {}
+            Some(_) => break,
+            None if Instant::now() <= startup_deadline => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            None => break,
+        }
+
+        let Some(title) = get_session_option(session_name, CODEX_TITLE_MONITOR_TITLE_OPTION) else {
+            break;
+        };
+        let pane_content = capture_pane(session_name, 50)?;
+        let status = crate::tmux::status_detection::detect_codex_status(&pane_content);
+        let desired = managed_agent_pane_title("codex", &title, status);
+        if last_title.as_deref() != Some(desired.as_str()) {
+            set_pane_title(session_name, &desired)?;
+            last_title = Some(desired);
+        }
+        thread::sleep(CODEX_TITLE_MONITOR_POLL_INTERVAL);
+    }
+
+    if get_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION).as_deref() == Some(&pid) {
+        let _ = unset_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION);
     }
 
     Ok(())
@@ -241,10 +376,27 @@ fn get_session_option(session_name: &str, option: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Status;
 
     #[test]
     fn test_active_pane_title_format_uses_tmux_pane_title() {
         assert_eq!(ACTIVE_PANE_TITLE_FORMAT, "#T");
+    }
+
+    #[test]
+    fn test_managed_agent_pane_title_adds_hand_only_for_codex_waiting() {
+        assert_eq!(
+            managed_agent_pane_title("codex", "My Session", Status::Waiting),
+            "\u{270b} My Session"
+        );
+        assert_eq!(
+            managed_agent_pane_title("codex", "My Session", Status::Running),
+            "My Session"
+        );
+        assert_eq!(
+            managed_agent_pane_title("opencode", "My Session", Status::Waiting),
+            "My Session"
+        );
     }
 
     #[test]
