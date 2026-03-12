@@ -11,7 +11,7 @@ use std::fs;
 use super::config::{
     Config, ContainerRuntimeName, DefaultTerminalMode, TmuxMouseMode, TmuxStatusBarMode,
 };
-use super::get_profile_dir;
+use super::{ensure_profile_dir, get_profile_dir};
 
 /// Profile-specific settings. All fields are Option<T> - None means "inherit from global"
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -183,6 +183,7 @@ pub fn load_profile_config(profile: &str) -> Result<ProfileConfig> {
 
 /// Save profile-specific config
 pub fn save_profile_config(profile: &str, config: &ProfileConfig) -> Result<()> {
+    ensure_profile_dir(profile)?;
     let path = get_profile_config_path(profile)?;
     let content = toml::to_string_pretty(config)?;
     fs::write(&path, content)?;

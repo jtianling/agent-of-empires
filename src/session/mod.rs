@@ -72,6 +72,12 @@ pub fn get_profile_dir(profile: &str) -> Result<PathBuf> {
         profile
     };
     let dir = base.join("profiles").join(profile_name);
+    Ok(dir)
+}
+
+/// Like `get_profile_dir`, but creates the directory if it doesn't exist.
+pub fn ensure_profile_dir(profile: &str) -> Result<PathBuf> {
+    let dir = get_profile_dir(profile)?;
     if !dir.exists() {
         fs::create_dir_all(&dir)?;
     }
@@ -112,7 +118,7 @@ pub fn create_profile(name: &str) -> Result<()> {
         anyhow::bail!("Profile '{}' already exists", name);
     }
 
-    get_profile_dir(name)?;
+    ensure_profile_dir(name)?;
     Ok(())
 }
 
@@ -207,7 +213,7 @@ fn short_hash(input: &str) -> String {
 }
 
 pub fn register_instance(profile: &str) {
-    let Ok(profile_dir) = get_profile_dir(profile) else {
+    let Ok(profile_dir) = ensure_profile_dir(profile) else {
         return;
     };
     let instances_dir = profile_dir.join(".instances");
