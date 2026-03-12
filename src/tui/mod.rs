@@ -244,12 +244,16 @@ fn enable_tmux_titles() -> Option<TmuxTitleState> {
         .args(["set-option", "-g", "set-titles-string", "#T"])
         .output();
 
+    crate::tmux::utils::setup_title_refresh_hook();
+
     Some(state)
 }
 
 /// Restore the original tmux title settings.
 fn restore_tmux_titles(saved: &TmuxTitleState) {
     use std::process::Command;
+
+    crate::tmux::utils::cleanup_title_refresh_hook();
 
     if saved.set_titles != "on" {
         let _ = Command::new("tmux")

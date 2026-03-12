@@ -2,9 +2,13 @@
 
 use std::process::Command;
 
-/// Hook index used for the aoe-specific `client-session-changed` hook.
-/// A high index avoids collisions with user-defined hooks.
-const AOE_HOOK: &str = "client-session-changed[99]";
+/// Hook index used for the aoe-specific `client-session-changed` hook that
+/// keeps `Ctrl+b d` mapped to "go back" inside managed sessions.
+const NESTED_DETACH_HOOK: &str = "client-session-changed[99]";
+
+/// Hook index used to force tmux to re-emit the active pane title to the
+/// outer terminal whenever `switch-client` changes sessions.
+const TITLE_REFRESH_HOOK: &str = "client-session-changed[98]";
 
 /// Sets up a tmux hook that dynamically rebinds `Ctrl+b d` based on the
 /// current session:
@@ -21,7 +25,7 @@ pub fn setup_nested_detach_binding() {
         .args([
             "set-hook",
             "-g",
-            AOE_HOOK,
+            NESTED_DETACH_HOOK,
             r#"if-shell "tmux display-message -p '#{session_name}' | grep -q '^aoe_'" "bind-key d run-shell 'tmux switch-client -l 2>/dev/null || tmux detach-client'" "bind-key d detach-client""#,
         ])
         .output()
@@ -44,11 +48,36 @@ pub fn setup_nested_detach_binding() {
 /// the default `Ctrl+b d` binding.
 pub fn cleanup_nested_detach_binding() {
     Command::new("tmux")
-        .args(["set-hook", "-gu", AOE_HOOK])
+        .args(["set-hook", "-gu", NESTED_DETACH_HOOK])
         .output()
         .ok();
     Command::new("tmux")
         .args(["bind-key", "d", "detach-client"])
+        .output()
+        .ok();
+}
+
+/// Install a hook that nudges tmux to re-publish `#T` after `switch-client`.
+/// This lets Claude Code and Gemini CLI pane titles propagate immediately on
+/// the first session switch, while Codex keeps using the pane title AoE sets.
+pub fn setup_title_refresh_hook() {
+    Command::new("tmux")
+        .args([
+            "set-hook",
+            "-g",
+            TITLE_REFRESH_HOOK,
+            // tmux parses `set-hook` command arguments eagerly, so wrap the
+            // toggle in `run-shell` to defer execution until the hook fires.
+            r#"run-shell "tmux select-pane -T '#{pane_title}.'; tmux select-pane -T '#{pane_title}'""#,
+        ])
+        .output()
+        .ok();
+}
+
+/// Remove the title refresh hook installed by [`setup_title_refresh_hook`].
+pub fn cleanup_title_refresh_hook() {
+    Command::new("tmux")
+        .args(["set-hook", "-gu", TITLE_REFRESH_HOOK])
         .output()
         .ok();
 }
