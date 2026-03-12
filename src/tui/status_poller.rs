@@ -16,8 +16,6 @@ pub struct StatusUpdate {
     pub id: String,
     pub status: Status,
     pub last_error: Option<String>,
-    /// The pane title set by the agent via OSC 0 (e.g. "* Claude Code")
-    pub pane_title: Option<String>,
 }
 
 /// Background thread that polls session status without blocking the UI
@@ -83,7 +81,6 @@ impl StatusPoller {
                                         id: inst.id,
                                         status: Status::Error,
                                         last_error: Some("Container is not running".to_string()),
-                                        pane_title: None,
                                     };
                                 }
                             }
@@ -91,9 +88,6 @@ impl StatusPoller {
                     }
 
                     inst.update_status();
-
-                    // Read the pane title the agent set via OSC 0
-                    let pane_title = inst.tmux_session().ok().and_then(|s| s.pane_title());
 
                     // For agents that don't set their own title, manage the pane
                     // title based on detected status (e.g. add ✋ when waiting).
@@ -119,7 +113,6 @@ impl StatusPoller {
                         id: inst.id,
                         status: inst.status,
                         last_error: inst.last_error,
-                        pane_title,
                     }
                 })
                 .collect();

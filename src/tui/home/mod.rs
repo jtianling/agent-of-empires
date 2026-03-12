@@ -162,9 +162,6 @@ pub struct HomeView {
     // Default terminal mode from config
     pub(super) default_terminal_mode: TerminalMode,
 
-    // Agent pane titles (set by agents via OSC 0, read by status poller)
-    pub(super) pane_titles: HashMap<String, String>,
-
     // Sound config for state transition sounds
     pub(super) sound_config: crate::sound::SoundConfig,
 
@@ -313,7 +310,6 @@ impl HomeView {
             container_terminal_preview_cache: PreviewCache::default(),
             terminal_modes: HashMap::new(),
             default_terminal_mode,
-            pane_titles: HashMap::new(),
             sound_config,
             settings_view: None,
             settings_close_confirm: false,
@@ -382,11 +378,6 @@ impl HomeView {
 
         if let Some(updates) = self.status_poller.try_recv_updates() {
             for update in updates {
-                // Store pane title regardless of status update eligibility
-                if let Some(title) = update.pane_title {
-                    self.pane_titles.insert(update.id.clone(), title);
-                }
-
                 let old_status = self.get_instance(&update.id).map(|i| i.status);
 
                 let should_update = old_status.is_some_and(|s| {
@@ -601,29 +592,6 @@ impl HomeView {
         }
 
         changed
-    }
-
-    /// Derive the current tab title state from agent pane titles and session statuses.
-    ///
-    /// Checks two signals (both universal across all agents):
-    /// 1. Pane title set by the agent via OSC 0 -- agents like Gemini CLI and
-    ///    Claude Code prefix with `*` when waiting for input.
-    /// 2. Status::Waiting from pane content / hook detection as a fallback.
-    pub fn tab_title_state(&self) -> super::tab_title::TabTitleState {
-        use super::tab_title::TabTitleState;
-        use crate::session::Status;
-
-        // Check agent-set pane titles for "waiting" indicators (e.g. `*` prefix)
-        let any_pane_waiting = self.pane_titles.values().any(|t| t.starts_with('*'));
-
-        // Fallback: status detection (hooks for Claude Code, pane parsing for others)
-        let any_status_waiting = self.instances.iter().any(|i| i.status == Status::Waiting);
-
-        if any_pane_waiting || any_status_waiting {
-            TabTitleState::AgentWaiting
-        } else {
-            TabTitleState::Idle
-        }
     }
 
     pub fn has_dialog(&self) -> bool {

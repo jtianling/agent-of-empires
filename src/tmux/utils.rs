@@ -6,10 +6,6 @@ use std::process::Command;
 /// keeps `Ctrl+b d` mapped to "go back" inside managed sessions.
 const NESTED_DETACH_HOOK: &str = "client-session-changed[99]";
 
-/// Hook index used to force tmux to re-emit the active pane title to the
-/// outer terminal whenever `switch-client` changes sessions.
-const TITLE_REFRESH_HOOK: &str = "client-session-changed[98]";
-
 /// Sets up a tmux hook that dynamically rebinds `Ctrl+b d` based on the
 /// current session:
 ///
@@ -53,31 +49,6 @@ pub fn cleanup_nested_detach_binding() {
         .ok();
     Command::new("tmux")
         .args(["bind-key", "d", "detach-client"])
-        .output()
-        .ok();
-}
-
-/// Install a hook that nudges tmux to re-publish `#T` after `switch-client`.
-/// This lets Claude Code and Gemini CLI pane titles propagate immediately on
-/// the first session switch, while Codex keeps using the pane title AoE sets.
-pub fn setup_title_refresh_hook() {
-    Command::new("tmux")
-        .args([
-            "set-hook",
-            "-g",
-            TITLE_REFRESH_HOOK,
-            // tmux parses `set-hook` command arguments eagerly, so wrap the
-            // toggle in `run-shell` to defer execution until the hook fires.
-            r#"run-shell "tmux select-pane -T '#{pane_title}.'; tmux select-pane -T '#{pane_title}'""#,
-        ])
-        .output()
-        .ok();
-}
-
-/// Remove the title refresh hook installed by [`setup_title_refresh_hook`].
-pub fn cleanup_title_refresh_hook() {
-    Command::new("tmux")
-        .args(["set-hook", "-gu", TITLE_REFRESH_HOOK])
         .output()
         .ok();
 }

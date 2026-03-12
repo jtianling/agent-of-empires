@@ -87,7 +87,7 @@ impl SortOrder {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppStateConfig {
     #[serde(default)]
     pub has_seen_welcome: bool,
@@ -106,23 +106,6 @@ pub struct AppStateConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<SortOrder>,
-
-    #[serde(default = "default_true")]
-    pub dynamic_tab_title: bool,
-}
-
-impl Default for AppStateConfig {
-    fn default() -> Self {
-        Self {
-            has_seen_welcome: false,
-            last_seen_version: None,
-            home_list_width: None,
-            diff_file_list_width: None,
-            has_seen_custom_instruction_warning: false,
-            sort_order: None,
-            dynamic_tab_title: true,
-        }
-    }
 }
 
 /// Session-related configuration defaults

@@ -103,7 +103,6 @@ last_seen_version = ""
 home_list_width = 0          # optional
 diff_file_list_width = 0     # optional
 sort_order = "newest"        # optional
-dynamic_tab_title = true     # enable/disable dynamic terminal tab title
 ```
 
 ## Override Pattern
@@ -133,15 +132,20 @@ resolved_value = repo_override
 
 ## Global Config: `dynamic_tab_title`
 
-The global configuration SHALL include a `dynamic_tab_title` field in the `[app_state]` section. This field controls whether the TUI dynamically updates the terminal tab/window title.
+The global configuration SHALL NOT expose a `dynamic_tab_title` field once AoE TUI title
+management has been removed.
 
-#### Scenario: Default value for new installs
-- **WHEN** a user runs AoE for the first time with no config file
-- **THEN** `dynamic_tab_title` SHALL default to `true`
+#### Scenario: New config file is written
+- **WHEN** AoE writes or rewrites `config.toml`
+- **THEN** it SHALL NOT emit a `dynamic_tab_title` entry under `[app_state]`
 
-#### Scenario: Missing field in existing config
-- **WHEN** an existing config file does not contain the `dynamic_tab_title` field
-- **THEN** the system SHALL treat the missing field as `true` (default enabled)
+#### Scenario: Existing config file is migrated
+- **WHEN** AoE starts with an existing `config.toml` that still contains `[app_state].dynamic_tab_title`
+- **THEN** the migration system SHALL remove that field from the persisted config file
+
+#### Scenario: Settings UI is shown
+- **WHEN** the user opens General settings
+- **THEN** the settings list SHALL NOT include a `Dynamic Tab Title` field
 
 ## TUI Settings Requirement
 
@@ -151,12 +155,6 @@ Every configurable field MUST be editable in the Settings TUI. Adding a new fiel
 3. Wiring in `apply_field_to_global()` and `apply_field_to_profile()`
 4. A `clear_profile_override()` case in `src/tui/settings/input.rs`
 5. The override field in the corresponding `*ConfigOverride` struct with merge logic
-
-The `dynamic_tab_title` field MUST be editable in the Settings TUI under the General tab. It SHALL follow the standard settings pattern: `FieldKey` variant, `SettingField` entry, and `apply_field_to_global()` wiring.
-
-#### Scenario: User toggles dynamic tab title in settings
-- **WHEN** the user navigates to General settings and toggles `dynamic_tab_title`
-- **THEN** the setting SHALL be saved to `config.toml` and take effect immediately (title updates stop or start without restart)
 
 ## Functional Requirements
 

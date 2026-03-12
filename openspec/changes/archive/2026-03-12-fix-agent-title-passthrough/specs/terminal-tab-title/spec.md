@@ -1,21 +1,7 @@
-# Capability Spec: Terminal Tab Title
-
-**Capability**: `terminal-tab-title`
-**Created**: 2026-03-12
-**Status**: Stable
-
-## Overview
-
-AoE does not manage the outer terminal title while the AoE TUI session itself is active. The TUI
-leaves terminal-title behavior alone and does not mutate tmux title settings or emit title escape
-sequences as part of startup, redraw, shutdown, or panic cleanup.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Terminal tab title reflects TUI state
-When the AoE TUI session itself is active, AoE SHALL NOT manage the outer terminal title.
-Specifically, the TUI SHALL NOT write OSC 0 title escape sequences, SHALL NOT push or pop the
-xterm title stack, and SHALL NOT mutate tmux `set-titles` options as part of startup or teardown.
+When the AoE TUI session itself is active, AoE SHALL follow the `ddba37c` behavior and SHALL NOT manage the outer terminal title. Specifically, the TUI SHALL NOT write OSC 0 title escape sequences, SHALL NOT push or pop the xterm title stack, and SHALL NOT mutate tmux `set-titles` options as part of TUI startup or teardown.
 
 #### Scenario: TUI launches inside tmux
 - **WHEN** the TUI launches

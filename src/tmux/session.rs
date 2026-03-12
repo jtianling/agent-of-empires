@@ -217,17 +217,6 @@ impl Session {
             &content, tool, fg_pid,
         ))
     }
-
-    /// Read the pane title set by the agent via OSC 0.
-    pub fn pane_title(&self) -> Option<String> {
-        Command::new("tmux")
-            .args(["display-message", "-t", &self.name, "-p", "#{pane_title}"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
 }
 
 fn sanitize_session_name(name: &str) -> String {
