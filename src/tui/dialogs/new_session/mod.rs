@@ -781,7 +781,13 @@ impl NewSessionDialog {
                 }
                 DialogResult::Continue
             }
-            KeyCode::Left | KeyCode::Right if self.focused_field == tool_field => {
+            KeyCode::Left if self.focused_field == tool_field => {
+                let len = self.available_tools.len();
+                self.tool_index = (self.tool_index + len - 1) % len;
+                self.reload_tool_config();
+                DialogResult::Continue
+            }
+            KeyCode::Right if self.focused_field == tool_field => {
                 self.tool_index = (self.tool_index + 1) % self.available_tools.len();
                 self.reload_tool_config();
                 DialogResult::Continue
