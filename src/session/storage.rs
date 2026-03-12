@@ -67,6 +67,13 @@ impl Storage {
     }
 
     pub fn save(&self, instances: &[Instance]) -> Result<()> {
+        // Ensure profile directory exists before writing
+        if let Some(parent) = self.sessions_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
         // Create backup
         if self.sessions_path.exists() {
             let backup_path = self.sessions_path.with_extension("json.bak");
