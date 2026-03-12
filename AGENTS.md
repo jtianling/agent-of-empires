@@ -102,6 +102,35 @@ E2E tests can produce asciinema recordings (`.cast`) and GIF files automatically
   - **macOS/Windows**: `~/.agent-of-empires/`
 - Keep user data out of commits. For repo-local experiments, use ignored paths like `./.agent-of-empires/`, `.env`, and `.mcp.json`.
 
+## Terminal Title Handling
+
+- Treat outer terminal title handling and tmux pane title handling as separate concerns.
+- For the AoE TUI itself, use the stable title `Agent of Empires`. Do not reintroduce per-view or per-dialog dynamic TUI titles unless the spec is updated first.
+- When AoE starts, preserve the pre-launch terminal title and restore it on normal exit and panic cleanup. For Alacritty, prefer the title stack sequences already used in `src/tui/tab_title.rs`.
+- For AoE-managed tmux sessions, make the outer terminal title follow the active pane title through session-scoped tmux options such as `set-titles` and `set-titles-string=#T`.
+- Preserve the existing `sets_own_title` split in `src/agents.rs`: agents that manage their own titles should keep doing so, and AoE should only manage pane titles for agents that do not.
+- Do not mutate unrelated global tmux defaults just to make title propagation work. Scope title changes to AoE-managed sessions.
+- If you change terminal-title behavior, add or update runtime coverage for tmux title propagation and title restoration, and manually sanity-check the behavior in Alacritty when feasible.
+
+### Code-Level Implementation Notes
+
+- Keep TUI title-writing helpers in `src/tui/tab_title.rs`. Add low-level escape-sequence writes there instead of scattering raw OSC/CSI strings through the TUI.
+- `src/tui/mod.rs` owns the TUI title lifecycle. Startup should save the incoming title and set the stable AoE title; normal teardown and panic cleanup should restore the saved title.
+- `src/tui/app.rs` should only reapply the stable AoE title when returning from attach flows. Use `terminal.backend_mut()` for title writes in attach/detach paths, not direct `std::io::stdout()` calls.
+- `src/tmux/status_bar.rs` owns tmux session-scoped title passthrough. If attached sessions need to affect the outer terminal title, wire that through tmux options there rather than adding new TUI polling logic.
+- `src/tui/status_poller.rs` owns AoE-managed pane-title refresh for agents with `sets_own_title = false`. If waiting/running states should affect pane titles, change that file instead of teaching the TUI to infer agent titles.
+- `src/agents.rs` is the source of truth for whether an agent sets its own title. Update `sets_own_title` there before adding any special-case title logic elsewhere.
+- If existing sessions need new tmux title behavior without being recreated, refresh session options through `src/session/instance.rs` attach helpers and the CLI attach path in `src/cli/session.rs`.
+- Prefer session-scoped tmux option changes such as `set-option -t <session> ...` or `set-window-option -t <session> ...`. Avoid `-g` unless the behavior is intentionally global.
+- Add focused unit tests for title helpers near the implementation, and add integration or e2e coverage in `tests/e2e/` for tmux title passthrough or restoration behavior.
+
+### Reference Docs
+
+- Alacritty escape sequence support: `https://raw.githubusercontent.com/alacritty/alacritty/master/docs/escape_support.md`
+- tmux title and pane-title behavior: `https://github.com/tmux/tmux/wiki/Advanced-Use#pane-titles-and-the-terminal-title`
+- tmux manual reference for `set-titles`, `set-titles-string`, and `allow-set-title`: `https://man7.org/linux/man-pages/man1/tmux.1.html`
+- xterm control sequences for OSC title setting and CSI `22`/`23` title stack save/restore: `https://invisible-island.net/xterm/ctlseqs/ctlseqs.pdf`
+
 ## Data Migrations
 
 When making breaking changes to stored data (file locations, config schema, etc.), use the migration system in `src/migrations/` instead of adding fallback/compatibility logic to the main code.

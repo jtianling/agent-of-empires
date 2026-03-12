@@ -10,6 +10,7 @@ mod home;
 pub mod settings;
 mod status_poller;
 mod styles;
+mod tab_title;
 
 pub use app::*;
 
@@ -102,9 +103,10 @@ pub async fn run(profile: &str) -> Result<()> {
         None
     };
 
-    // Install panic hook that restores the terminal
+    // Install panic hook that restores the terminal and the pre-launch title.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = tab_title::pop_terminal_title(&mut io::stdout());
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -124,6 +126,8 @@ pub async fn run(profile: &str) -> Result<()> {
 
     // Create app and run
     let mut app = App::new(profile, available_tools, launch_dir)?;
+    let _ = tab_title::push_terminal_title(&mut io::stdout());
+    let _ = tab_title::set_tui_title(&mut io::stdout());
     let result = app.run(&mut terminal).await;
 
     // Clean up the nested-detach tmux hook if we set one up during this run.
@@ -144,6 +148,7 @@ pub async fn run(profile: &str) -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+    let _ = tab_title::pop_terminal_title(&mut io::stdout());
 
     result
 }

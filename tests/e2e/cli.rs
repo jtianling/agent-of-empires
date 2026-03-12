@@ -1,4 +1,5 @@
 use serial_test::serial;
+use std::time::Duration;
 
 use crate::harness::TuiTestHarness;
 
@@ -214,4 +215,64 @@ agent_command_override = {{ claude = "config-claude" }}
         "cli-claude",
         "CLI --cmd-override should override config"
     );
+}
+
+#[test]
+#[serial]
+fn test_started_session_enables_tmux_title_passthrough() {
+    let h = TuiTestHarness::new("cli_tmux_title_passthrough");
+    let project = h.project_path();
+
+    let add_output = h.run_cli(&[
+        "add",
+        project.to_str().unwrap(),
+        "-t",
+        "Title Passthrough",
+        "--cmd-override",
+        "sh",
+    ]);
+    assert!(
+        add_output.status.success(),
+        "aoe add failed: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let start_output = h.run_cli_in_tmux(&["session", "start", "Title Passthrough"]);
+    assert!(
+        start_output.status.success(),
+        "aoe session start failed: {}",
+        String::from_utf8_lossy(&start_output.stderr)
+    );
+
+    let sessions = read_sessions_json(&h);
+    let session = &sessions[0];
+    let session_id = session["id"].as_str().expect("session id");
+    let session_title = session["title"].as_str().expect("session title");
+    let tmux_name = agent_of_empires::tmux::Session::generate_name(session_id, session_title);
+
+    assert_eq!(h.tmux_show_option(&tmux_name, "set-titles"), "on");
+    assert_eq!(h.tmux_show_option(&tmux_name, "set-titles-string"), "#T");
+    assert_eq!(
+        h.tmux_show_window_option(&tmux_name, "allow-set-title"),
+        "on"
+    );
+    assert_eq!(
+        h.tmux_display_message(&tmux_name, "#{pane_title}"),
+        "Title Passthrough"
+    );
+
+    h.type_text_to_target(&tmux_name, "printf '\\033]2;Runtime Title\\033\\\\'");
+    h.send_keys_to_target(&tmux_name, "Enter");
+
+    let mut runtime_title = String::new();
+    for _ in 0..20 {
+        runtime_title = h.tmux_display_message(&tmux_name, "#{pane_title}");
+        if runtime_title == "Runtime Title" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    assert_eq!(runtime_title, "Runtime Title");
+    h.kill_tmux_target(&tmux_name);
 }

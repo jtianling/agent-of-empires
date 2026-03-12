@@ -506,6 +506,18 @@ impl Instance {
         self.apply_session_tmux_options(&name, &format!("{} (terminal)", self.title));
     }
 
+    pub fn refresh_agent_tmux_options(&self) {
+        self.apply_tmux_options();
+    }
+
+    pub fn refresh_terminal_tmux_options(&self) {
+        self.apply_terminal_tmux_options();
+    }
+
+    pub fn refresh_container_terminal_tmux_options(&self) {
+        self.apply_container_terminal_tmux_options();
+    }
+
     pub fn get_container_for_instance(&mut self) -> Result<containers::DockerContainer> {
         let sandbox = self
             .sandbox_info

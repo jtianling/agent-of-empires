@@ -3,6 +3,8 @@
 use anyhow::Result;
 use std::process::Command;
 
+const ACTIVE_PANE_TITLE_FORMAT: &str = "#T";
+
 /// Information about a sandboxed session for status bar display.
 pub struct SandboxDisplay {
     pub container_name: String,
@@ -77,11 +79,34 @@ fn set_session_option(session_name: &str, option: &str, value: &str) -> Result<(
     Ok(())
 }
 
+/// Set a tmux window option for the active window in a specific session.
+fn set_window_option(session_name: &str, option: &str, value: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-window-option", "-t", session_name, option, value])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("Failed to set tmux window option {}: {}", option, stderr);
+    }
+
+    Ok(())
+}
+
 /// Apply mouse support option to a tmux session.
 /// When enabled, scrolling with the mouse wheel enters copy mode.
 pub fn apply_mouse_option(session_name: &str, enabled: bool) -> Result<()> {
     let value = if enabled { "on" } else { "off" };
     set_session_option(session_name, "mouse", value)
+}
+
+/// Configure tmux so the outer terminal title follows the active pane title
+/// while the user is attached to this AoE-managed session.
+fn enable_title_passthrough(session_name: &str) -> Result<()> {
+    set_session_option(session_name, "set-titles", "on")?;
+    set_session_option(session_name, "set-titles-string", ACTIVE_PANE_TITLE_FORMAT)?;
+    set_window_option(session_name, "allow-set-title", "on")?;
+    Ok(())
 }
 
 /// Set the pane title for a tmux session via `select-pane -T`.
@@ -121,6 +146,10 @@ pub fn apply_all_tmux_options(
         if let Err(e) = apply_mouse_option(session_name, mouse_enabled) {
             tracing::debug!("Failed to apply tmux mouse option: {}", e);
         }
+    }
+
+    if let Err(e) = enable_title_passthrough(session_name) {
+        tracing::debug!("Failed to enable tmux title passthrough: {}", e);
     }
 
     // Set an initial pane title so agents that don't write their own OSC 0
@@ -212,6 +241,11 @@ fn get_session_option(session_name: &str, option: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_active_pane_title_format_uses_tmux_pane_title() {
+        assert_eq!(ACTIVE_PANE_TITLE_FORMAT, "#T");
+    }
 
     #[test]
     fn test_get_status_returns_none_for_non_tmux() {

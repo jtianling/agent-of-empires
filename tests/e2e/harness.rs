@@ -263,14 +263,8 @@ last_seen_version = "{}"
     /// Send one or more tmux key names (e.g. "Enter", "Escape", "q", "C-c").
     pub fn send_keys(&self, keys: &str) {
         assert!(self.spawned, "must call spawn_tui() or spawn() first");
-        let output = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket_path)
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&self.session_name)
-            .arg(keys)
-            .output()
+        let output = self
+            .tmux_command(&["send-keys", "-t", &self.session_name, keys])
             .expect("failed to send keys");
         assert!(
             output.status.success(),
@@ -285,15 +279,8 @@ last_seen_version = "{}"
     /// the Enter key).
     pub fn type_text(&self, text: &str) {
         assert!(self.spawned, "must call spawn_tui() or spawn() first");
-        let output = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket_path)
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&self.session_name)
-            .arg("-l")
-            .arg(text)
-            .output()
+        let output = self
+            .tmux_command(&["send-keys", "-t", &self.session_name, "-l", text])
             .expect("failed to type text");
         assert!(
             output.status.success(),
@@ -306,14 +293,8 @@ last_seen_version = "{}"
     /// Capture the current screen contents as plain text (no ANSI escapes).
     pub fn capture_screen(&self) -> String {
         assert!(self.spawned, "must call spawn_tui() or spawn() first");
-        let output = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket_path)
-            .arg("capture-pane")
-            .arg("-t")
-            .arg(&self.session_name)
-            .arg("-p")
-            .output()
+        let output = self
+            .tmux_command(&["capture-pane", "-t", &self.session_name, "-p"])
             .expect("failed to capture pane");
         String::from_utf8_lossy(&output.stdout).to_string()
     }
@@ -393,6 +374,22 @@ last_seen_version = "{}"
             .expect("failed to run aoe CLI")
     }
 
+    /// Run `aoe <args>` as a subprocess while targeting this harness's tmux
+    /// socket via the `TMUX` environment variable.
+    pub fn run_cli_in_tmux(&self, args: &[&str]) -> Output {
+        self.ensure_tmux_server();
+
+        Command::new(&self.binary_path)
+            .args(args)
+            .env("HOME", self.home_dir.path())
+            .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
+            .env("PATH", self.env_path())
+            .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX", format!("{},1,0", self.socket_path.display()))
+            .output()
+            .expect("failed to run aoe CLI inside tmux")
+    }
+
     /// Path to the isolated home directory for custom test setup.
     pub fn home_path(&self) -> &Path {
         self.home_dir.path()
@@ -405,15 +402,80 @@ last_seen_version = "{}"
         p
     }
 
+    pub fn tmux_show_option(&self, target: &str, option: &str) -> String {
+        let output = self
+            .tmux_command(&["show-options", "-t", target, "-v", option])
+            .expect("failed to show tmux option");
+        assert!(
+            output.status.success(),
+            "show-options failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    pub fn tmux_show_window_option(&self, target: &str, option: &str) -> String {
+        let output = self
+            .tmux_command(&["show-window-options", "-t", target, "-v", option])
+            .expect("failed to show tmux window option");
+        assert!(
+            output.status.success(),
+            "show-window-options failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    pub fn tmux_display_message(&self, target: &str, format: &str) -> String {
+        let output = self
+            .tmux_command(&["display-message", "-t", target, "-p", format])
+            .expect("failed to run tmux display-message");
+        assert!(
+            output.status.success(),
+            "display-message failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    pub fn send_keys_to_target(&self, target: &str, keys: &str) {
+        let output = self
+            .tmux_command(&["send-keys", "-t", target, keys])
+            .expect("failed to send keys to target");
+        assert!(
+            output.status.success(),
+            "send-keys target failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    pub fn type_text_to_target(&self, target: &str, text: &str) {
+        let output = self
+            .tmux_command(&["send-keys", "-t", target, "-l", text])
+            .expect("failed to type text to target");
+        assert!(
+            output.status.success(),
+            "type-text target failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    pub fn kill_tmux_target(&self, target: &str) {
+        let output = self
+            .tmux_command(&["kill-session", "-t", target])
+            .expect("failed to kill tmux target");
+        assert!(
+            output.status.success(),
+            "kill-session target failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// Check whether the tmux session is still alive.
     pub fn session_alive(&self) -> bool {
-        Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket_path)
-            .arg("has-session")
-            .arg("-t")
-            .arg(&self.session_name)
-            .output()
+        self.tmux_command(&["has-session", "-t", &self.session_name])
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
@@ -436,13 +498,25 @@ last_seen_version = "{}"
     }
 
     fn kill_session(&self) {
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket_path)
-            .arg("kill-session")
-            .arg("-t")
-            .arg(&self.session_name)
-            .output();
+        let _ = self.tmux_command(&["kill-session", "-t", &self.session_name]);
+    }
+
+    fn ensure_tmux_server(&self) {
+        let output = self
+            .tmux_command(&["start-server"])
+            .expect("failed to start tmux server");
+        assert!(
+            output.status.success(),
+            "start-server failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn tmux_command(&self, args: &[&str]) -> std::io::Result<Output> {
+        let mut cmd = Command::new("tmux");
+        cmd.arg("-S").arg(&self.socket_path);
+        cmd.args(args);
+        cmd.output()
     }
 }
 

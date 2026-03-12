@@ -10,6 +10,7 @@ use std::time::Duration;
 use super::home::{HomeView, TerminalMode};
 use super::styles::load_theme;
 use super::styles::Theme;
+use super::tab_title;
 use crate::session::{get_update_settings, load_config, save_config, Storage};
 use crate::tmux::AvailableTools;
 use crate::update::{check_for_update, UpdateInfo};
@@ -48,6 +49,10 @@ where
     }
 
     Ok(result)
+}
+
+fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
+    let _ = tab_title::set_tui_title(terminal.backend_mut());
 }
 
 pub struct App {
@@ -499,7 +504,9 @@ impl App {
             self.home.set_instance_error(session_id, None);
         }
 
+        instance.refresh_agent_tmux_options();
         let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach())?;
+        reapply_tui_title(terminal);
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
@@ -544,6 +551,7 @@ impl App {
                         return Ok(());
                     }
                 }
+                instance.refresh_container_terminal_tmux_options();
                 Box::new(move || container_session.attach())
             }
             _ => {
@@ -561,11 +569,13 @@ impl App {
                         return Ok(());
                     }
                 }
+                instance.refresh_terminal_tmux_options();
                 Box::new(move || terminal_session.attach())
             }
         };
 
         let attach_result = with_raw_mode_disabled(terminal, attach_fn)?;
+        reapply_tui_title(terminal);
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
