@@ -450,7 +450,7 @@ impl App {
                 if let Ok(Some(config)) = load_config() {
                     self.dynamic_tab_title = config.app_state.dynamic_tab_title;
                     if !self.dynamic_tab_title {
-                        let _ = tab_title::clear_terminal_title(&mut io::stdout());
+                        let _ = tab_title::pop_terminal_title(&mut io::stdout());
                         self.last_tab_title.clear();
                     }
                 }

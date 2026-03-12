@@ -32,9 +32,15 @@ pub fn set_terminal_title(writer: &mut impl Write, title: &str) -> io::Result<()
     writer.flush()
 }
 
-/// Reset the terminal title by writing an empty OSC 0 sequence.
-pub fn clear_terminal_title(writer: &mut impl Write) -> io::Result<()> {
-    write!(writer, "\x1b]0;\x07")?;
+/// Push the current terminal title onto the xterm title stack (CSI 22;2 t).
+pub fn push_terminal_title(writer: &mut impl Write) -> io::Result<()> {
+    write!(writer, "\x1b[22;2t")?;
+    writer.flush()
+}
+
+/// Pop and restore the previously pushed title from the xterm title stack (CSI 23;2 t).
+pub fn pop_terminal_title(writer: &mut impl Write) -> io::Result<()> {
+    write!(writer, "\x1b[23;2t")?;
     writer.flush()
 }
 
@@ -56,10 +62,17 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_terminal_title_writes_empty_osc() {
+    fn test_push_terminal_title_writes_csi_sequence() {
         let mut buf = Vec::new();
-        clear_terminal_title(&mut buf).unwrap();
-        assert_eq!(buf, b"\x1b]0;\x07");
+        push_terminal_title(&mut buf).unwrap();
+        assert_eq!(buf, b"\x1b[22;2t");
+    }
+
+    #[test]
+    fn test_pop_terminal_title_writes_csi_sequence() {
+        let mut buf = Vec::new();
+        pop_terminal_title(&mut buf).unwrap();
+        assert_eq!(buf, b"\x1b[23;2t");
     }
 
     #[test]

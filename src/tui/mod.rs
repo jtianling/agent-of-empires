@@ -24,6 +24,7 @@ use ratatui::prelude::*;
 use std::io::{self, Write};
 
 use crate::migrations;
+use crate::session::config::load_config;
 use crate::session::get_update_settings;
 use crate::update::check_for_update;
 
@@ -105,10 +106,20 @@ pub async fn run(profile: &str) -> Result<()> {
         (None, None)
     };
 
-    // Install panic hook that clears the tab title and restores the terminal
+    let dynamic_tab_title = load_config()
+        .ok()
+        .flatten()
+        .map(|c| c.app_state.dynamic_tab_title)
+        .unwrap_or(true);
+
+    if dynamic_tab_title {
+        let _ = tab_title::push_terminal_title(&mut io::stdout());
+    }
+
+    // Install panic hook that restores the tab title and terminal
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = tab_title::clear_terminal_title(&mut io::stdout());
+        let _ = tab_title::pop_terminal_title(&mut io::stdout());
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -145,8 +156,9 @@ pub async fn run(profile: &str) -> Result<()> {
         restore_tmux_titles(&original);
     }
 
-    // Clear terminal tab title before restoring terminal
-    let _ = tab_title::clear_terminal_title(&mut io::stdout());
+    if dynamic_tab_title {
+        let _ = tab_title::pop_terminal_title(&mut io::stdout());
+    }
 
     // Restore terminal
     disable_raw_mode()?;
