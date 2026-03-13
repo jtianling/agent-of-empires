@@ -33,8 +33,7 @@ fn test_create_profile() -> Result<()> {
 fn test_list_profiles_includes_default() -> Result<()> {
     let _temp = setup_temp_home();
 
-    // Trigger creation of default profile dir by accessing it
-    let _ = Storage::new("default")?;
+    create_profile("default")?;
 
     let profiles = list_profiles()?;
     assert!(profiles.contains(&"default".to_string()));
@@ -61,7 +60,7 @@ fn test_delete_profile() -> Result<()> {
 fn test_can_delete_default_profile() -> Result<()> {
     let _temp = setup_temp_home();
 
-    let _ = Storage::new("default")?;
+    create_profile("default")?;
     assert!(list_profiles()?.contains(&"default".to_string()));
 
     delete_profile("default")?;
