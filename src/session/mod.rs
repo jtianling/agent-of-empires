@@ -130,6 +130,16 @@ pub fn delete_profile(name: &str) -> Result<()> {
         anyhow::bail!("Profile '{}' does not exist", name);
     }
 
+    if let Ok(storage) = Storage::new(name) {
+        if let Ok(instances) = storage.load() {
+            for inst in &instances {
+                let _ = inst.kill();
+                let _ = inst.kill_terminal();
+                crate::hooks::cleanup_hook_status_dir(&inst.id);
+            }
+        }
+    }
+
     fs::remove_dir_all(&profile_dir)?;
     Ok(())
 }

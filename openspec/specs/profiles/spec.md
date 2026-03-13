@@ -86,7 +86,7 @@ Profiles can be created, renamed, deleted, and switched from the TUI home screen
 - **FR-002**: Profile names MUST NOT contain `/` or `\`.
 - **FR-003**: Creating a profile with an existing name MUST return an error.
 - **FR-004**: Renaming a profile that is currently the default MUST update `default_profile` in global config.
-- **FR-005**: Deleting a profile MUST remove all its sessions, groups, and config (the directory and all contents).
+- **FR-005**: Deleting a profile MUST kill all tmux sessions (including terminal sessions) belonging to that profile, clean up hook status files, then remove the profile directory and all contents. Tmux kill failures are non-fatal and SHALL NOT prevent profile deletion.
 - **FR-006**: Profile config overrides MUST be `Option<T>` fields that merge with global config on load.
 - **FR-007**: Switching profiles MUST immediately reload the session list and groups in the TUI.
 - **FR-008**: Profile listing MUST be sorted alphabetically.
