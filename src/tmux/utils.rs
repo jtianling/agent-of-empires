@@ -15,20 +15,19 @@ const NESTED_DETACH_HOOK: &str = "client-session-changed[99]";
 ///
 /// Uses a `client-session-changed` hook so the binding is only active while
 /// inside an aoe session and automatically reverts when switching away.
-pub fn setup_nested_detach_binding() {
-    // Install a hook that rebinds `d` whenever the active session changes.
+pub fn setup_nested_detach_binding(profile: &str) {
+    let switch_cmds = session_cycle_run_shell_cmds(profile);
+
+    let hook_cmd = format!(
+        r#"if-shell "tmux display-message -p '#{{session_name}}' | grep -q '^aoe_'" "bind-key d run-shell 'tmux switch-client -l 2>/dev/null || tmux detach-client' ; bind-key j run-shell '{}' ; bind-key k run-shell '{}'" "bind-key d detach-client ; unbind-key j ; unbind-key k""#,
+        switch_cmds.0, switch_cmds.1
+    );
     Command::new("tmux")
-        .args([
-            "set-hook",
-            "-g",
-            NESTED_DETACH_HOOK,
-            r#"if-shell "tmux display-message -p '#{session_name}' | grep -q '^aoe_'" "bind-key d run-shell 'tmux switch-client -l 2>/dev/null || tmux detach-client'" "bind-key d detach-client""#,
-        ])
+        .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
         .output()
         .ok();
 
-    // Apply the binding immediately for the current aoe session.
-    // The hook only fires on *subsequent* session switches.
+    // Apply the d binding immediately for the current aoe session.
     Command::new("tmux")
         .args([
             "bind-key",
@@ -38,6 +37,8 @@ pub fn setup_nested_detach_binding() {
         ])
         .output()
         .ok();
+
+    setup_session_cycle_bindings(profile);
 }
 
 /// Removes the hook installed by [`setup_nested_detach_binding`] and restores
@@ -51,6 +52,122 @@ pub fn cleanup_nested_detach_binding() {
         .args(["bind-key", "d", "detach-client"])
         .output()
         .ok();
+    cleanup_session_cycle_bindings();
+}
+
+fn aoe_bin_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "aoe".to_string())
+}
+
+fn session_cycle_run_shell_cmds(profile: &str) -> (String, String) {
+    let aoe_bin = aoe_bin_path();
+    let escaped = shell_escape(&aoe_bin);
+    let escaped_profile = shell_escape(profile);
+    let next =
+        format!("{escaped} tmux switch-session --direction next --profile {escaped_profile}");
+    let prev =
+        format!("{escaped} tmux switch-session --direction prev --profile {escaped_profile}");
+    (next, prev)
+}
+
+const AOE_PROFILE_OPTION: &str = "@aoe_profile";
+
+/// Binds `Ctrl+b j` / `Ctrl+b k` to cycle through aoe agent sessions
+/// belonging to the given profile. Works in both nested and non-nested tmux modes.
+pub fn setup_session_cycle_bindings(profile: &str) {
+    tag_sessions_with_profile(profile);
+
+    let (switch_next, switch_prev) = session_cycle_run_shell_cmds(profile);
+    Command::new("tmux")
+        .args(["bind-key", "j", "run-shell", &switch_next])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "k", "run-shell", &switch_prev])
+        .output()
+        .ok();
+}
+
+fn tag_sessions_with_profile(profile: &str) {
+    let Ok(storage) = crate::session::Storage::new(profile) else {
+        return;
+    };
+    let Ok(instances) = storage.load() else {
+        return;
+    };
+    for instance in &instances {
+        let name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+        Command::new("tmux")
+            .args(["set-option", "-t", &name, AOE_PROFILE_OPTION, profile])
+            .output()
+            .ok();
+    }
+}
+
+pub fn cleanup_session_cycle_bindings() {
+    Command::new("tmux").args(["unbind-key", "j"]).output().ok();
+    Command::new("tmux").args(["unbind-key", "k"]).output().ok();
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.contains(|c: char| c.is_whitespace() || c == '\'' || c == '"') {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        s.to_string()
+    }
+}
+
+pub fn switch_aoe_session(direction: &str, profile: &str) -> anyhow::Result<()> {
+    let storage = crate::session::Storage::new(profile)?;
+    let instances = storage.load()?;
+    let mut sessions: Vec<String> = instances
+        .iter()
+        .map(|i| crate::tmux::Session::generate_name(&i.id, &i.title))
+        .filter(|name| tmux_session_exists(name))
+        .collect();
+    sessions.sort();
+
+    if sessions.len() <= 1 {
+        return Ok(());
+    }
+
+    let current_output = Command::new("tmux")
+        .args(["display-message", "-p", "#{session_name}"])
+        .output()?;
+    let current = String::from_utf8_lossy(&current_output.stdout)
+        .trim()
+        .to_string();
+
+    let current_idx = sessions.iter().position(|s| s == &current).unwrap_or(0);
+
+    let target_idx = match direction {
+        "next" => (current_idx + 1) % sessions.len(),
+        "prev" => {
+            if current_idx == 0 {
+                sessions.len() - 1
+            } else {
+                current_idx - 1
+            }
+        }
+        _ => return Ok(()),
+    };
+
+    Command::new("tmux")
+        .args(["switch-client", "-t", &sessions[target_idx]])
+        .output()?;
+
+    Ok(())
+}
+
+fn tmux_session_exists(name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 pub fn strip_ansi(content: &str) -> String {

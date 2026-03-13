@@ -505,7 +505,8 @@ impl App {
         }
 
         instance.refresh_agent_tmux_options();
-        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach())?;
+        let profile = self.home.storage.profile().to_string();
+        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach(&profile))?;
         reapply_tui_title(terminal);
 
         self.needs_redraw = true;
@@ -552,7 +553,8 @@ impl App {
                     }
                 }
                 instance.refresh_container_terminal_tmux_options();
-                Box::new(move || container_session.attach())
+                let p = self.home.storage.profile().to_string();
+                Box::new(move || container_session.attach(&p))
             }
             _ => {
                 let terminal_session = instance.terminal_tmux_session()?;
@@ -570,7 +572,8 @@ impl App {
                     }
                 }
                 instance.refresh_terminal_tmux_options();
-                Box::new(move || terminal_session.attach())
+                let p = self.home.storage.profile().to_string();
+                Box::new(move || terminal_session.attach(&p))
             }
         };
 

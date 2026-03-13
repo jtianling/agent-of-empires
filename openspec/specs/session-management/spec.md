@@ -128,24 +128,26 @@ For sandboxed sessions, the command is wrapped in the container runtime's `exec`
 
 ## Requirements
 
-### Requirement: Session attach configures nested detach binding
-When attaching to any AoE-managed tmux session from within an existing tmux session, the attach
-operation SHALL configure the tmux `d` key binding to enable graceful return navigation.
+### Requirement: Session attach configures tmux key bindings
+When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key
+bindings for navigation: `Ctrl+b d` for detach/return (nested mode only) and `Ctrl+b j/k` for
+session cycling (all modes). The `attach()` method accepts a `profile` parameter to scope session
+cycling to the current profile.
 
-#### Scenario: Agent session attach sets binding
-- **WHEN** `Session::attach()` is called and TMUX env var is set
-- **AND** `switch-client` succeeds
-- **THEN** the tmux `d` key binding is updated to use conditional switch-back behavior
+#### Scenario: Agent session attach sets bindings
+- **WHEN** `Session::attach(profile)` is called
+- **THEN** session cycling bindings (`j`/`k`) are configured scoped to the given profile
+- **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
-#### Scenario: Terminal session attach sets binding
-- **WHEN** `TerminalSession::attach()` is called and TMUX env var is set
-- **AND** `switch-client` succeeds
-- **THEN** the tmux `d` key binding is updated to use conditional switch-back behavior
+#### Scenario: Terminal session attach sets bindings
+- **WHEN** `TerminalSession::attach(profile)` is called
+- **THEN** session cycling bindings (`j`/`k`) are configured scoped to the given profile
+- **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
-#### Scenario: Container terminal session attach sets binding
-- **WHEN** `ContainerTerminalSession::attach()` is called and TMUX env var is set
-- **AND** `switch-client` succeeds
-- **THEN** the tmux `d` key binding is updated to use conditional switch-back behavior
+#### Scenario: Container terminal session attach sets bindings
+- **WHEN** `ContainerTerminalSession::attach(profile)` is called
+- **THEN** session cycling bindings (`j`/`k`) are configured scoped to the given profile
+- **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
 ## Functional Requirements
 

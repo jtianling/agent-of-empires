@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
             return match command {
                 TmuxCommands::Status(args) => cli::tmux::run_status(args),
                 TmuxCommands::CodexTitleMonitor(args) => cli::tmux::run_codex_title_monitor(args),
+                TmuxCommands::SwitchSession(args) => cli::tmux::run_switch_session(args),
             };
         }
         Some(Commands::Sounds { command }) => return cli::sounds::run(command).await,

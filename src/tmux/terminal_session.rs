@@ -99,10 +99,12 @@ impl TerminalSession {
         process::get_pane_pid(&self.name)
     }
 
-    pub fn attach(&self) -> Result<()> {
+    pub fn attach(&self, profile: &str) -> Result<()> {
         if !self.exists() {
             bail!("Terminal session does not exist: {}", self.name);
         }
+
+        super::utils::setup_session_cycle_bindings(profile);
 
         if std::env::var("TMUX").is_ok() {
             let status = Command::new("tmux")
@@ -110,7 +112,7 @@ impl TerminalSession {
                 .status()?;
 
             if status.success() {
-                super::utils::setup_nested_detach_binding();
+                super::utils::setup_nested_detach_binding(profile);
             } else {
                 let status = Command::new("tmux")
                     .args(["attach-session", "-t", &self.name])
@@ -249,10 +251,12 @@ impl ContainerTerminalSession {
         process::get_pane_pid(&self.name)
     }
 
-    pub fn attach(&self) -> Result<()> {
+    pub fn attach(&self, profile: &str) -> Result<()> {
         if !self.exists() {
             bail!("Container terminal session does not exist: {}", self.name);
         }
+
+        super::utils::setup_session_cycle_bindings(profile);
 
         if std::env::var("TMUX").is_ok() {
             let status = Command::new("tmux")
@@ -260,7 +264,7 @@ impl ContainerTerminalSession {
                 .status()?;
 
             if status.success() {
-                super::utils::setup_nested_detach_binding();
+                super::utils::setup_nested_detach_binding(profile);
             } else {
                 let status = Command::new("tmux")
                     .args(["attach-session", "-t", &self.name])

@@ -12,6 +12,8 @@ pub enum TmuxCommands {
     Status(TmuxStatusArgs),
     #[command(hide = true, name = "monitor-codex-title")]
     CodexTitleMonitor(CodexTitleMonitorArgs),
+    #[command(hide = true, name = "switch-session")]
+    SwitchSession(SwitchSessionArgs),
 }
 
 #[derive(Args)]
@@ -25,6 +27,14 @@ pub struct TmuxStatusArgs {
 pub struct CodexTitleMonitorArgs {
     #[arg(long)]
     session: String,
+}
+
+#[derive(Args)]
+pub struct SwitchSessionArgs {
+    #[arg(long)]
+    direction: String,
+    #[arg(long, default_value = "default")]
+    profile: String,
 }
 
 pub fn run_status(args: TmuxStatusArgs) -> Result<()> {
@@ -66,4 +76,8 @@ pub fn run_status(args: TmuxStatusArgs) -> Result<()> {
 
 pub fn run_codex_title_monitor(args: CodexTitleMonitorArgs) -> Result<()> {
     crate::tmux::status_bar::run_codex_title_monitor(&args.session)
+}
+
+pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
+    crate::tmux::utils::switch_aoe_session(&args.direction, &args.profile)
 }

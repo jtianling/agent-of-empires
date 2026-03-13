@@ -361,7 +361,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         storage.save_with_groups(&instances, &group_tree)?;
 
         let tmux_session = crate::tmux::Session::new(&instance.id, &instance.title)?;
-        tmux_session.attach()?;
+        tmux_session.attach(storage.profile())?;
     } else {
         println!();
         println!("Next steps:");

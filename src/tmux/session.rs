@@ -129,10 +129,15 @@ impl Session {
         Ok(())
     }
 
-    pub fn attach(&self) -> Result<()> {
+    pub fn attach(&self, profile: &str) -> Result<()> {
         if !self.exists() {
             bail!("Session does not exist: {}", self.name);
         }
+
+        // Always set up Ctrl+b j/k session cycling before attaching.
+        // Must happen before attach-session (which blocks) so the bindings
+        // are active while the user is inside the session.
+        super::utils::setup_session_cycle_bindings(profile);
 
         if std::env::var("TMUX").is_ok() {
             let status = Command::new("tmux")
@@ -142,7 +147,7 @@ impl Session {
             if status.success() {
                 // Rebind Ctrl+b d so pressing it inside a managed session returns
                 // to the previous session rather than fully detaching the client.
-                super::utils::setup_nested_detach_binding();
+                super::utils::setup_nested_detach_binding(profile);
             } else {
                 // Fall back to attach-session if switch-client fails.
                 // This handles cases where TMUX env var is inherited but we're
