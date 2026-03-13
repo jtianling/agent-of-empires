@@ -124,7 +124,7 @@ The terminal teardown sequence in `src/tui/mod.rs` SHALL include a title reset s
 - **FR-002**: Session status MUST update in real-time via background polling.
 - **FR-003**: Attaching to a session MUST detach from the TUI and attach the terminal to the tmux session.
 - **FR-003a**: When AoE runs inside an existing tmux session, `Ctrl+b d` inside a managed session (`aoe_*`) MUST switch back to the previous session rather than fully detaching the tmux client. If no previous session exists, it SHALL fall back to normal detach. This binding MUST revert to default `detach-client` when the user switches to a non-AoE session, and the hook MUST be cleaned up when the TUI exits.
-- **FR-003b**: When AoE runs inside an existing tmux session, the TUI MUST temporarily enable `mouse on` so that crossterm receives proper mouse events (scroll wheel, etc.) instead of tmux converting them to arrow key sequences. The original mouse setting MUST be restored when the TUI exits.
+- **FR-003b**: When AoE runs inside an existing tmux session, the TUI MUST temporarily enable `mouse on` so that crossterm receives proper mouse events (scroll wheel, etc.) instead of tmux converting them to arrow key sequences. The original mouse setting MUST be restored when the TUI exits. Additionally, AoE-managed tmux sessions MUST always have session-level `mouse on` enabled regardless of the user's tmux configuration, so that mouse scroll works correctly when attached to agent sessions.
 - **FR-004**: The session list MUST support collapsible group hierarchies.
 - **FR-005**: The diff view MUST open files in `$EDITOR` (or a sensible default).
 - **FR-006**: Settings MUST save immediately on field change (no explicit "save" button except Esc).

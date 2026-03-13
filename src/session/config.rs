@@ -449,16 +449,8 @@ pub fn should_apply_tmux_status_bar() -> bool {
 pub fn should_apply_tmux_mouse() -> Option<bool> {
     let config = Config::load().unwrap_or_default();
     match config.tmux.mouse {
-        TmuxMouseMode::Enabled => Some(true),
+        TmuxMouseMode::Enabled | TmuxMouseMode::Auto => Some(true),
         TmuxMouseMode::Disabled => Some(false),
-        TmuxMouseMode::Auto => {
-            // In auto mode, only enable mouse if user doesn't have their own tmux config
-            if user_has_tmux_config() {
-                None // Don't touch - let user's config apply
-            } else {
-                Some(true) // Enable mouse for users without custom config
-            }
-        }
     }
 }
 
