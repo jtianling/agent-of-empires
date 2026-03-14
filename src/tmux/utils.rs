@@ -397,6 +397,7 @@ pub fn is_pane_running_shell(session_name: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn setup_test_home(temp: &TempDir) {
@@ -614,6 +615,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_current_home_sort_order_reads_saved_app_state() {
         let temp = TempDir::new().unwrap();
         setup_test_home(&temp);

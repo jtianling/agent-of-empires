@@ -352,6 +352,13 @@ pub fn check_migration_hint(resolved_profile: &str) {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use tempfile::tempdir;
+
+    fn setup_test_home(temp: &std::path::Path) {
+        std::env::set_var("HOME", temp);
+        #[cfg(target_os = "linux")]
+        std::env::set_var("XDG_CONFIG_HOME", temp.join(".config"));
+    }
 
     #[test]
     fn test_sanitize_profile_name_basic() {
@@ -419,6 +426,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_register_and_unregister_instance() {
+        let temp = tempdir().unwrap();
+        setup_test_home(temp.path());
+
         let test_profile = "test-instance-tracking";
         let _ = delete_profile(test_profile);
         create_profile(test_profile).unwrap();
@@ -439,6 +449,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_has_other_instances_false_when_alone() {
+        let temp = tempdir().unwrap();
+        setup_test_home(temp.path());
+
         let test_profile = "test-has-other-alone";
         let _ = delete_profile(test_profile);
         create_profile(test_profile).unwrap();
@@ -453,6 +466,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_cleanup_stale_instances() {
+        let temp = tempdir().unwrap();
+        setup_test_home(temp.path());
+
         let test_profile = "test-stale-cleanup";
         let _ = delete_profile(test_profile);
         create_profile(test_profile).unwrap();
@@ -475,6 +491,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_cleanup_empty_profile_respects_other_instances() {
+        let temp = tempdir().unwrap();
+        setup_test_home(temp.path());
+
         let test_profile = "test-cleanup-multi";
         let _ = delete_profile(test_profile);
         create_profile(test_profile).unwrap();

@@ -1411,6 +1411,9 @@ fn test_o_key_cycles_sort_order_forward() {
     assert_eq!(env.view.sort_order, SortOrder::ZA);
 
     env.view.handle_key(key(KeyCode::Char('o')));
+    assert_eq!(env.view.sort_order, SortOrder::Manual);
+
+    env.view.handle_key(key(KeyCode::Char('o')));
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 }
 
@@ -1422,7 +1425,11 @@ fn test_ctrl_o_key_cycles_sort_order_backward() {
     let mut env = create_test_env_with_mixed_sessions();
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
-    // Ctrl+o cycles backward: Oldest -> ZA -> AZ -> Newest -> Oldest
+    // Ctrl+o cycles backward: Newest -> Manual -> ZA -> AZ -> Oldest -> Newest
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::Manual);
+
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(env.view.sort_order, SortOrder::ZA);
@@ -1438,6 +1445,113 @@ fn test_ctrl_o_key_cycles_sort_order_backward() {
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(env.view.sort_order, SortOrder::Newest);
+}
+
+#[test]
+#[serial]
+fn test_o_key_cycles_to_manual() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
+
+    assert_eq!(env.view.sort_order, SortOrder::Manual);
+}
+
+#[test]
+#[serial]
+fn test_manual_sort_shift_j_moves_session_within_group_and_persists() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_group_sessions();
+    env.view.sort_order = SortOrder::Manual;
+    env.view.flat_items = crate::session::flatten_tree(
+        &env.view.group_tree,
+        &env.view.instances,
+        env.view.sort_order,
+    );
+
+    let session_id = env
+        .view
+        .instances
+        .iter()
+        .find(|inst| inst.title == "work-session-1")
+        .map(|inst| inst.id.clone())
+        .unwrap();
+    env.view.select_session_by_id(&session_id);
+
+    env.view.handle_key(key(KeyCode::Char('J')));
+
+    let work_titles: Vec<_> = env
+        .view
+        .instances
+        .iter()
+        .filter(|inst| inst.group_path == "work")
+        .map(|inst| inst.title.as_str())
+        .collect();
+    assert_eq!(work_titles, vec!["work-session-2", "work-session-1"]);
+    assert_eq!(
+        env.view
+            .instances
+            .iter()
+            .find(|inst| inst.id == session_id)
+            .map(|inst| inst.group_path.as_str()),
+        Some("work")
+    );
+
+    env.view.reload().unwrap();
+    let reloaded_titles: Vec<_> = env
+        .view
+        .instances
+        .iter()
+        .filter(|inst| inst.group_path == "work")
+        .map(|inst| inst.title.as_str())
+        .collect();
+    assert_eq!(reloaded_titles, vec!["work-session-2", "work-session-1"]);
+}
+
+#[test]
+#[serial]
+fn test_manual_sort_shift_k_moves_group_within_siblings_and_persists() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_groups();
+    env.view.sort_order = SortOrder::Manual;
+    env.view.flat_items = crate::session::flatten_tree(
+        &env.view.group_tree,
+        &env.view.instances,
+        env.view.sort_order,
+    );
+
+    env.view.select_group_by_path("personal");
+    env.view.handle_key(key(KeyCode::Char('K')));
+
+    let group_paths: Vec<_> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Group { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(group_paths, vec!["personal", "work"]);
+
+    env.view.reload().unwrap();
+    let reloaded_group_paths: Vec<_> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Group { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reloaded_group_paths, vec!["personal", "work"]);
 }
 
 #[test]
@@ -1513,7 +1627,8 @@ fn test_o_key_flat_items_newest_preserves_insertion_order() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' four times to wrap back to Newest (Newest -> Oldest -> AZ -> ZA -> Newest)
+    // Press 'o' five times to wrap back to Newest
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));

@@ -56,6 +56,7 @@ pub enum SortOrder {
     Oldest,
     AZ,
     ZA,
+    Manual,
 }
 
 impl SortOrder {
@@ -64,16 +65,18 @@ impl SortOrder {
             SortOrder::Newest => SortOrder::Oldest,
             SortOrder::Oldest => SortOrder::AZ,
             SortOrder::AZ => SortOrder::ZA,
-            SortOrder::ZA => SortOrder::Newest,
+            SortOrder::ZA => SortOrder::Manual,
+            SortOrder::Manual => SortOrder::Newest,
         }
     }
 
     pub fn cycle_reverse(self) -> Self {
         match self {
-            SortOrder::Newest => SortOrder::ZA,
+            SortOrder::Newest => SortOrder::Manual,
             SortOrder::Oldest => SortOrder::Newest,
             SortOrder::AZ => SortOrder::Oldest,
             SortOrder::ZA => SortOrder::AZ,
+            SortOrder::Manual => SortOrder::ZA,
         }
     }
 
@@ -83,6 +86,7 @@ impl SortOrder {
             SortOrder::Oldest => "Oldest",
             SortOrder::AZ => "A-Z",
             SortOrder::ZA => "Z-A",
+            SortOrder::Manual => "Manual",
         }
     }
 }

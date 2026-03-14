@@ -56,6 +56,30 @@ Item::Group("work")              ← can be collapsed
 Item::Session(...)               ← ungrouped session (top level)
 ```
 
+## Requirements
+
+### Requirement: Manual ordering within the session tree
+AoE SHALL provide a `Manual` sort mode for the home session list. In `Manual` mode, `Shift+K`
+and `Shift+J` SHALL reorder the currently selected item while preserving the existing session-to-group
+assignment.
+
+#### Scenario: Reorder a session within its current group
+- **WHEN** the home screen sort mode is `Manual` and the selected row is a session
+- **AND** the user presses `Shift+K` or `Shift+J`
+- **THEN** AoE SHALL move that session up or down among the sessions that share the same `group_path`
+- **AND** AoE SHALL NOT move that session into a different group
+
+#### Scenario: Reorder a group among sibling groups
+- **WHEN** the home screen sort mode is `Manual` and the selected row is a group
+- **AND** the user presses `Shift+K` or `Shift+J`
+- **THEN** AoE SHALL move that group up or down among groups with the same parent path
+- **AND** AoE SHALL preserve the group's child sessions and descendant groups
+
+#### Scenario: Persist manual ordering
+- **WHEN** a session or group is reordered in `Manual` mode
+- **THEN** AoE SHALL persist the updated order to profile storage
+- **AND** the same order SHALL be restored after reloading the TUI
+
 ## Functional Requirements
 
 - **FR-001**: Intermediate groups MUST be auto-created when a session is assigned to a deep path.

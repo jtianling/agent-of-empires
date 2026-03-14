@@ -677,6 +677,108 @@ impl HomeView {
         Ok(())
     }
 
+    pub(super) fn move_selected_manual_item(&mut self, delta: i32) {
+        if self.sort_order != SortOrder::Manual || delta == 0 {
+            return;
+        }
+
+        let moved = if let Some(session_id) = self.selected_session.clone() {
+            self.move_session_within_group(&session_id, delta)
+        } else if let Some(group_path) = self.selected_group.clone() {
+            self.group_tree.move_group(&group_path, delta)
+        } else {
+            false
+        };
+
+        if !moved {
+            return;
+        }
+
+        self.rebuild_flat_items_preserve_selection();
+        if let Err(e) = self.save() {
+            tracing::error!("Failed to save manual ordering: {}", e);
+        }
+    }
+
+    fn move_session_within_group(&mut self, session_id: &str, delta: i32) -> bool {
+        if delta == 0 {
+            return false;
+        }
+
+        let current_idx = match self.instances.iter().position(|inst| inst.id == session_id) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        let group_path = self.instances[current_idx].group_path.clone();
+        let sibling_indices: Vec<usize> = self
+            .instances
+            .iter()
+            .enumerate()
+            .filter(|(_, inst)| inst.group_path == group_path)
+            .map(|(idx, _)| idx)
+            .collect();
+
+        let sibling_pos = match sibling_indices.iter().position(|idx| *idx == current_idx) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        let target_pos = if delta < 0 {
+            match sibling_pos.checked_sub((-delta) as usize) {
+                Some(idx) => idx,
+                None => return false,
+            }
+        } else {
+            let idx = sibling_pos + delta as usize;
+            if idx >= sibling_indices.len() {
+                return false;
+            }
+            idx
+        };
+
+        let target_idx = sibling_indices[target_pos];
+        let instance = self.instances.remove(current_idx);
+        self.instances.insert(target_idx, instance);
+        true
+    }
+
+    fn rebuild_flat_items_preserve_selection(&mut self) {
+        let selected_session = self.selected_session.clone();
+        let selected_group = self.selected_group.clone();
+
+        self.instance_map = self
+            .instances
+            .iter()
+            .map(|i| (i.id.clone(), i.clone()))
+            .collect();
+        self.groups = self.group_tree.get_all_groups();
+        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+
+        if self.search_active && !self.search_query.value().is_empty() {
+            self.update_search();
+        } else if !self.search_matches.is_empty() {
+            self.refresh_search_matches();
+        }
+
+        if let Some(session_id) = selected_session {
+            self.select_session_by_id(&session_id);
+            if self.selected_session.as_deref() == Some(session_id.as_str()) {
+                return;
+            }
+        }
+
+        if let Some(group_path) = selected_group {
+            self.select_group_by_path(&group_path);
+            if self.selected_group.as_deref() == Some(group_path.as_str()) {
+                return;
+            }
+        }
+
+        if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
+            self.cursor = self.flat_items.len() - 1;
+        }
+        self.update_selected();
+    }
+
     /// Centralized instance mutation: applies `f` once to the `instances` vec
     /// entry, then clones the result into `instance_map`. This guarantees both
     /// collections stay in sync even for non-idempotent closures.
@@ -722,6 +824,18 @@ impl HomeView {
         for (idx, item) in self.flat_items.iter().enumerate() {
             if let Item::Session { id, .. } = item {
                 if id == session_id {
+                    self.cursor = idx;
+                    self.update_selected();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn select_group_by_path(&mut self, group_path: &str) {
+        for (idx, item) in self.flat_items.iter().enumerate() {
+            if let Item::Group { path, .. } = item {
+                if path == group_path {
                     self.cursor = idx;
                     self.update_selected();
                     return;

@@ -606,6 +606,12 @@ impl HomeView {
             KeyCode::Char('o') => {
                 self.apply_sort_order(self.sort_order.cycle());
             }
+            KeyCode::Char('K') => {
+                self.move_selected_manual_item(-1);
+            }
+            KeyCode::Char('J') => {
+                self.move_selected_manual_item(1);
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_cursor(-1);
             }
