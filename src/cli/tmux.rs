@@ -35,6 +35,8 @@ pub struct SwitchSessionArgs {
     direction: String,
     #[arg(long, default_value = "default")]
     profile: String,
+    #[arg(long)]
+    client_name: Option<String>,
 }
 
 pub fn run_status(args: TmuxStatusArgs) -> Result<()> {
@@ -79,5 +81,9 @@ pub fn run_codex_title_monitor(args: CodexTitleMonitorArgs) -> Result<()> {
 }
 
 pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
-    crate::tmux::utils::switch_aoe_session(&args.direction, &args.profile)
+    crate::tmux::utils::switch_aoe_session(
+        &args.direction,
+        &args.profile,
+        args.client_name.as_deref(),
+    )
 }

@@ -63,6 +63,7 @@ pub struct App {
     update_info: Option<UpdateInfo>,
     update_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<UpdateInfo>>>,
     launch_dir: PathBuf,
+    pending_nested_detach_client: Option<String>,
     /// Last time a redraw was triggered by a tick event (to throttle animations)
     last_tick_redraw: std::time::Instant,
 }
@@ -123,6 +124,7 @@ impl App {
             update_info: None,
             update_rx: None,
             launch_dir,
+            pending_nested_detach_client: None,
             last_tick_redraw: std::time::Instant::now(),
         })
     }
@@ -217,6 +219,10 @@ impl App {
             if let Some(session_id) = self.home.apply_creation_results() {
                 // Creation succeeded - attach to the new session
                 self.attach_session(&session_id, terminal)?;
+                refresh_needed = true;
+            }
+
+            if self.restore_selection_after_nested_detach() {
                 refresh_needed = true;
             }
 
@@ -504,6 +510,16 @@ impl App {
             self.home.set_instance_error(session_id, None);
         }
 
+        let attach_client_name = std::env::var("TMUX")
+            .ok()
+            .and_then(|_| crate::tmux::get_current_client_name())
+            .or_else(crate::tmux::get_tty_name);
+        if let Some(client_name) = &attach_client_name {
+            let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+            crate::tmux::utils::set_last_detached_session_for_client(client_name, &session_name);
+            self.pending_nested_detach_client = Some(client_name.clone());
+        }
+
         instance.refresh_agent_tmux_options();
         let profile = self.home.storage.profile().to_string();
         let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach(&profile))?;
@@ -512,7 +528,9 @@ impl App {
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
-        self.home.select_session_by_id(session_id);
+        if !self.try_restore_selection_from_client_context() {
+            self.home.select_session_by_id(session_id);
+        }
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux attach returned error: {}", e);
@@ -577,19 +595,58 @@ impl App {
             }
         };
 
+        let attach_client_name = std::env::var("TMUX")
+            .ok()
+            .and_then(|_| crate::tmux::get_current_client_name())
+            .or_else(crate::tmux::get_tty_name);
+        if let Some(client_name) = &attach_client_name {
+            let session_name = match mode {
+                TerminalMode::Container if instance.is_sandboxed() => {
+                    crate::tmux::ContainerTerminalSession::generate_name(
+                        &instance.id,
+                        &instance.title,
+                    )
+                }
+                _ => crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title),
+            };
+            crate::tmux::utils::set_last_detached_session_for_client(client_name, &session_name);
+            self.pending_nested_detach_client = Some(client_name.clone());
+        }
+
         let attach_result = with_raw_mode_disabled(terminal, attach_fn)?;
         reapply_tui_title(terminal);
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
-        self.home.select_session_by_id(session_id);
+        if !self.try_restore_selection_from_client_context() {
+            self.home.select_session_by_id(session_id);
+        }
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux terminal attach returned error: {}", e);
         }
 
         Ok(())
+    }
+
+    fn restore_selection_after_nested_detach(&mut self) -> bool {
+        self.try_restore_selection_from_client_context()
+    }
+
+    fn try_restore_selection_from_client_context(&mut self) -> bool {
+        let Some(client_name) = self.pending_nested_detach_client.as_deref() else {
+            return false;
+        };
+
+        let Some(tmux_session_name) =
+            crate::tmux::utils::take_last_detached_session_for_client(client_name)
+        else {
+            return false;
+        };
+
+        self.home
+            .select_session_by_managed_tmux_name(&tmux_session_name)
     }
 
     fn edit_file(

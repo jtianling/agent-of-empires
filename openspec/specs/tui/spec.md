@@ -100,6 +100,40 @@ The diff view shows git changes for the selected session's project:
 
 ## Terminal Tab Title Integration
 
+### Requirement: New session dialog inherits the selected group context
+When the user opens the new session dialog from the home screen, AoE SHALL prefill the dialog's
+Group field from the currently selected home-screen item so the user can create a related session
+without retyping the group path.
+
+#### Scenario: Selected group prefills the Group field
+- **WHEN** the selected home-screen row is a group
+- **AND** the user presses `n`
+- **THEN** the new session dialog SHALL prefill the Group field with that group's full path
+- **AND** the user MAY edit or clear the value before creating the session
+
+#### Scenario: Selected session prefills the Group field from its group
+- **WHEN** the selected home-screen row is a session inside a group
+- **AND** the user presses `n`
+- **THEN** the new session dialog SHALL prefill the Group field with that session's `group_path`
+- **AND** the user MAY edit or clear the value before creating the session
+
+### Requirement: Returning from an attached session restores the actual detached session selection
+When the user returns from an attached AoE-managed tmux session to the home screen, AoE SHALL
+restore selection to the session the user actually detached from, even if they switched sessions
+inside tmux after the initial attach.
+
+#### Scenario: Detach restores the originally attached session when no cycling occurred
+- **WHEN** the user attaches to a session from the home screen
+- **AND** the user later returns to the TUI without switching to another managed session first
+- **THEN** the home screen SHALL select that same session after the TUI reloads
+
+#### Scenario: Detach restores the cycled-to session
+- **WHEN** the user attaches to a session from the home screen
+- **AND** the user switches to another AoE-managed session with `Ctrl+b j` or `Ctrl+b k`
+- **AND** the user presses `Ctrl+b d` to return to the TUI
+- **THEN** the home screen SHALL select the session the user detached from
+- **AND** AoE SHALL NOT force selection back to the originally attached session
+
 ### Requirement: TUI integrates terminal tab title updates into event loop
 The TUI event loop SHALL compute the current tab title state after processing events and before rendering, and update the terminal tab title when it changes. Title writes SHALL occur alongside the existing synchronized update sequence.
 

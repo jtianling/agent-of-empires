@@ -13,6 +13,7 @@ const NESTED_DETACH_HOOK: &str = "client-session-changed[99]";
 const AOE_PROFILE_OPTION: &str = "@aoe_profile";
 const AOE_ORIGIN_PROFILE_OPTION_PREFIX: &str = "@aoe_origin_profile_";
 const AOE_RETURN_SESSION_OPTION_PREFIX: &str = "@aoe_return_session_";
+const AOE_LAST_DETACHED_SESSION_OPTION_PREFIX: &str = "@aoe_last_detached_session_";
 
 fn managed_session_pattern() -> &'static str {
     "^aoe(_|_term_|_cterm_)"
@@ -86,10 +87,12 @@ fn session_cycle_run_shell_cmds(profile: &str) -> (String, String) {
     let aoe_bin = aoe_bin_path();
     let escaped = shell_escape(&aoe_bin);
     let escaped_profile = shell_escape(profile);
-    let next =
-        format!("{escaped} tmux switch-session --direction next --profile {escaped_profile}");
-    let prev =
-        format!("{escaped} tmux switch-session --direction prev --profile {escaped_profile}");
+    let next = format!(
+        "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction next --profile {escaped_profile} --client-name \"$client_name\""
+    );
+    let prev = format!(
+        "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction prev --profile {escaped_profile} --client-name \"$client_name\""
+    );
     (next, prev)
 }
 
@@ -98,14 +101,15 @@ fn nested_detach_run_shell_cmd() -> String {
         concat!(
             "client_name=\"#{{client_name}}\"; ",
             "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
-            "target=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
+            "tmux set-option -sq \"{}${{client_key}}\" \"#{{session_name}}\"; ",
+            "target=$(tmux show-option -sv \"{}${{client_key}}\" 2>/dev/null); ",
             "if [ -n \"$target\" ]; then ",
             "tmux switch-client -t \"$target\" 2>/dev/null || tmux detach-client; ",
             "else ",
             "tmux switch-client -l 2>/dev/null || tmux detach-client; ",
             "fi"
         ),
-        AOE_RETURN_SESSION_OPTION_PREFIX
+        AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, AOE_RETURN_SESSION_OPTION_PREFIX
     )
 }
 
@@ -115,9 +119,9 @@ fn nested_cycle_run_shell_cmd(direction: &str) -> String {
         concat!(
             "client_name=\"#{{client_name}}\"; ",
             "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
-            "profile=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
+            "profile=$(tmux show-option -sv \"{}${{client_key}}\" 2>/dev/null); ",
             "if [ -n \"$profile\" ]; then ",
-            "{} tmux switch-session --direction {} --profile \"$profile\"; ",
+            "{} tmux switch-session --direction {} --profile \"$profile\" --client-name \"$client_name\"; ",
             "fi"
         ),
         AOE_ORIGIN_PROFILE_OPTION_PREFIX, aoe_bin, direction
@@ -145,6 +149,50 @@ fn store_client_attach_context(profile: &str, return_session: Option<&str>) {
             .arg(return_session)
             .output()
             .ok();
+    }
+}
+
+pub fn clear_last_detached_session_for_client(client_name: &str) {
+    let option_key =
+        client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, client_name);
+    Command::new("tmux")
+        .args(["set-option", "-su"])
+        .arg(&option_key)
+        .output()
+        .ok();
+}
+
+pub fn set_last_detached_session_for_client(client_name: &str, session_name: &str) {
+    let option_key =
+        client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, client_name);
+    Command::new("tmux")
+        .args(["set-option", "-sq"])
+        .arg(&option_key)
+        .arg(session_name)
+        .output()
+        .ok();
+}
+
+pub fn take_last_detached_session_for_client(client_name: &str) -> Option<String> {
+    let option_key =
+        client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, client_name);
+    let output = Command::new("tmux")
+        .args(["show-option", "-sv"])
+        .arg(&option_key)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let session_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    clear_last_detached_session_for_client(client_name);
+
+    if session_name.is_empty() {
+        None
+    } else {
+        Some(session_name)
     }
 }
 
@@ -204,7 +252,11 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
-pub fn switch_aoe_session(direction: &str, profile: &str) -> anyhow::Result<()> {
+pub fn switch_aoe_session(
+    direction: &str,
+    profile: &str,
+    client_name: Option<&str>,
+) -> anyhow::Result<()> {
     let storage = crate::session::Storage::new(profile)?;
     let (instances, groups) = storage.load_with_groups()?;
     let sessions =
@@ -224,6 +276,10 @@ pub fn switch_aoe_session(direction: &str, profile: &str) -> anyhow::Result<()> 
     let Some(target_session) = resolve_cycle_target(&sessions, &current, direction) else {
         return Ok(());
     };
+
+    if let Some(client_name) = client_name {
+        set_last_detached_session_for_client(client_name, &target_session);
+    }
 
     Command::new("tmux")
         .args(["switch-client", "-t", &target_session])
@@ -525,12 +581,20 @@ mod tests {
             client_context_option_key(AOE_RETURN_SESSION_OPTION_PREFIX, "/dev/ttys012"),
             "@aoe_return_session__dev_ttys012"
         );
+        assert_eq!(
+            client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, "/dev/ttys012"),
+            "@aoe_last_detached_session__dev_ttys012"
+        );
     }
 
     #[test]
     fn test_nested_detach_run_shell_cmd_uses_saved_return_target() {
         let cmd = nested_detach_run_shell_cmd();
+        assert!(cmd.contains("@aoe_last_detached_session_${client_key}"));
+        assert!(cmd.contains("tmux set-option -sq"));
+        assert!(cmd.contains("\"#{session_name}\""));
         assert!(cmd.contains("@aoe_return_session_${client_key}"));
+        assert!(cmd.contains("tmux show-option -sv"));
         assert!(cmd.contains("switch-client -t \"$target\""));
         assert!(cmd.contains("switch-client -l 2>/dev/null || tmux detach-client"));
     }
@@ -539,7 +603,10 @@ mod tests {
     fn test_nested_cycle_run_shell_cmd_uses_saved_profile() {
         let cmd = nested_cycle_run_shell_cmd("next");
         assert!(cmd.contains("@aoe_origin_profile_${client_key}"));
-        assert!(cmd.contains("tmux switch-session --direction next --profile \"$profile\""));
+        assert!(cmd.contains("tmux show-option -sv"));
+        assert!(cmd.contains(
+            "tmux switch-session --direction next --profile \"$profile\" --client-name \"$client_name\""
+        ));
     }
 
     #[test]
