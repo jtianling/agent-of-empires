@@ -141,6 +141,7 @@ impl Session {
 
         if std::env::var("TMUX").is_ok() {
             let return_session = super::get_current_session_name();
+            let client_name = super::get_current_client_name();
             let status = Command::new("tmux")
                 .args(["switch-client", "-t", &self.name])
                 .status()?;
@@ -148,7 +149,11 @@ impl Session {
             if status.success() {
                 // Rebind Ctrl+b d so pressing it inside a managed session returns
                 // to the AoE session that initiated the attach flow.
-                super::utils::setup_nested_detach_binding(profile, return_session.as_deref());
+                super::utils::setup_nested_detach_binding(
+                    profile,
+                    return_session.as_deref(),
+                    client_name.as_deref(),
+                );
             } else {
                 // Fall back to attach-session if switch-client fails.
                 // This handles cases where TMUX env var is inherited but we're

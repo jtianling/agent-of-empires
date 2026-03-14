@@ -108,12 +108,17 @@ impl TerminalSession {
 
         if std::env::var("TMUX").is_ok() {
             let return_session = super::get_current_session_name();
+            let client_name = super::get_current_client_name();
             let status = Command::new("tmux")
                 .args(["switch-client", "-t", &self.name])
                 .status()?;
 
             if status.success() {
-                super::utils::setup_nested_detach_binding(profile, return_session.as_deref());
+                super::utils::setup_nested_detach_binding(
+                    profile,
+                    return_session.as_deref(),
+                    client_name.as_deref(),
+                );
             } else {
                 let status = Command::new("tmux")
                     .args(["attach-session", "-t", &self.name])
@@ -261,12 +266,17 @@ impl ContainerTerminalSession {
 
         if std::env::var("TMUX").is_ok() {
             let return_session = super::get_current_session_name();
+            let client_name = super::get_current_client_name();
             let status = Command::new("tmux")
                 .args(["switch-client", "-t", &self.name])
                 .status()?;
 
             if status.success() {
-                super::utils::setup_nested_detach_binding(profile, return_session.as_deref());
+                super::utils::setup_nested_detach_binding(
+                    profile,
+                    return_session.as_deref(),
+                    client_name.as_deref(),
+                );
             } else {
                 let status = Command::new("tmux")
                     .args(["attach-session", "-t", &self.name])

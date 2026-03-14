@@ -12,7 +12,7 @@
 //! `target/e2e-recordings/`. Both `asciinema` and `agg` must be on `$PATH`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -112,6 +112,7 @@ pub struct TuiTestHarness {
     stub_path: PathBuf,
     socket_path: PathBuf,
     spawned: bool,
+    control_client: Option<Child>,
     recording: bool,
     cast_path: Option<PathBuf>,
 }
@@ -182,6 +183,7 @@ last_seen_version = "{}"
             stub_path,
             socket_path,
             spawned: false,
+            control_client: None,
             recording,
             cast_path: None,
         }
@@ -258,6 +260,62 @@ last_seen_version = "{}"
         // Recording adds overhead so wait a bit longer.
         let delay = if self.recording { 500 } else { 300 };
         std::thread::sleep(Duration::from_millis(delay));
+    }
+
+    pub fn attach_control_client(&mut self) {
+        assert!(self.spawned, "must call spawn_tui() or spawn() first");
+        if self.control_client.is_some() {
+            return;
+        }
+
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("script");
+            command
+                .arg("-q")
+                .arg("/dev/null")
+                .arg("tmux")
+                .arg("-S")
+                .arg(&self.socket_path)
+                .arg("attach-session")
+                .arg("-t")
+                .arg(&self.session_name);
+            command
+        } else {
+            let mut command = Command::new("script");
+            command
+                .arg("-q")
+                .arg("-c")
+                .arg(format!(
+                    "tmux -S '{}' attach-session -t '{}'",
+                    self.socket_path.display(),
+                    self.session_name
+                ))
+                .arg("/dev/null");
+            command
+        };
+
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to attach control-mode tmux client");
+
+        self.control_client = Some(child);
+
+        let start = Instant::now();
+        while start.elapsed() <= Duration::from_secs(10) {
+            if self
+                .tmux_command(&["list-clients", "-F", "#{client_name}"])
+                .ok()
+                .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!("Timed out waiting for control-mode tmux client to attach");
     }
 
     /// Send one or more tmux key names (e.g. "Enter", "Escape", "q", "C-c").
@@ -402,6 +460,10 @@ last_seen_version = "{}"
         p
     }
 
+    pub fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
     pub fn tmux_show_option(&self, target: &str, option: &str) -> String {
         let output = self
             .tmux_command(&["show-options", "-t", target, "-v", option])
@@ -412,6 +474,97 @@ last_seen_version = "{}"
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    pub fn tmux_show_global_option(&self, option: &str) -> String {
+        let output = self
+            .tmux_command(&["show-options", "-g", "-v", option])
+            .expect("failed to show global tmux option");
+        assert!(
+            output.status.success(),
+            "show global option failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    pub fn tmux_set_global_option(&self, option: &str, value: &str) {
+        let output = self
+            .tmux_command(&["set-option", "-gq", option, value])
+            .expect("failed to set global tmux option");
+        assert!(
+            output.status.success(),
+            "set global option failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    pub fn tmux_single_client_name(&self) -> String {
+        let output = self
+            .tmux_command(&["list-clients", "-F", "#{client_name}"])
+            .expect("failed to list tmux clients");
+        assert!(
+            output.status.success(),
+            "list-clients failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let clients: Vec<_> = stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(
+            clients.len(),
+            1,
+            "expected exactly one tmux client, got {:?}",
+            clients
+        );
+        clients[0].to_string()
+    }
+
+    pub fn tmux_client_session(&self, client_name: &str) -> String {
+        let output = self
+            .tmux_command(&["list-clients", "-F", "#{client_name}\t#{session_name}"])
+            .expect("failed to list tmux clients with sessions");
+        assert!(
+            output.status.success(),
+            "list-clients with sessions failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .lines()
+            .find_map(|line| {
+                let (listed_client, session_name) = line.split_once('\t')?;
+                (listed_client == client_name).then(|| session_name.to_string())
+            })
+            .unwrap_or_else(|| panic!("no tmux client session found for {}", client_name))
+    }
+
+    pub fn wait_for_client_session(&self, client_name: &str, expected_session: &str) {
+        let start = Instant::now();
+        while start.elapsed() <= Duration::from_secs(10) {
+            if self.tmux_client_session(client_name) == expected_session {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!(
+            "Timed out waiting for client {} to switch to session {}",
+            client_name, expected_session
+        );
+    }
+
+    pub fn tmux_switch_client(&self, client_name: &str, target_session: &str) {
+        let output = self
+            .tmux_command(&["switch-client", "-c", client_name, "-t", target_session])
+            .expect("failed to switch tmux client");
+        assert!(
+            output.status.success(),
+            "switch-client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     pub fn tmux_show_window_option(&self, target: &str, option: &str) -> String {
@@ -436,6 +589,23 @@ last_seen_version = "{}"
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    pub fn current_client_session(&self) -> String {
+        let output = self
+            .tmux_command(&["list-clients", "-F", "#{session_name}"])
+            .expect("failed to list tmux clients");
+        assert!(
+            output.status.success(),
+            "list-clients failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     }
 
     pub fn send_keys_to_target(&self, target: &str, keys: &str) {
@@ -522,6 +692,11 @@ last_seen_version = "{}"
 
 impl Drop for TuiTestHarness {
     fn drop(&mut self) {
+        if let Some(mut client) = self.control_client.take() {
+            let _ = client.kill();
+            let _ = client.wait();
+        }
+
         if self.spawned {
             self.kill_session();
         }

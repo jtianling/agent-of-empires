@@ -516,6 +516,9 @@ impl App {
             .or_else(crate::tmux::get_tty_name);
         if let Some(client_name) = &attach_client_name {
             let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+            // This tracks the last managed session visited so home-screen
+            // selection can follow nested detach. The detach return target is
+            // seeded separately by the attach path in tmux utils.
             crate::tmux::utils::set_last_detached_session_for_client(client_name, &session_name);
             self.pending_nested_detach_client = Some(client_name.clone());
         }
@@ -609,6 +612,9 @@ impl App {
                 }
                 _ => crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title),
             };
+            // This tracks the last managed session visited so home-screen
+            // selection can follow nested detach. The detach return target is
+            // seeded separately by the attach path in tmux utils.
             crate::tmux::utils::set_last_detached_session_for_client(client_name, &session_name);
             self.pending_nested_detach_client = Some(client_name.clone());
         }

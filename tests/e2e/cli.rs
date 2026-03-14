@@ -17,6 +17,14 @@ fn read_sessions_json(h: &TuiTestHarness) -> serde_json::Value {
     serde_json::from_str(&content).expect("invalid sessions JSON")
 }
 
+fn client_context_option_key(prefix: &str, client_name: &str) -> String {
+    let suffix: String = client_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{prefix}{suffix}")
+}
+
 #[test]
 #[serial]
 fn test_cli_add_and_list() {
@@ -357,4 +365,145 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
     assert_eq!(resumed_title, "Codex Wait Title");
 
     h.kill_tmux_target(&tmux_name);
+}
+
+#[test]
+#[serial]
+fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_target() {
+    crate::harness::require_tmux!();
+
+    let mut h = TuiTestHarness::new("cli_group_scoped_switch");
+    let project = h.project_path();
+
+    for args in [
+        vec![
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            "Skills Manager Claude",
+            "--group",
+            "skills-manager",
+            "--cmd-override",
+            "sh",
+        ],
+        vec![
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            "Skills Manager Shell",
+            "--group",
+            "skills-manager",
+            "--cmd-override",
+            "sh",
+        ],
+        vec![
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            "Blog Writer",
+            "--group",
+            "blog-workspace",
+            "--cmd-override",
+            "sh",
+        ],
+    ] {
+        let output = h.run_cli(&args);
+        assert!(
+            output.status.success(),
+            "aoe add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for title in [
+        "Skills Manager Claude",
+        "Skills Manager Shell",
+        "Blog Writer",
+    ] {
+        let output = h.run_cli_in_tmux(&["session", "start", title]);
+        assert!(
+            output.status.success(),
+            "aoe session start failed for {}: {}",
+            title,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let sessions = read_sessions_json(&h);
+    let lookup_tmux = |title: &str| {
+        let session = sessions
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .find(|session| session["title"].as_str() == Some(title))
+            .unwrap_or_else(|| panic!("missing session {}", title));
+        let id = session["id"].as_str().expect("session id");
+        agent_of_empires::tmux::Session::generate_name(id, title)
+    };
+    let skills_claude = lookup_tmux("Skills Manager Claude");
+    let skills_shell = lookup_tmux("Skills Manager Shell");
+    let blog_writer = lookup_tmux("Blog Writer");
+
+    h.spawn_tui();
+    h.attach_control_client();
+    h.wait_for("Skills Manager Claude");
+
+    let client_name = h.tmux_single_client_name();
+    let return_key = client_context_option_key("@aoe_return_session_", &client_name);
+    h.tmux_set_global_option(&return_key, h.session_name());
+
+    h.tmux_switch_client(&client_name, &skills_claude);
+    h.wait_for_client_session(&client_name, &skills_claude);
+
+    let switch_next = h.run_cli_in_tmux(&[
+        "tmux",
+        "switch-session",
+        "--direction",
+        "next",
+        "--profile",
+        "default",
+        "--client-name",
+        &client_name,
+    ]);
+    assert!(
+        switch_next.status.success(),
+        "aoe tmux switch-session failed: {}",
+        String::from_utf8_lossy(&switch_next.stderr)
+    );
+    h.wait_for_client_session(&client_name, &skills_shell);
+    assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
+
+    let switch_wrap = h.run_cli_in_tmux(&[
+        "tmux",
+        "switch-session",
+        "--direction",
+        "next",
+        "--profile",
+        "default",
+        "--client-name",
+        &client_name,
+    ]);
+    assert!(
+        switch_wrap.status.success(),
+        "aoe tmux switch-session wrap failed: {}",
+        String::from_utf8_lossy(&switch_wrap.stderr)
+    );
+    h.wait_for_client_session(&client_name, &skills_claude);
+    assert_ne!(h.current_client_session(), blog_writer);
+    assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
+
+    let detach_cmd = concat!(
+        "client_name=\"$(tmux display-message -p '#{client_name}')\"; ",
+        "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
+        "tmux set-option -gq \"@aoe_last_detached_session_${client_key}\" \"$(tmux display-message -p '#{session_name}')\"; ",
+        "target=$(tmux show-option -gv \"@aoe_return_session_${client_key}\" 2>/dev/null); ",
+        "if [ -n \"$target\" ]; then ",
+        "tmux switch-client -c \"$client_name\" -t \"$target\" 2>/dev/null || tmux detach-client -t \"$client_name\"; ",
+        "else ",
+        "tmux switch-client -c \"$client_name\" -l 2>/dev/null || tmux detach-client -t \"$client_name\"; ",
+        "fi"
+    );
+    h.type_text_to_target(&skills_claude, detach_cmd);
+    h.send_keys_to_target(&skills_claude, "Enter");
+    h.wait_for_client_session(&client_name, h.session_name());
 }
