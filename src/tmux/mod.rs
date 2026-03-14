@@ -90,6 +90,21 @@ pub fn get_current_session_name() -> Option<String> {
     None
 }
 
+pub fn get_current_client_name() -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{client_name}"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
 pub fn is_tmux_available() -> bool {
     Command::new("tmux").arg("-V").output().is_ok()
 }

@@ -2,43 +2,63 @@
 
 use std::process::Command;
 
+use crate::session::{
+    config::{load_config, SortOrder},
+    flatten_tree, Group, GroupTree, Instance, Item,
+};
+
 /// Hook index used for the aoe-specific `client-session-changed` hook that
 /// keeps `Ctrl+b d` mapped to "go back" inside managed sessions.
 const NESTED_DETACH_HOOK: &str = "client-session-changed[99]";
+const AOE_PROFILE_OPTION: &str = "@aoe_profile";
+const AOE_ORIGIN_PROFILE_OPTION_PREFIX: &str = "@aoe_origin_profile_";
+const AOE_RETURN_SESSION_OPTION_PREFIX: &str = "@aoe_return_session_";
+
+fn managed_session_pattern() -> &'static str {
+    "^aoe(_|_term_|_cterm_)"
+}
 
 /// Sets up a tmux hook that dynamically rebinds `Ctrl+b d` based on the
 /// current session:
 ///
-/// - **aoe sessions** (`aoe_*`): switch back to the previous session
-///   (falls back to detach if there is no previous session).
+/// - **aoe sessions** (`aoe_*`, `aoe_term_*`, `aoe_cterm_*`): switch back to
+///   the AoE session that initiated the attach flow.
 /// - **Other sessions**: normal `detach-client` behavior is restored.
 ///
 /// Uses a `client-session-changed` hook so the binding is only active while
 /// inside an aoe session and automatically reverts when switching away.
-pub fn setup_nested_detach_binding(profile: &str) {
-    let switch_cmds = session_cycle_run_shell_cmds(profile);
+pub fn setup_nested_detach_binding(profile: &str, return_session: Option<&str>) {
+    store_client_attach_context(profile, return_session);
+
+    let detach_cmd = nested_detach_run_shell_cmd();
+    let next_cmd = nested_cycle_run_shell_cmd("next");
+    let prev_cmd = nested_cycle_run_shell_cmd("prev");
 
     let hook_cmd = format!(
-        r#"if-shell "tmux display-message -p '#{{session_name}}' | grep -q '^aoe_'" "bind-key d run-shell 'tmux switch-client -l 2>/dev/null || tmux detach-client' ; bind-key j run-shell '{}' ; bind-key k run-shell '{}'" "bind-key d detach-client ; unbind-key j ; unbind-key k""#,
-        switch_cmds.0, switch_cmds.1
+        r#"if-shell "tmux display-message -p '#{{session_name}}' | grep -Eq '{}'" "bind-key d run-shell {} ; bind-key j run-shell {} ; bind-key k run-shell {}" "bind-key d detach-client ; unbind-key j ; unbind-key k""#,
+        managed_session_pattern(),
+        shell_escape(&detach_cmd),
+        shell_escape(&next_cmd),
+        shell_escape(&prev_cmd)
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
         .output()
         .ok();
 
-    // Apply the d binding immediately for the current aoe session.
+    // Apply bindings immediately for the current managed session.
     Command::new("tmux")
-        .args([
-            "bind-key",
-            "d",
-            "run-shell",
-            r#"tmux switch-client -l 2>/dev/null || tmux detach-client"#,
-        ])
+        .args(["bind-key", "d", "run-shell", &detach_cmd])
         .output()
         .ok();
-
-    setup_session_cycle_bindings(profile);
+    Command::new("tmux")
+        .args(["bind-key", "j", "run-shell", &next_cmd])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "k", "run-shell", &prev_cmd])
+        .output()
+        .ok();
 }
 
 /// Removes the hook installed by [`setup_nested_detach_binding`] and restores
@@ -73,7 +93,71 @@ fn session_cycle_run_shell_cmds(profile: &str) -> (String, String) {
     (next, prev)
 }
 
-const AOE_PROFILE_OPTION: &str = "@aoe_profile";
+fn nested_detach_run_shell_cmd() -> String {
+    format!(
+        concat!(
+            "client_name=\"#{{client_name}}\"; ",
+            "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
+            "target=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
+            "if [ -n \"$target\" ]; then ",
+            "tmux switch-client -t \"$target\" 2>/dev/null || tmux detach-client; ",
+            "else ",
+            "tmux switch-client -l 2>/dev/null || tmux detach-client; ",
+            "fi"
+        ),
+        AOE_RETURN_SESSION_OPTION_PREFIX
+    )
+}
+
+fn nested_cycle_run_shell_cmd(direction: &str) -> String {
+    let aoe_bin = shell_escape(&aoe_bin_path());
+    format!(
+        concat!(
+            "client_name=\"#{{client_name}}\"; ",
+            "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
+            "profile=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
+            "if [ -n \"$profile\" ]; then ",
+            "{} tmux switch-session --direction {} --profile \"$profile\"; ",
+            "fi"
+        ),
+        AOE_ORIGIN_PROFILE_OPTION_PREFIX, aoe_bin, direction
+    )
+}
+
+fn store_client_attach_context(profile: &str, return_session: Option<&str>) {
+    let Some(client_name) = crate::tmux::get_current_client_name() else {
+        return;
+    };
+
+    let profile_key = client_context_option_key(AOE_ORIGIN_PROFILE_OPTION_PREFIX, &client_name);
+    Command::new("tmux")
+        .args(["set-option", "-sq"])
+        .arg(&profile_key)
+        .arg(profile)
+        .output()
+        .ok();
+
+    if let Some(return_session) = return_session {
+        let return_key = client_context_option_key(AOE_RETURN_SESSION_OPTION_PREFIX, &client_name);
+        Command::new("tmux")
+            .args(["set-option", "-sq"])
+            .arg(&return_key)
+            .arg(return_session)
+            .output()
+            .ok();
+    }
+}
+
+fn client_context_option_key(prefix: &str, client_name: &str) -> String {
+    format!("{prefix}{}", sanitize_tmux_option_suffix(client_name))
+}
+
+fn sanitize_tmux_option_suffix(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
 
 /// Binds `Ctrl+b j` / `Ctrl+b k` to cycle through aoe agent sessions
 /// belonging to the given profile. Works in both nested and non-nested tmux modes.
@@ -122,13 +206,9 @@ fn shell_escape(s: &str) -> String {
 
 pub fn switch_aoe_session(direction: &str, profile: &str) -> anyhow::Result<()> {
     let storage = crate::session::Storage::new(profile)?;
-    let instances = storage.load()?;
-    let mut sessions: Vec<String> = instances
-        .iter()
-        .map(|i| crate::tmux::Session::generate_name(&i.id, &i.title))
-        .filter(|name| tmux_session_exists(name))
-        .collect();
-    sessions.sort();
+    let (instances, groups) = storage.load_with_groups()?;
+    let sessions =
+        ordered_profile_sessions_for_cycle(&instances, &groups, current_home_sort_order());
 
     if sessions.len() <= 1 {
         return Ok(());
@@ -141,7 +221,56 @@ pub fn switch_aoe_session(direction: &str, profile: &str) -> anyhow::Result<()> 
         .trim()
         .to_string();
 
-    let current_idx = sessions.iter().position(|s| s == &current).unwrap_or(0);
+    let Some(target_session) = resolve_cycle_target(&sessions, &current, direction) else {
+        return Ok(());
+    };
+
+    Command::new("tmux")
+        .args(["switch-client", "-t", &target_session])
+        .output()?;
+
+    Ok(())
+}
+
+fn current_home_sort_order() -> SortOrder {
+    load_config()
+        .ok()
+        .flatten()
+        .and_then(|config| config.app_state.sort_order)
+        .unwrap_or_default()
+}
+
+fn ordered_profile_sessions_for_cycle(
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+) -> Vec<String> {
+    ordered_profile_session_names(instances, groups, sort_order)
+        .into_iter()
+        .filter(|name| tmux_session_exists(name))
+        .collect()
+}
+
+fn ordered_profile_session_names(
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+) -> Vec<String> {
+    let group_tree = GroupTree::new_with_groups(instances, groups);
+    flatten_tree(&group_tree, instances, sort_order)
+        .into_iter()
+        .filter_map(|item| match item {
+            Item::Session { id, .. } => instances
+                .iter()
+                .find(|instance| instance.id == id)
+                .map(|instance| crate::tmux::Session::generate_name(&instance.id, &instance.title)),
+            Item::Group { .. } => None,
+        })
+        .collect()
+}
+
+fn resolve_cycle_target(sessions: &[String], current: &str, direction: &str) -> Option<String> {
+    let current_idx = sessions.iter().position(|session| session == current)?;
 
     let target_idx = match direction {
         "next" => (current_idx + 1) % sessions.len(),
@@ -152,14 +281,10 @@ pub fn switch_aoe_session(direction: &str, profile: &str) -> anyhow::Result<()> 
                 current_idx - 1
             }
         }
-        _ => return Ok(()),
+        _ => return None,
     };
 
-    Command::new("tmux")
-        .args(["switch-client", "-t", &sessions[target_idx]])
-        .output()?;
-
-    Ok(())
+    sessions.get(target_idx).cloned()
 }
 
 fn tmux_session_exists(name: &str) -> bool {
@@ -271,6 +396,24 @@ pub fn is_pane_running_shell(session_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use tempfile::TempDir;
+
+    fn setup_test_home(temp: &TempDir) {
+        std::env::set_var("HOME", temp.path());
+        #[cfg(target_os = "linux")]
+        std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+    }
+
+    fn instance_with_created_at(
+        title: &str,
+        path: &str,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Instance {
+        let mut instance = Instance::new(title, path);
+        instance.created_at = created_at;
+        instance
+    }
 
     #[test]
     fn test_sanitize_session_name() {
@@ -373,5 +516,114 @@ mod tests {
                 "{cmd} should not be recognized as a shell"
             );
         }
+    }
+
+    #[test]
+    fn test_client_context_option_key_sanitizes_client_name() {
+        assert_eq!(
+            client_context_option_key(AOE_RETURN_SESSION_OPTION_PREFIX, "/dev/ttys012"),
+            "@aoe_return_session__dev_ttys012"
+        );
+    }
+
+    #[test]
+    fn test_nested_detach_run_shell_cmd_uses_saved_return_target() {
+        let cmd = nested_detach_run_shell_cmd();
+        assert!(cmd.contains("@aoe_return_session_${client_key}"));
+        assert!(cmd.contains("switch-client -t \"$target\""));
+        assert!(cmd.contains("switch-client -l 2>/dev/null || tmux detach-client"));
+    }
+
+    #[test]
+    fn test_nested_cycle_run_shell_cmd_uses_saved_profile() {
+        let cmd = nested_cycle_run_shell_cmd("next");
+        assert!(cmd.contains("@aoe_origin_profile_${client_key}"));
+        assert!(cmd.contains("tmux switch-session --direction next --profile \"$profile\""));
+    }
+
+    #[test]
+    fn test_resolve_cycle_target_wraps_forward() {
+        let sessions = vec![
+            "aoe_a".to_string(),
+            "aoe_b".to_string(),
+            "aoe_c".to_string(),
+        ];
+        assert_eq!(
+            resolve_cycle_target(&sessions, "aoe_c", "next"),
+            Some("aoe_a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_cycle_target_requires_current_session_in_scope() {
+        let sessions = vec!["aoe_a".to_string(), "aoe_b".to_string()];
+        assert_eq!(resolve_cycle_target(&sessions, "aoe_other", "next"), None);
+    }
+
+    #[test]
+    fn test_ordered_profile_sessions_for_cycle_matches_flattened_group_order() {
+        let now = Utc::now();
+        let ungrouped = instance_with_created_at("Ungrouped", "/tmp/u", now);
+        let mut zebra = instance_with_created_at("Zebra", "/tmp/z", now + Duration::seconds(1));
+        zebra.group_path = "work".to_string();
+        let mut apple = instance_with_created_at("Apple", "/tmp/a", now + Duration::seconds(2));
+        apple.group_path = "work".to_string();
+        let instances = vec![ungrouped.clone(), zebra.clone(), apple.clone()];
+        let groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: false,
+            children: Vec::new(),
+        }];
+
+        let sessions = ordered_profile_session_names(&instances, &groups, SortOrder::AZ);
+
+        assert_eq!(
+            sessions,
+            vec![
+                crate::tmux::Session::generate_name(&ungrouped.id, &ungrouped.title),
+                crate::tmux::Session::generate_name(&apple.id, &apple.title),
+                crate::tmux::Session::generate_name(&zebra.id, &zebra.title),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ordered_profile_sessions_for_cycle_skips_collapsed_groups() {
+        let now = Utc::now();
+        let visible = instance_with_created_at("Visible", "/tmp/v", now);
+        let mut hidden = instance_with_created_at("Hidden", "/tmp/h", now + Duration::seconds(1));
+        hidden.group_path = "work".to_string();
+        let instances = vec![visible.clone(), hidden.clone()];
+        let groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: true,
+            children: Vec::new(),
+        }];
+
+        let sessions = ordered_profile_session_names(&instances, &groups, SortOrder::Newest);
+
+        assert_eq!(
+            sessions,
+            vec![crate::tmux::Session::generate_name(
+                &visible.id,
+                &visible.title
+            )]
+        );
+    }
+
+    #[test]
+    fn test_current_home_sort_order_reads_saved_app_state() {
+        let temp = TempDir::new().unwrap();
+        setup_test_home(&temp);
+        let storage = crate::session::Storage::new("default").unwrap();
+        let _ = storage.load_with_groups().unwrap();
+
+        let mut config = crate::session::config::Config::default();
+        config.app_state.sort_order = Some(SortOrder::ZA);
+        crate::session::config::save_config(&config).unwrap();
+
+        assert_eq!(current_home_sort_order(), SortOrder::ZA);
     }
 }
