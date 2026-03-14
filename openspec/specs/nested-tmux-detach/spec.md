@@ -25,10 +25,11 @@ fully detaching the tmux client or merely returning to the most recently visited
 - **THEN** the tmux client switches back to the AoE TUI session that initiated the attach instead
   of disconnecting entirely
 
-#### Scenario: Detach still returns to AoE after session cycling
+#### Scenario: Detach still returns to AoE after in-scope session cycling
 - **WHEN** AoE is running inside a tmux session (TMUX env var is set)
 - **AND** the user opens a managed AoE session from the AoE TUI
-- **AND** the user uses `Ctrl+b j` or `Ctrl+b k` to cycle between managed sessions
+- **AND** the user uses `Ctrl+b j` or `Ctrl+b k` to cycle to another managed session in the same
+  allowed cycle scope
 - **AND** the user presses `Ctrl+b d`
 - **THEN** the tmux client switches back to the original AoE TUI session that initiated the attach
 
@@ -45,28 +46,47 @@ fully detaching the tmux client or merely returning to the most recently visited
 
 ### Requirement: Session cycling via Ctrl+b j/k
 While attached to any AoE-managed tmux session, the user SHALL be able to cycle directly between
-agent sessions in the same profile that initiated the attach using `Ctrl+b j` (next) and `Ctrl+b
-k` (previous), without returning to the AoE TUI first.
+managed sessions in the same attach-origin profile and the same current session scope using
+`Ctrl+b j` (next) and `Ctrl+b k` (previous), without returning to the AoE TUI first. The current
+session scope SHALL be the current session's exact `group_path`; sessions with an empty
+`group_path` SHALL only cycle among other ungrouped sessions.
 
-#### Scenario: Cycle to next session
-- **WHEN** the user is attached to an AoE-managed session
-- **AND** there are multiple agent sessions in the current profile
+#### Scenario: Cycle to next session within the same group
+- **WHEN** the user is attached to an AoE-managed session whose `group_path` is `skills-manager`
+- **AND** there are multiple managed sessions in profile `work` with `group_path =
+  skills-manager`
 - **AND** the user presses `Ctrl+b j`
-- **THEN** the tmux client switches to the next agent session in the same order shown by the AoE
-  session list for that profile
-- **AND** if the current session is the last one, it wraps to the first
+- **THEN** the tmux client switches to the next managed session whose `group_path` is
+  `skills-manager`
+- **AND** if the current scoped session is the last one, it wraps to the first scoped session
 
-#### Scenario: Cycle to previous session
-- **WHEN** the user is attached to an AoE-managed session
-- **AND** there are multiple agent sessions in the current profile
+#### Scenario: Cycle to previous session within the same group
+- **WHEN** the user is attached to an AoE-managed session whose `group_path` is `skills-manager`
+- **AND** there are multiple managed sessions in profile `work` with `group_path =
+  skills-manager`
 - **AND** the user presses `Ctrl+b k`
-- **THEN** the tmux client switches to the previous agent session in the same order shown by the
-  AoE session list for that profile
-- **AND** if the current session is the first one, it wraps to the last
+- **THEN** the tmux client switches to the previous managed session whose `group_path` is
+  `skills-manager`
+- **AND** if the current scoped session is the first one, it wraps to the last scoped session
 
-#### Scenario: Single session does nothing
+#### Scenario: Ungrouped session cycles only among ungrouped sessions
+- **WHEN** the user is attached to an AoE-managed session whose `group_path` is empty
+- **AND** there are multiple ungrouped managed sessions in the current profile
+- **AND** there are also grouped managed sessions in that same profile
+- **AND** the user presses `Ctrl+b j` or `Ctrl+b k`
+- **THEN** the tmux client switches only among the ungrouped managed sessions
+- **AND** grouped sessions are excluded from the cycle target list
+
+#### Scenario: Grouped session excludes sibling groups and ungrouped sessions
+- **WHEN** the user is attached to an AoE-managed session whose `group_path` is `skills-manager`
+- **AND** the current profile also contains managed sessions in `blog-workspace`, `main`, or no
+  group
+- **AND** the user presses `Ctrl+b j` or `Ctrl+b k`
+- **THEN** sessions outside `skills-manager` are excluded from the cycle target list
+
+#### Scenario: Single in-scope session does nothing
 - **WHEN** the user is attached to an AoE-managed session
-- **AND** there is only one agent session in the current profile
+- **AND** there is only one managed session in the current session scope
 - **AND** the user presses `Ctrl+b j` or `Ctrl+b k`
 - **THEN** nothing happens (the user stays in the current session)
 
