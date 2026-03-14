@@ -436,10 +436,12 @@ impl HomeView {
                         .map(|g| g.path.clone())
                         .collect();
                     let current_profile = self.storage.profile().to_string();
+                    let default_group = self.selected_group_context();
                     self.new_dialog = Some(NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_titles,
                         existing_groups,
+                        default_group,
                         &current_profile,
                         &self.launch_dir,
                     ));

@@ -677,6 +677,20 @@ impl HomeView {
         Ok(())
     }
 
+    pub(super) fn selected_group_context(&self) -> Option<String> {
+        if let Some(group_path) = &self.selected_group {
+            return Some(group_path.clone());
+        }
+
+        let session_id = self.selected_session.as_ref()?;
+        let instance = self.get_instance(session_id)?;
+        if instance.group_path.is_empty() {
+            None
+        } else {
+            Some(instance.group_path.clone())
+        }
+    }
+
     pub(super) fn move_selected_manual_item(&mut self, delta: i32) {
         if self.sort_order != SortOrder::Manual || delta == 0 {
             return;
@@ -842,6 +856,27 @@ impl HomeView {
                 }
             }
         }
+    }
+
+    pub fn select_session_by_managed_tmux_name(&mut self, tmux_session_name: &str) -> bool {
+        for instance in &self.instances {
+            let matches_agent = crate::tmux::Session::generate_name(&instance.id, &instance.title)
+                == tmux_session_name;
+            let matches_terminal =
+                crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title)
+                    == tmux_session_name;
+            let matches_container =
+                crate::tmux::ContainerTerminalSession::generate_name(&instance.id, &instance.title)
+                    == tmux_session_name;
+
+            if matches_agent || matches_terminal || matches_container {
+                let session_id = instance.id.clone();
+                self.select_session_by_id(&session_id);
+                return self.selected_session.as_deref() == Some(session_id.as_str());
+            }
+        }
+
+        false
     }
 
     /// Get the terminal mode for a session (uses config default if not set)

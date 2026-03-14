@@ -294,6 +294,7 @@ impl NewSessionDialog {
         tools: AvailableTools,
         existing_titles: Vec<String>,
         existing_groups: Vec<String>,
+        default_group: Option<String>,
         profile: &str,
         launch_dir: &std::path::Path,
     ) -> Self {
@@ -346,7 +347,7 @@ impl NewSessionDialog {
             profile: profile.to_string(),
             title: Input::default(),
             path: Input::new(current_dir),
-            group: Input::default(),
+            group: Input::new(default_group.unwrap_or_default()),
             tool_index,
             focused_field: 0,
             available_tools,
@@ -425,6 +426,11 @@ impl NewSessionDialog {
     /// Check if the dialog is in loading state
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_value(&self) -> &str {
+        self.group.value()
     }
 
     /// Advance dialog timers (spinner and transient highlights).

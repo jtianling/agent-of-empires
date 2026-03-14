@@ -179,12 +179,62 @@ fn test_n_opens_new_dialog() {
 
 #[test]
 #[serial]
+fn test_n_prefills_group_from_selected_group() {
+    let mut env = create_test_env_with_groups();
+    let group_idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "work"))
+        .expect("work group should exist");
+
+    env.view.cursor = group_idx;
+    env.view.update_selected();
+    env.view.handle_key(key(KeyCode::Char('n')));
+
+    let dialog = env
+        .view
+        .new_dialog
+        .as_ref()
+        .expect("new dialog should open");
+    assert_eq!(dialog.group_value(), "work");
+}
+
+#[test]
+#[serial]
+fn test_n_prefills_group_from_selected_session() {
+    let mut env = create_test_env_with_groups();
+    let session_idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| {
+            matches!(item, Item::Session { id, .. }
+                if env.view.get_instance(id).is_some_and(|inst| inst.group_path == "personal"))
+        })
+        .expect("personal session should exist");
+
+    env.view.cursor = session_idx;
+    env.view.update_selected();
+    env.view.handle_key(key(KeyCode::Char('n')));
+
+    let dialog = env
+        .view
+        .new_dialog
+        .as_ref()
+        .expect("new dialog should open");
+    assert_eq!(dialog.group_value(), "personal");
+}
+
+#[test]
+#[serial]
 fn test_has_dialog_returns_true_for_new_dialog() {
     let mut env = create_test_env_empty();
     env.view.new_dialog = Some(NewSessionDialog::new(
         AvailableTools::with_tools(&["claude"]),
         Vec::new(),
         Vec::new(),
+        None,
         "default",
         &std::env::current_dir().unwrap_or_default(),
     ));
@@ -711,6 +761,28 @@ fn test_select_session_by_id_nonexistent() {
     assert_eq!(env.view.cursor, 0);
     env.view.select_session_by_id("nonexistent-id");
     assert_eq!(env.view.cursor, 0);
+}
+
+#[test]
+#[serial]
+fn test_select_session_by_managed_tmux_name_matches_agent_session() {
+    let mut env = create_test_env_with_sessions(3);
+    let instance = env.view.instances[1].clone();
+    let tmux_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+
+    assert!(env.view.select_session_by_managed_tmux_name(&tmux_name));
+    assert_eq!(env.view.selected_session, Some(instance.id));
+}
+
+#[test]
+#[serial]
+fn test_select_session_by_managed_tmux_name_matches_terminal_session() {
+    let mut env = create_test_env_with_sessions(3);
+    let instance = env.view.instances[1].clone();
+    let tmux_name = crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title);
+
+    assert!(env.view.select_session_by_managed_tmux_name(&tmux_name));
+    assert_eq!(env.view.selected_session, Some(instance.id));
 }
 
 #[test]
