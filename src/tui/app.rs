@@ -525,7 +525,10 @@ impl App {
 
         instance.refresh_agent_tmux_options();
         let profile = self.home.storage.profile().to_string();
-        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach(&profile))?;
+        let client_for_attach = attach_client_name.clone();
+        let attach_result = with_raw_mode_disabled(terminal, || {
+            tmux_session.attach_with_client(&profile, client_for_attach.as_deref())
+        })?;
         reapply_tui_title(terminal);
 
         self.needs_redraw = true;
@@ -556,7 +559,13 @@ impl App {
         // Get terminal size to pass to tmux session creation
         let size = crate::terminal::get_size();
 
+        let attach_client_name = std::env::var("TMUX")
+            .ok()
+            .and_then(|_| crate::tmux::get_current_client_name())
+            .or_else(crate::tmux::get_tty_name);
+
         // Prepare the tmux session before leaving TUI mode
+        let client_for_attach = attach_client_name.clone();
         let attach_fn: Box<dyn FnOnce() -> Result<()>> = match mode {
             TerminalMode::Container if instance.is_sandboxed() => {
                 let container_session = instance.container_terminal_tmux_session()?;
@@ -575,7 +584,9 @@ impl App {
                 }
                 instance.refresh_container_terminal_tmux_options();
                 let p = self.home.storage.profile().to_string();
-                Box::new(move || container_session.attach(&p))
+                Box::new(move || {
+                    container_session.attach_with_client(&p, client_for_attach.as_deref())
+                })
             }
             _ => {
                 let terminal_session = instance.terminal_tmux_session()?;
@@ -594,14 +605,11 @@ impl App {
                 }
                 instance.refresh_terminal_tmux_options();
                 let p = self.home.storage.profile().to_string();
-                Box::new(move || terminal_session.attach(&p))
+                Box::new(move || {
+                    terminal_session.attach_with_client(&p, client_for_attach.as_deref())
+                })
             }
         };
-
-        let attach_client_name = std::env::var("TMUX")
-            .ok()
-            .and_then(|_| crate::tmux::get_current_client_name())
-            .or_else(crate::tmux::get_tty_name);
         if let Some(client_name) = &attach_client_name {
             let session_name = match mode {
                 TerminalMode::Container if instance.is_sandboxed() => {

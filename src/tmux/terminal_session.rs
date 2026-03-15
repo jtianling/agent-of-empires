@@ -100,6 +100,10 @@ impl TerminalSession {
     }
 
     pub fn attach(&self, profile: &str) -> Result<()> {
+        self.attach_with_client(profile, None)
+    }
+
+    pub fn attach_with_client(&self, profile: &str, caller_client: Option<&str>) -> Result<()> {
         if !self.exists() {
             bail!("Terminal session does not exist: {}", self.name);
         }
@@ -108,10 +112,15 @@ impl TerminalSession {
 
         if std::env::var("TMUX").is_ok() {
             let return_session = super::get_current_session_name();
-            let client_name = super::get_current_client_name();
-            let status = Command::new("tmux")
-                .args(["switch-client", "-t", &self.name])
-                .status()?;
+            let client_name = caller_client
+                .map(str::to_owned)
+                .or_else(super::get_current_client_name);
+            let mut switch_args = vec!["switch-client".to_string()];
+            if let Some(cn) = &client_name {
+                switch_args.extend(["-c".to_string(), cn.clone()]);
+            }
+            switch_args.extend(["-t".to_string(), self.name.clone()]);
+            let status = Command::new("tmux").args(&switch_args).status()?;
 
             if status.success() {
                 super::utils::setup_nested_detach_binding(
@@ -129,6 +138,11 @@ impl TerminalSession {
                 }
             }
         } else {
+            Command::new("tmux")
+                .args(["bind-key", "d", "detach-client"])
+                .output()
+                .ok();
+
             let status = Command::new("tmux")
                 .args(["attach-session", "-t", &self.name])
                 .status()?;
@@ -258,6 +272,10 @@ impl ContainerTerminalSession {
     }
 
     pub fn attach(&self, profile: &str) -> Result<()> {
+        self.attach_with_client(profile, None)
+    }
+
+    pub fn attach_with_client(&self, profile: &str, caller_client: Option<&str>) -> Result<()> {
         if !self.exists() {
             bail!("Container terminal session does not exist: {}", self.name);
         }
@@ -266,10 +284,15 @@ impl ContainerTerminalSession {
 
         if std::env::var("TMUX").is_ok() {
             let return_session = super::get_current_session_name();
-            let client_name = super::get_current_client_name();
-            let status = Command::new("tmux")
-                .args(["switch-client", "-t", &self.name])
-                .status()?;
+            let client_name = caller_client
+                .map(str::to_owned)
+                .or_else(super::get_current_client_name);
+            let mut switch_args = vec!["switch-client".to_string()];
+            if let Some(cn) = &client_name {
+                switch_args.extend(["-c".to_string(), cn.clone()]);
+            }
+            switch_args.extend(["-t".to_string(), self.name.clone()]);
+            let status = Command::new("tmux").args(&switch_args).status()?;
 
             if status.success() {
                 super::utils::setup_nested_detach_binding(
@@ -287,6 +310,11 @@ impl ContainerTerminalSession {
                 }
             }
         } else {
+            Command::new("tmux")
+                .args(["bind-key", "d", "detach-client"])
+                .output()
+                .ok();
+
             let status = Command::new("tmux")
                 .args(["attach-session", "-t", &self.name])
                 .status()?;

@@ -15,19 +15,13 @@ const AOE_ORIGIN_PROFILE_OPTION_PREFIX: &str = "@aoe_origin_profile_";
 const AOE_RETURN_SESSION_OPTION_PREFIX: &str = "@aoe_return_session_";
 const AOE_LAST_DETACHED_SESSION_OPTION_PREFIX: &str = "@aoe_last_detached_session_";
 
-fn managed_session_pattern() -> &'static str {
-    "^aoe(_|_term_|_cterm_)"
-}
-
 /// Sets up a tmux hook that dynamically rebinds `Ctrl+b d` based on the
 /// current session:
 ///
-/// - **aoe sessions** (`aoe_*`, `aoe_term_*`, `aoe_cterm_*`): switch back to
-///   the AoE session that initiated the attach flow.
+/// - **aoe sessions** (`aoe_*`, `aoe_term_*`, `aoe_cterm_*`): delegates to
+///   `aoe tmux refresh-bindings` which sets d/j/k via `Command::new("tmux")`
+///   (bypasses tmux's internal parser to avoid quoting issues).
 /// - **Other sessions**: normal `detach-client` behavior is restored.
-///
-/// Uses a `client-session-changed` hook so the binding is only active while
-/// inside an aoe session and automatically reverts when switching away.
 pub fn setup_nested_detach_binding(
     profile: &str,
     return_session: Option<&str>,
@@ -35,16 +29,9 @@ pub fn setup_nested_detach_binding(
 ) {
     store_client_attach_context(profile, return_session, client_name);
 
-    let detach_cmd = nested_detach_run_shell_cmd();
-    let next_cmd = nested_cycle_run_shell_cmd("next");
-    let prev_cmd = nested_cycle_run_shell_cmd("prev");
-
+    let aoe_bin = shell_escape(&aoe_bin_path());
     let hook_cmd = format!(
-        r#"if-shell "tmux display-message -p '#{{session_name}}' | grep -Eq '{}'" "bind-key d run-shell {} ; bind-key j run-shell {} ; bind-key k run-shell {}" "bind-key d detach-client ; unbind-key j ; unbind-key k""#,
-        managed_session_pattern(),
-        shell_escape(&detach_cmd),
-        shell_escape(&next_cmd),
-        shell_escape(&prev_cmd)
+        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key j ; unbind-key k""##,
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
@@ -52,18 +39,7 @@ pub fn setup_nested_detach_binding(
         .ok();
 
     // Apply bindings immediately for the current managed session.
-    Command::new("tmux")
-        .args(["bind-key", "d", "run-shell", &detach_cmd])
-        .output()
-        .ok();
-    Command::new("tmux")
-        .args(["bind-key", "j", "run-shell", &next_cmd])
-        .output()
-        .ok();
-    Command::new("tmux")
-        .args(["bind-key", "k", "run-shell", &prev_cmd])
-        .output()
-        .ok();
+    apply_managed_session_bindings(client_name);
 }
 
 /// Removes the hook installed by [`setup_nested_detach_binding`] and restores
@@ -100,13 +76,11 @@ fn session_cycle_run_shell_cmds(profile: &str) -> (String, String) {
     (next, prev)
 }
 
-fn nested_detach_run_shell_cmd() -> String {
+fn detach_run_shell_cmd() -> String {
     format!(
         concat!(
             "client_name=\"#{{client_name}}\"; ",
             "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
-            // Preserve the last managed session for TUI selection restore without
-            // mutating the attach-origin AoE return target.
             "tmux set-option -gq \"{}${{client_key}}\" \"#{{session_name}}\"; ",
             "target=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
             "if [ -n \"$target\" ]; then ",
@@ -115,11 +89,12 @@ fn nested_detach_run_shell_cmd() -> String {
             "tmux switch-client -c \"$client_name\" -l 2>/dev/null || tmux detach-client -t \"$client_name\"; ",
             "fi"
         ),
-        AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, AOE_RETURN_SESSION_OPTION_PREFIX
+        AOE_LAST_DETACHED_SESSION_OPTION_PREFIX,
+        AOE_RETURN_SESSION_OPTION_PREFIX
     )
 }
 
-fn nested_cycle_run_shell_cmd(direction: &str) -> String {
+fn cycle_run_shell_cmd(direction: &str) -> String {
     let aoe_bin = shell_escape(&aoe_bin_path());
     format!(
         concat!(
@@ -130,8 +105,48 @@ fn nested_cycle_run_shell_cmd(direction: &str) -> String {
             "{} tmux switch-session --direction {} --profile \"$profile\" --client-name \"$client_name\"; ",
             "fi"
         ),
-        AOE_ORIGIN_PROFILE_OPTION_PREFIX, aoe_bin, direction
+        AOE_ORIGIN_PROFILE_OPTION_PREFIX,
+        aoe_bin,
+        direction
     )
+}
+
+fn apply_managed_session_bindings(client_name: Option<&str>) {
+    let detach_cmd = detach_run_shell_cmd();
+    let next_cmd = cycle_run_shell_cmd("next");
+    let prev_cmd = cycle_run_shell_cmd("prev");
+    Command::new("tmux")
+        .args(["bind-key", "d", "run-shell", &detach_cmd])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "j", "run-shell", &next_cmd])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "k", "run-shell", &prev_cmd])
+        .output()
+        .ok();
+    let _ = client_name;
+}
+
+pub fn refresh_bindings(client_name: Option<&str>) -> anyhow::Result<()> {
+    let session_name = current_tmux_session_name(client_name)?;
+    let is_managed = session_name
+        .as_deref()
+        .map(|name| name.starts_with("aoe_"))
+        .unwrap_or(false);
+
+    if is_managed {
+        apply_managed_session_bindings(client_name);
+    } else {
+        Command::new("tmux")
+            .args(["bind-key", "d", "detach-client"])
+            .output()
+            .ok();
+        cleanup_session_cycle_bindings();
+    }
+    Ok(())
 }
 
 fn store_client_attach_context(
@@ -723,8 +738,8 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_detach_run_shell_cmd_uses_saved_return_target() {
-        let cmd = nested_detach_run_shell_cmd();
+    fn test_detach_run_shell_cmd_uses_saved_return_target() {
+        let cmd = detach_run_shell_cmd();
         assert!(cmd.contains("@aoe_last_detached_session_${client_key}"));
         assert!(cmd.contains("tmux set-option -gq"));
         assert!(cmd.contains("\"#{session_name}\""));
@@ -737,8 +752,8 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_cycle_run_shell_cmd_uses_saved_profile() {
-        let cmd = nested_cycle_run_shell_cmd("next");
+    fn test_cycle_run_shell_cmd_uses_saved_profile() {
+        let cmd = cycle_run_shell_cmd("next");
         assert!(cmd.contains("@aoe_origin_profile_${client_key}"));
         assert!(cmd.contains("tmux show-option -gv"));
         assert!(cmd.contains(

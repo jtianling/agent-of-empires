@@ -14,6 +14,8 @@ pub enum TmuxCommands {
     CodexTitleMonitor(CodexTitleMonitorArgs),
     #[command(hide = true, name = "switch-session")]
     SwitchSession(SwitchSessionArgs),
+    #[command(hide = true, name = "refresh-bindings")]
+    RefreshBindings(RefreshBindingsArgs),
 }
 
 #[derive(Args)]
@@ -35,6 +37,12 @@ pub struct SwitchSessionArgs {
     direction: String,
     #[arg(long, default_value = "default")]
     profile: String,
+    #[arg(long)]
+    client_name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct RefreshBindingsArgs {
     #[arg(long)]
     client_name: Option<String>,
 }
@@ -78,6 +86,10 @@ pub fn run_status(args: TmuxStatusArgs) -> Result<()> {
 
 pub fn run_codex_title_monitor(args: CodexTitleMonitorArgs) -> Result<()> {
     crate::tmux::status_bar::run_codex_title_monitor(&args.session)
+}
+
+pub fn run_refresh_bindings(args: RefreshBindingsArgs) -> Result<()> {
+    crate::tmux::utils::refresh_bindings(args.client_name.as_deref())
 }
 
 pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
