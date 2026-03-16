@@ -130,23 +130,23 @@ For sandboxed sessions, the command is wrapped in the container runtime's `exec`
 
 ### Requirement: Session attach configures tmux key bindings
 When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key
-bindings for navigation: `Ctrl+b d` for detach/return (nested mode only) and `Ctrl+b j/k` for
+bindings for navigation: `Ctrl+b d` for detach/return (nested mode only) and `Ctrl+b n/p` for
 session cycling (all modes). The `attach()` method accepts a `profile` parameter to scope session
 cycling to the current profile.
 
 #### Scenario: Agent session attach sets bindings
 - **WHEN** `Session::attach(profile)` is called
-- **THEN** session cycling bindings (`j`/`k`) are configured scoped to the given profile
+- **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
 - **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
 #### Scenario: Terminal session attach sets bindings
 - **WHEN** `TerminalSession::attach(profile)` is called
-- **THEN** session cycling bindings (`j`/`k`) are configured scoped to the given profile
+- **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
 - **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
 #### Scenario: Container terminal session attach sets bindings
 - **WHEN** `ContainerTerminalSession::attach(profile)` is called
-- **THEN** session cycling bindings (`j`/`k`) are configured scoped to the given profile
+- **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
 - **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
 ### Requirement: Agent pane ID is stored on session creation

@@ -28,7 +28,7 @@ fully detaching the tmux client or merely returning to the most recently visited
 #### Scenario: Detach still returns to AoE after in-scope session cycling
 - **WHEN** AoE is running inside a tmux session (TMUX env var is set)
 - **AND** the user opens a managed AoE session from the AoE TUI
-- **AND** the user uses `Ctrl+b j` or `Ctrl+b k` to cycle to another managed session in the same
+- **AND** the user uses `Ctrl+b n` or `Ctrl+b p` to cycle to another managed session in the same
   allowed cycle scope
 - **AND** the user presses `Ctrl+b d`
 - **THEN** the tmux client switches back to the original AoE TUI session that initiated the attach
@@ -47,12 +47,12 @@ fully detaching the tmux client or merely returning to the most recently visited
 #### Scenario: Hook dynamically rebinds on session change
 - **WHEN** a tmux `client-session-changed` event fires
 - **AND** the new session is an AoE-managed session (name starts with `aoe_`)
-- **THEN** the hook SHALL invoke `aoe tmux refresh-bindings` to set `d/j/k` bindings via external process (bypassing tmux's internal command parser)
+- **THEN** the hook SHALL invoke `aoe tmux refresh-bindings` to set `d/n/p` bindings via external process (bypassing tmux's internal command parser)
 
 #### Scenario: Hook restores normal bindings for non-managed sessions
 - **WHEN** a tmux `client-session-changed` event fires
 - **AND** the new session is NOT an AoE-managed session
-- **THEN** the hook SHALL restore `d` to `detach-client` and unbind `j` and `k`
+- **THEN** the hook SHALL restore `d` to `detach-client` and unbind `n` and `p`
 
 #### Scenario: Correct client is targeted in multi-client environments
 - **WHEN** multiple tmux clients are attached to the AoE TUI session
@@ -60,10 +60,10 @@ fully detaching the tmux client or merely returning to the most recently visited
 - **THEN** the `switch-client` call SHALL use `-c` to explicitly target the client that initiated the attach
 - **AND** the return session SHALL be stored for that specific client
 
-### Requirement: Session cycling via Ctrl+b j/k
+### Requirement: Session cycling via Ctrl+b n/p
 While attached to any AoE-managed tmux session, the user SHALL be able to cycle directly between
 managed sessions in the same attach-origin profile and the same current session scope using
-`Ctrl+b j` (next) and `Ctrl+b k` (previous), without returning to the AoE TUI first. The current
+`Ctrl+b n` (next) and `Ctrl+b p` (previous), without returning to the AoE TUI first. The current
 session scope SHALL be the current session's exact `group_path`; sessions with an empty
 `group_path` SHALL only cycle among other ungrouped sessions.
 
@@ -71,7 +71,7 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
 - **WHEN** the user is attached to an AoE-managed session whose `group_path` is `skills-manager`
 - **AND** there are multiple managed sessions in profile `work` with `group_path =
   skills-manager`
-- **AND** the user presses `Ctrl+b j`
+- **AND** the user presses `Ctrl+b n`
 - **THEN** the tmux client switches to the next managed session whose `group_path` is
   `skills-manager`
 - **AND** if the current scoped session is the last one, it wraps to the first scoped session
@@ -80,7 +80,7 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
 - **WHEN** the user is attached to an AoE-managed session whose `group_path` is `skills-manager`
 - **AND** there are multiple managed sessions in profile `work` with `group_path =
   skills-manager`
-- **AND** the user presses `Ctrl+b k`
+- **AND** the user presses `Ctrl+b p`
 - **THEN** the tmux client switches to the previous managed session whose `group_path` is
   `skills-manager`
 - **AND** if the current scoped session is the first one, it wraps to the last scoped session
@@ -89,7 +89,7 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
 - **WHEN** the user is attached to an AoE-managed session whose `group_path` is empty
 - **AND** there are multiple ungrouped managed sessions in the current profile
 - **AND** there are also grouped managed sessions in that same profile
-- **AND** the user presses `Ctrl+b j` or `Ctrl+b k`
+- **AND** the user presses `Ctrl+b n` or `Ctrl+b p`
 - **THEN** the tmux client switches only among the ungrouped managed sessions
 - **AND** grouped sessions are excluded from the cycle target list
 
@@ -97,18 +97,18 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
 - **WHEN** the user is attached to an AoE-managed session whose `group_path` is `skills-manager`
 - **AND** the current profile also contains managed sessions in `blog-workspace`, `main`, or no
   group
-- **AND** the user presses `Ctrl+b j` or `Ctrl+b k`
+- **AND** the user presses `Ctrl+b n` or `Ctrl+b p`
 - **THEN** sessions outside `skills-manager` are excluded from the cycle target list
 
 #### Scenario: Single in-scope session does nothing
 - **WHEN** the user is attached to an AoE-managed session
 - **AND** there is only one managed session in the current session scope
-- **AND** the user presses `Ctrl+b j` or `Ctrl+b k`
+- **AND** the user presses `Ctrl+b n` or `Ctrl+b p`
 - **THEN** nothing happens (the user stays in the current session)
 
 #### Scenario: Cycling is scoped to the attach-origin profile
 - **WHEN** multiple AoE instances are running with different profiles
-- **AND** the user presses `Ctrl+b j` or `Ctrl+b k` inside a managed session entered from profile
+- **AND** the user presses `Ctrl+b n` or `Ctrl+b p` inside a managed session entered from profile
   `work`
 - **THEN** only sessions belonging to profile `work` are considered for cycling
 - **AND** sessions from other profiles are excluded even if the current tmux client previously
@@ -116,9 +116,9 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
 
 #### Scenario: Bindings are set before attach
 - **WHEN** any session type (agent, terminal, container terminal) is attached via `attach()`
-- **THEN** the `j` and `k` key bindings are configured in the tmux server before the attach call
+- **THEN** the `n` and `p` key bindings are configured in the tmux server before the attach call
 - **AND** the bindings work in both nested tmux mode (TMUX env set) and non-nested mode
 
 #### Scenario: Bindings are cleaned up on exit
 - **WHEN** AoE exits normally
-- **THEN** the `j` and `k` key bindings are removed from the tmux server
+- **THEN** the `n` and `p` key bindings are removed from the tmux server

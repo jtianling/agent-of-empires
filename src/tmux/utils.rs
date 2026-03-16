@@ -19,7 +19,7 @@ const AOE_LAST_DETACHED_SESSION_OPTION_PREFIX: &str = "@aoe_last_detached_sessio
 /// current session:
 ///
 /// - **aoe sessions** (`aoe_*`, `aoe_term_*`, `aoe_cterm_*`): delegates to
-///   `aoe tmux refresh-bindings` which sets d/j/k via `Command::new("tmux")`
+///   `aoe tmux refresh-bindings` which sets d/n/p via `Command::new("tmux")`
 ///   (bypasses tmux's internal parser to avoid quoting issues).
 /// - **Other sessions**: normal `detach-client` behavior is restored.
 pub fn setup_nested_detach_binding(
@@ -31,7 +31,7 @@ pub fn setup_nested_detach_binding(
 
     let aoe_bin = shell_escape(&aoe_bin_path());
     let hook_cmd = format!(
-        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key j ; unbind-key k""##,
+        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p""##,
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
@@ -120,11 +120,11 @@ fn apply_managed_session_bindings(client_name: Option<&str>) {
         .output()
         .ok();
     Command::new("tmux")
-        .args(["bind-key", "j", "run-shell", &next_cmd])
+        .args(["bind-key", "n", "run-shell", &next_cmd])
         .output()
         .ok();
     Command::new("tmux")
-        .args(["bind-key", "k", "run-shell", &prev_cmd])
+        .args(["bind-key", "p", "run-shell", &prev_cmd])
         .output()
         .ok();
     let _ = client_name;
@@ -239,18 +239,18 @@ fn sanitize_tmux_option_suffix(value: &str) -> String {
         .collect()
 }
 
-/// Binds `Ctrl+b j` / `Ctrl+b k` to cycle through aoe agent sessions
+/// Binds `Ctrl+b n` / `Ctrl+b p` to cycle through aoe agent sessions
 /// belonging to the given profile. Works in both nested and non-nested tmux modes.
 pub fn setup_session_cycle_bindings(profile: &str) {
     tag_sessions_with_profile(profile);
 
     let (switch_next, switch_prev) = session_cycle_run_shell_cmds(profile);
     Command::new("tmux")
-        .args(["bind-key", "j", "run-shell", &switch_next])
+        .args(["bind-key", "n", "run-shell", &switch_next])
         .output()
         .ok();
     Command::new("tmux")
-        .args(["bind-key", "k", "run-shell", &switch_prev])
+        .args(["bind-key", "p", "run-shell", &switch_prev])
         .output()
         .ok();
 }
@@ -272,8 +272,8 @@ fn tag_sessions_with_profile(profile: &str) {
 }
 
 pub fn cleanup_session_cycle_bindings() {
-    Command::new("tmux").args(["unbind-key", "j"]).output().ok();
-    Command::new("tmux").args(["unbind-key", "k"]).output().ok();
+    Command::new("tmux").args(["unbind-key", "n"]).output().ok();
+    Command::new("tmux").args(["unbind-key", "p"]).output().ok();
 }
 
 fn shell_escape(s: &str) -> String {

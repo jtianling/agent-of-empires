@@ -129,7 +129,7 @@ inside tmux after the initial attach.
 
 #### Scenario: Detach restores the cycled-to session
 - **WHEN** the user attaches to a session from the home screen
-- **AND** the user switches to another AoE-managed session with `Ctrl+b j` or `Ctrl+b k`
+- **AND** the user switches to another AoE-managed session with `Ctrl+b n` or `Ctrl+b p`
 - **AND** the user presses `Ctrl+b d` to return to the TUI
 - **THEN** the home screen SHALL select the session the user detached from
 - **AND** AoE SHALL NOT force selection back to the originally attached session
