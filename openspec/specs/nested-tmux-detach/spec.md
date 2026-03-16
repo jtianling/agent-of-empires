@@ -44,6 +44,22 @@ fully detaching the tmux client or merely returning to the most recently visited
 - **THEN** the `d` key binding is configured in the tmux server to use the nested-detach behavior
 - **AND** the binding records the AoE session that initiated the attach as the return target
 
+#### Scenario: Hook dynamically rebinds on session change
+- **WHEN** a tmux `client-session-changed` event fires
+- **AND** the new session is an AoE-managed session (name starts with `aoe_`)
+- **THEN** the hook SHALL invoke `aoe tmux refresh-bindings` to set `d/j/k` bindings via external process (bypassing tmux's internal command parser)
+
+#### Scenario: Hook restores normal bindings for non-managed sessions
+- **WHEN** a tmux `client-session-changed` event fires
+- **AND** the new session is NOT an AoE-managed session
+- **THEN** the hook SHALL restore `d` to `detach-client` and unbind `j` and `k`
+
+#### Scenario: Correct client is targeted in multi-client environments
+- **WHEN** multiple tmux clients are attached to the AoE TUI session
+- **AND** the user attaches to a managed session from the TUI
+- **THEN** the `switch-client` call SHALL use `-c` to explicitly target the client that initiated the attach
+- **AND** the return session SHALL be stored for that specific client
+
 ### Requirement: Session cycling via Ctrl+b j/k
 While attached to any AoE-managed tmux session, the user SHALL be able to cycle directly between
 managed sessions in the same attach-origin profile and the same current session scope using

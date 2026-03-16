@@ -5,7 +5,10 @@ use std::process::Command;
 
 use super::{
     refresh_session_cache, session_exists_from_cache,
-    utils::{append_remain_on_exit_args, is_pane_dead, is_pane_running_shell},
+    utils::{
+        append_remain_on_exit_args, append_store_pane_id_args, get_agent_pane_id, is_pane_dead,
+        is_pane_running_shell,
+    },
     SESSION_PREFIX,
 };
 use crate::cli::truncate_id;
@@ -56,6 +59,7 @@ impl Session {
 
         let mut args = build_create_args(&self.name, working_dir, command, size);
         append_remain_on_exit_args(&mut args, &self.name);
+        append_store_pane_id_args(&mut args, &self.name);
 
         let output = Command::new("tmux").args(&args).output()?;
 
@@ -225,7 +229,8 @@ impl Session {
     }
 
     pub fn get_pane_pid(&self) -> Option<u32> {
-        process::get_pane_pid(&self.name)
+        let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
+        process::get_pane_pid(&target)
     }
 
     pub fn get_foreground_pid(&self) -> Option<u32> {

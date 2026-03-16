@@ -520,9 +520,44 @@ pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str) {
     ]);
 }
 
+pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["show-option", "-t", session_name, "-v", "@aoe_agent_pane"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub fn append_store_pane_id_args(args: &mut Vec<String>, target: &str) {
+    args.extend([
+        ";".to_string(),
+        "set-option".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "@aoe_agent_pane".to_string(),
+        "#{pane_id}".to_string(),
+    ]);
+}
+
+fn resolve_pane_target(session_name: &str) -> String {
+    get_agent_pane_id(session_name).unwrap_or_else(|| session_name.to_string())
+}
+
 pub fn is_pane_dead(session_name: &str) -> bool {
+    let target = resolve_pane_target(session_name);
     Command::new("tmux")
-        .args(["display-message", "-t", session_name, "-p", "#{pane_dead}"])
+        .args(["display-message", "-t", &target, "-p", "#{pane_dead}"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -531,11 +566,12 @@ pub fn is_pane_dead(session_name: &str) -> bool {
 }
 
 fn pane_current_command(session_name: &str) -> Option<String> {
+    let target = resolve_pane_target(session_name);
     Command::new("tmux")
         .args([
             "display-message",
             "-t",
-            session_name,
+            &target,
             "-p",
             "#{pane_current_command}",
         ])

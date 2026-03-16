@@ -3,7 +3,10 @@
 use anyhow::{bail, Result};
 use std::process::Command;
 
-use super::utils::{append_remain_on_exit_args, is_pane_dead, sanitize_session_name};
+use super::utils::{
+    append_remain_on_exit_args, append_store_pane_id_args, get_agent_pane_id, is_pane_dead,
+    sanitize_session_name,
+};
 use super::{
     refresh_session_cache, session_exists_from_cache, CONTAINER_TERMINAL_PREFIX, TERMINAL_PREFIX,
 };
@@ -42,6 +45,10 @@ impl TerminalSession {
         is_pane_dead(&self.name)
     }
 
+    fn agent_pane_target(&self) -> String {
+        get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone())
+    }
+
     pub fn create(&self, working_dir: &str) -> Result<()> {
         self.create_with_size(working_dir, None, None)
     }
@@ -58,6 +65,7 @@ impl TerminalSession {
 
         let mut args = build_terminal_create_args(&self.name, working_dir, command, size);
         append_remain_on_exit_args(&mut args, &self.name);
+        append_store_pane_id_args(&mut args, &self.name);
 
         let output = Command::new("tmux").args(&args).output()?;
 
@@ -96,7 +104,7 @@ impl TerminalSession {
     }
 
     pub fn get_pane_pid(&self) -> Option<u32> {
-        process::get_pane_pid(&self.name)
+        process::get_pane_pid(&self.agent_pane_target())
     }
 
     pub fn attach(&self, profile: &str) -> Result<()> {
@@ -218,6 +226,10 @@ impl ContainerTerminalSession {
         is_pane_dead(&self.name)
     }
 
+    fn agent_pane_target(&self) -> String {
+        get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone())
+    }
+
     pub fn create_with_size(
         &self,
         working_dir: &str,
@@ -230,6 +242,7 @@ impl ContainerTerminalSession {
 
         let mut args = build_terminal_create_args(&self.name, working_dir, command, size);
         append_remain_on_exit_args(&mut args, &self.name);
+        append_store_pane_id_args(&mut args, &self.name);
 
         let output = Command::new("tmux").args(&args).output()?;
 
@@ -268,7 +281,7 @@ impl ContainerTerminalSession {
     }
 
     pub fn get_pane_pid(&self) -> Option<u32> {
-        process::get_pane_pid(&self.name)
+        process::get_pane_pid(&self.agent_pane_target())
     }
 
     pub fn attach(&self, profile: &str) -> Result<()> {

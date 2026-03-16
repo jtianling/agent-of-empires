@@ -8,10 +8,11 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
-/// Get the PID of the shell process running in a tmux pane
-pub fn get_pane_pid(session_name: &str) -> Option<u32> {
+/// Get the PID of the shell process running in a tmux pane.
+/// `target` can be a session name, a pane ID (e.g. `%42`), or any valid tmux target.
+pub fn get_pane_pid(target: &str) -> Option<u32> {
     let output = Command::new("tmux")
-        .args(["display-message", "-t", session_name, "-p", "#{pane_pid}"])
+        .args(["display-message", "-t", target, "-p", "#{pane_pid}"])
         .output()
         .ok()?;
 
