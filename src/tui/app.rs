@@ -51,8 +51,8 @@ where
     Ok(result)
 }
 
-fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
-    let _ = tab_title::set_tui_title(terminal.backend_mut());
+fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, profile: &str) {
+    let _ = tab_title::set_tui_title(terminal.backend_mut(), profile);
 }
 
 pub struct App {
@@ -529,7 +529,7 @@ impl App {
         let attach_result = with_raw_mode_disabled(terminal, || {
             tmux_session.attach_with_client(&profile, client_for_attach.as_deref())
         })?;
-        reapply_tui_title(terminal);
+        reapply_tui_title(terminal, self.home.storage.profile());
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
@@ -628,7 +628,7 @@ impl App {
         }
 
         let attach_result = with_raw_mode_disabled(terminal, attach_fn)?;
-        reapply_tui_title(terminal);
+        reapply_tui_title(terminal, self.home.storage.profile());
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();

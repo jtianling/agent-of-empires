@@ -127,7 +127,7 @@ pub async fn run(profile: &str) -> Result<()> {
     // Create app and run
     let mut app = App::new(profile, available_tools, launch_dir)?;
     let _ = tab_title::push_terminal_title(&mut io::stdout());
-    let _ = tab_title::set_tui_title(&mut io::stdout());
+    let _ = tab_title::set_tui_title(&mut io::stdout(), profile);
     let result = app.run(&mut terminal).await;
 
     // Clean up the nested-detach tmux hook if we set one up during this run.

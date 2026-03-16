@@ -13,23 +13,23 @@ can drive the outer terminal title dynamically.
 ## Requirements
 
 ### Requirement: Terminal tab title reflects TUI state
-When the AoE TUI session itself is active, AoE SHALL manage the outer terminal title with one
-stable AoE title, SHALL restore the pre-launch title when AoE exits, and SHALL avoid per-view or
-per-dialog title churn while the TUI remains active.
+When the AoE TUI session itself is active, AoE SHALL manage the outer terminal title with a stable
+AoE title that includes the current profile name, SHALL restore the pre-launch title when AoE
+exits, and SHALL avoid per-view or per-dialog title churn while the TUI remains active.
 
 #### Scenario: TUI launches
 - **WHEN** the TUI launches
 - **THEN** AoE SHALL save the current outer terminal title using the terminal title stack
-- **AND** AoE SHALL set the outer terminal title to a stable AoE title
+- **AND** AoE SHALL set the outer terminal title to `AoE[<profile>]`
 
 #### Scenario: TUI state changes while AoE session is active
 - **WHEN** the user opens dialogs, settings, diff view, or returns to the home screen
-- **THEN** AoE SHALL keep using the same stable AoE title
+- **THEN** AoE SHALL keep using the same stable AoE title with profile name
 - **AND** AoE SHALL NOT derive different outer terminal titles from those view changes
 
 #### Scenario: User detaches back to the TUI
 - **WHEN** the user returns from an attached AoE-managed tmux session back into the AoE TUI
-- **THEN** AoE SHALL set the outer terminal title back to the stable AoE title
+- **THEN** AoE SHALL set the outer terminal title back to the stable AoE title with profile name
 
 #### Scenario: TUI exits or panics
 - **WHEN** the TUI exits normally or through the panic cleanup path
