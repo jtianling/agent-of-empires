@@ -31,7 +31,7 @@ pub fn setup_nested_detach_binding(
 
     let aoe_bin = shell_escape(&aoe_bin_path());
     let hook_cmd = format!(
-        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p""##,
+        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l""##,
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
@@ -253,6 +253,12 @@ pub fn setup_session_cycle_bindings(profile: &str) {
         .args(["bind-key", "p", "run-shell", &switch_prev])
         .output()
         .ok();
+    for (key, dir) in [("h", "-L"), ("j", "-D"), ("k", "-U"), ("l", "-R")] {
+        Command::new("tmux")
+            .args(["bind-key", key, "select-pane", dir])
+            .output()
+            .ok();
+    }
 }
 
 fn tag_sessions_with_profile(profile: &str) {
@@ -272,8 +278,9 @@ fn tag_sessions_with_profile(profile: &str) {
 }
 
 pub fn cleanup_session_cycle_bindings() {
-    Command::new("tmux").args(["unbind-key", "n"]).output().ok();
-    Command::new("tmux").args(["unbind-key", "p"]).output().ok();
+    for key in ["n", "p", "h", "j", "k", "l"] {
+        Command::new("tmux").args(["unbind-key", key]).output().ok();
+    }
 }
 
 fn shell_escape(s: &str) -> String {

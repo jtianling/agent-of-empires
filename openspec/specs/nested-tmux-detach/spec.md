@@ -122,3 +122,16 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
 #### Scenario: Bindings are cleaned up on exit
 - **WHEN** AoE exits normally
 - **THEN** the `n` and `p` key bindings are removed from the tmux server
+
+### Requirement: Vi-style pane navigation via Ctrl+b h/j/k/l
+While attached to any AoE-managed tmux session, the user SHALL be able to navigate between tmux
+panes using vi-style key bindings: `Ctrl+b h` (left), `Ctrl+b j` (down), `Ctrl+b k` (up), and
+`Ctrl+b l` (right). These bindings supplement the default arrow key navigation.
+
+#### Scenario: Pane navigation bindings are set when entering a managed session
+- **WHEN** the user enters an AoE-managed tmux session
+- **THEN** `Ctrl+b h/j/k/l` SHALL be bound to `select-pane -L/-D/-U/-R` respectively
+
+#### Scenario: Pane navigation bindings are removed when leaving a managed session
+- **WHEN** the user switches to a non-AoE session
+- **THEN** `h`, `j`, `k`, and `l` prefix key bindings SHALL be unbound
