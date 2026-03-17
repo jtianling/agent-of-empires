@@ -14,6 +14,8 @@ pub struct Group {
     pub path: String,
     #[serde(default)]
     pub collapsed: bool,
+    #[serde(default)]
+    pub default_directory: Option<String>,
     #[serde(skip)]
     pub children: Vec<Group>,
 }
@@ -24,6 +26,7 @@ impl Group {
             name: name.to_string(),
             path: path.to_string(),
             collapsed: false,
+            default_directory: None,
             children: Vec::new(),
         }
     }
@@ -163,6 +166,31 @@ impl GroupTree {
 
     pub fn group_exists(&self, path: &str) -> bool {
         self.groups_by_path.contains_key(path)
+    }
+
+    pub fn set_default_directory(&mut self, path: &str, directory: &str) {
+        if let Some(group) = self.groups_by_path.get_mut(path) {
+            group.default_directory = Some(directory.to_string());
+            self.rebuild_tree();
+        }
+    }
+
+    pub fn get_default_directory(&self, path: &str) -> Option<&str> {
+        self.groups_by_path
+            .get(path)
+            .and_then(|g| g.default_directory.as_deref())
+    }
+
+    pub fn get_group_directories(&self) -> HashMap<String, String> {
+        self.groups_by_path
+            .iter()
+            .filter_map(|(path, group)| {
+                group
+                    .default_directory
+                    .as_ref()
+                    .map(|dir| (path.clone(), dir.clone()))
+            })
+            .collect()
     }
 
     pub fn get_all_groups(&self) -> Vec<Group> {
@@ -1111,5 +1139,69 @@ mod tests {
             .map(|group| group.path)
             .collect();
         assert_eq!(saved_groups, vec!["personal", "work", "work/projects"]);
+    }
+
+    #[test]
+    fn test_group_serialization_with_default_directory() {
+        let mut group = Group::new("work", "work");
+        group.default_directory = Some("/home/user/project".to_string());
+
+        let json = serde_json::to_string(&group).unwrap();
+        let deserialized: Group = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            deserialized.default_directory,
+            Some("/home/user/project".to_string())
+        );
+        assert_eq!(deserialized.name, "work");
+        assert_eq!(deserialized.path, "work");
+    }
+
+    #[test]
+    fn test_set_and_get_default_directory() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        assert_eq!(tree.get_default_directory("work"), None);
+
+        tree.set_default_directory("work", "/home/user/project");
+        assert_eq!(
+            tree.get_default_directory("work"),
+            Some("/home/user/project")
+        );
+
+        // Setting on nonexistent group is a no-op
+        tree.set_default_directory("nonexistent", "/tmp");
+        assert_eq!(tree.get_default_directory("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_get_group_directories() {
+        let mut inst1 = Instance::new("test1", "/tmp/1");
+        inst1.group_path = "work".to_string();
+        let mut inst2 = Instance::new("test2", "/tmp/2");
+        inst2.group_path = "personal".to_string();
+        let instances = vec![inst1, inst2];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.set_default_directory("work", "/home/user/work");
+
+        let dirs = tree.get_group_directories();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs.get("work").unwrap(), "/home/user/work");
+        assert!(!dirs.contains_key("personal"));
+    }
+
+    #[test]
+    fn test_backward_compatibility_loading_groups_without_default_directory() {
+        let json = r#"{"name":"work","path":"work","collapsed":false}"#;
+        let group: Group = serde_json::from_str(json).unwrap();
+
+        assert_eq!(group.name, "work");
+        assert_eq!(group.path, "work");
+        assert!(!group.collapsed);
+        assert_eq!(group.default_directory, None);
     }
 }

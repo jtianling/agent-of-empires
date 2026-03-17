@@ -48,17 +48,29 @@ impl HomeView {
             // Save to target profile's storage
             let target_storage = Storage::new(&target_profile)?;
             let (mut target_instances, target_groups) = target_storage.load_with_groups()?;
+            let existing_tree = GroupTree::new_with_groups(&target_instances, &target_groups);
+            let is_new_group = !instance.group_path.is_empty()
+                && !existing_tree.group_exists(&instance.group_path);
             target_instances.push(instance.clone());
             let mut target_tree = GroupTree::new_with_groups(&target_instances, &target_groups);
             if !instance.group_path.is_empty() {
                 target_tree.create_group(&instance.group_path);
+                if is_new_group {
+                    target_tree.set_default_directory(&instance.group_path, &instance.project_path);
+                }
             }
             target_storage.save_with_groups(&target_instances, &target_tree)?;
         } else {
+            let is_new_group = !instance.group_path.is_empty()
+                && !self.group_tree.group_exists(&instance.group_path);
             self.instances.push(instance.clone());
             self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
             if !instance.group_path.is_empty() {
                 self.group_tree.create_group(&instance.group_path);
+                if is_new_group {
+                    self.group_tree
+                        .set_default_directory(&instance.group_path, &instance.project_path);
+                }
             }
             self.save()?;
         }

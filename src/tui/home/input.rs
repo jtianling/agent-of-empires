@@ -435,12 +435,14 @@ impl HomeView {
                         .iter()
                         .map(|g| g.path.clone())
                         .collect();
+                    let group_directories = self.group_tree.get_group_directories();
                     let current_profile = self.storage.profile().to_string();
                     let default_group = self.selected_group_context();
                     self.new_dialog = Some(NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_titles,
                         existing_groups,
+                        group_directories,
                         default_group,
                         &current_profile,
                         &self.launch_dir,

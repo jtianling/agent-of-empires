@@ -234,6 +234,7 @@ fn test_has_dialog_returns_true_for_new_dialog() {
         AvailableTools::with_tools(&["claude"]),
         Vec::new(),
         Vec::new(),
+        std::collections::HashMap::new(),
         None,
         "default",
         &std::env::current_dir().unwrap_or_default(),

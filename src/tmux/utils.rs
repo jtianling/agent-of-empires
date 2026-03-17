@@ -836,6 +836,7 @@ mod tests {
             name: "work".to_string(),
             path: "work".to_string(),
             collapsed: false,
+            default_directory: None,
             children: Vec::new(),
         }];
 
@@ -862,6 +863,7 @@ mod tests {
             name: "work".to_string(),
             path: "work".to_string(),
             collapsed: true,
+            default_directory: None,
             children: Vec::new(),
         }];
 
@@ -900,12 +902,14 @@ mod tests {
                 name: "skills-manager".to_string(),
                 path: "skills-manager".to_string(),
                 collapsed: false,
+                default_directory: None,
                 children: Vec::new(),
             },
             Group {
                 name: "blog-workspace".to_string(),
                 path: "blog-workspace".to_string(),
                 collapsed: false,
+                default_directory: None,
                 children: Vec::new(),
             },
         ];
@@ -936,6 +940,7 @@ mod tests {
             name: "skills-manager".to_string(),
             path: "skills-manager".to_string(),
             collapsed: false,
+            default_directory: None,
             children: Vec::new(),
         }];
         let current = crate::tmux::Session::generate_name(&alpha.id, &alpha.title);
@@ -963,6 +968,7 @@ mod tests {
             name: "skills-manager".to_string(),
             path: "skills-manager".to_string(),
             collapsed: true,
+            default_directory: None,
             children: Vec::new(),
         }];
         let current =

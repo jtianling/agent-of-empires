@@ -8,6 +8,7 @@ mod render;
 mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 use std::time::Instant;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -146,6 +147,8 @@ pub struct NewSessionDialog {
     /// Command override for the selected tool (loaded from config)
     pub(super) command_override: Input,
     pub(super) existing_groups: Vec<String>,
+    pub(super) group_directories: HashMap<String, String>,
+    pub(super) path_user_edited: bool,
     pub(super) group_picker: ListPicker,
     pub(super) branch_picker: ListPicker,
     pub(super) dir_picker: DirPicker,
@@ -294,11 +297,17 @@ impl NewSessionDialog {
         tools: AvailableTools,
         existing_titles: Vec<String>,
         existing_groups: Vec<String>,
+        group_directories: HashMap<String, String>,
         default_group: Option<String>,
         profile: &str,
         launch_dir: &std::path::Path,
     ) -> Self {
-        let current_dir = launch_dir.to_string_lossy().to_string();
+        let launch_dir_str = launch_dir.to_string_lossy().to_string();
+        let current_dir = default_group
+            .as_ref()
+            .and_then(|g| group_directories.get(g))
+            .cloned()
+            .unwrap_or(launch_dir_str);
 
         let available_tools = tools.available_list();
         let docker_available = containers::get_container_runtime().is_available();
@@ -353,6 +362,8 @@ impl NewSessionDialog {
             available_tools,
             existing_titles,
             existing_groups,
+            group_directories,
+            path_user_edited: false,
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
             dir_picker: DirPicker::new(),
@@ -482,6 +493,8 @@ impl NewSessionDialog {
             available_tools: tools,
             existing_titles: Vec::new(),
             existing_groups: Vec::new(),
+            group_directories: HashMap::new(),
+            path_user_edited: false,
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
             dir_picker: DirPicker::new(),
@@ -533,6 +546,8 @@ impl NewSessionDialog {
             available_tools: tools,
             existing_titles: Vec::new(),
             existing_groups: Vec::new(),
+            group_directories: HashMap::new(),
+            path_user_edited: false,
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
             dir_picker: DirPicker::new(),
@@ -611,6 +626,7 @@ impl NewSessionDialog {
             if let ListPickerResult::Selected(value) = self.group_picker.handle_key(key) {
                 self.group = Input::new(value);
                 self.clear_group_ghost();
+                self.apply_group_default_directory();
             }
             return DialogResult::Continue;
         }
@@ -627,6 +643,7 @@ impl NewSessionDialog {
             match self.dir_picker.handle_key(key) {
                 DirPickerResult::Selected(path) => {
                     self.path = Input::new(path);
+                    self.path_user_edited = true;
                     self.recompute_path_ghost();
                 }
                 DirPickerResult::Cancelled | DirPickerResult::Continue => {}
@@ -843,11 +860,13 @@ impl NewSessionDialog {
                     self.error_message = None;
                     self.confirm_reuse_worktree = false;
                     if self.focused_field == self.path_field() {
+                        self.path_user_edited = true;
                         self.path_invalid_flash_until = None;
                         self.recompute_path_ghost();
                     }
                     if self.focused_field == group_field {
                         self.recompute_group_ghost();
+                        self.apply_group_default_directory();
                     }
                 }
                 DialogResult::Continue

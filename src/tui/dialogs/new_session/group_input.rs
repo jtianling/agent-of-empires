@@ -44,6 +44,7 @@ impl NewSessionDialog {
             if let Some(new_value) = ghost.accept(&self.group) {
                 self.group = Input::new(new_value);
                 self.recompute_group_ghost();
+                self.apply_group_default_directory();
             }
         }
     }
@@ -54,5 +55,15 @@ impl NewSessionDialog {
 
     pub(super) fn group_ghost_text(&self) -> Option<&str> {
         self.group_ghost.as_ref().map(|g| g.ghost_text())
+    }
+
+    pub(super) fn apply_group_default_directory(&mut self) {
+        if self.path_user_edited {
+            return;
+        }
+        let group_value = self.group.value().to_string();
+        if let Some(dir) = self.group_directories.get(&group_value) {
+            self.path = Input::new(dir.clone());
+        }
     }
 }
