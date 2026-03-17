@@ -19,6 +19,9 @@ Groups are persisted per profile in `groups.json`.
 | `name` | `String` | Display name (last path segment) |
 | `path` | `String` | Full slash-delimited path (e.g. `work/clients`) |
 | `collapsed` | `bool` | Whether the group is collapsed in the TUI |
+| `default_directory` | `Option<String>` | Default project directory for new sessions in this group |
+
+The `default_directory` field SHALL be serialized in `groups.json` with `#[serde(default)]` for backward compatibility.
 
 ### GroupTree
 
@@ -57,6 +60,15 @@ Item::Session(...)               ← ungrouped session (top level)
 ```
 
 ## Requirements
+
+### Requirement: Group entity has default_directory field
+The Group entity includes an optional `default_directory` field that stores the default project directory for new sessions in this group.
+
+#### Scenario: Group with default_directory serializes and deserializes
+- **WHEN** a group has `default_directory` set to `/home/user/project`
+- **AND** the group is saved to `groups.json`
+- **THEN** the JSON SHALL include the `default_directory` field
+- **AND** loading the same JSON SHALL restore the `default_directory` value
 
 ### Requirement: Manual ordering within the session tree
 AoE SHALL provide a `Manual` sort mode for the home session list. In `Manual` mode, `Shift+K`

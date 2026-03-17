@@ -193,6 +193,18 @@ All pane health check functions (`is_pane_dead`, `is_pane_running_shell`, `get_p
 - **THEN** `is_pane_dead()` SHALL return true (or `is_pane_running_shell()` SHALL return true)
 - **AND** AoE SHALL correctly detect the agent has exited and restart the session
 
+### Requirement: Session creation sets group default directory for new groups
+When creating a session that causes a new group to be created, the system SHALL set the group's `default_directory` to the session's `project_path`. This applies only when the group did not exist before the session was created.
+
+#### Scenario: Creating session with new group sets default directory
+- **WHEN** `create_session()` is called with a `group_path` that does not exist in the group tree
+- **AND** the session's `project_path` is `/home/user/project`
+- **THEN** after the group is created, its `default_directory` SHALL be `/home/user/project`
+
+#### Scenario: Creating session in existing group does not change default directory
+- **WHEN** `create_session()` is called with a `group_path` that already exists in the group tree
+- **THEN** the group's `default_directory` SHALL NOT be modified
+
 ## Functional Requirements
 
 - **FR-001**: Each session MUST have a unique 16-character hex ID derived from UUID v4.
