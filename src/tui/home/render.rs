@@ -5,9 +5,8 @@ use ratatui::widgets::*;
 use std::time::Instant;
 
 use super::{
-    get_indent, HomeView, TerminalMode, ViewMode, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR,
-    ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_STOPPED, ICON_UNKNOWN,
-    ICON_WAITING,
+    get_indent, HomeView, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR, ICON_EXPANDED, ICON_IDLE,
+    ICON_RUNNING, ICON_STARTING, ICON_STOPPED, ICON_UNKNOWN, ICON_WAITING,
 };
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
@@ -119,14 +118,8 @@ impl HomeView {
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let title = match self.view_mode {
-            ViewMode::Agent => format!(" Agent of Empires [{}] ", self.storage.profile()),
-            ViewMode::Terminal => format!(" Terminals [{}] ", self.storage.profile()),
-        };
-        let (border_color, title_color) = match self.view_mode {
-            ViewMode::Agent => (theme.border, theme.title),
-            ViewMode::Terminal => (theme.terminal_border, theme.terminal_border),
-        };
+        let title = format!(" Agent of Empires [{}] ", self.storage.profile());
+        let (border_color, title_color) = (theme.border, theme.title);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
@@ -242,56 +235,29 @@ impl HomeView {
             }
             Item::Session { id, .. } => {
                 if let Some(inst) = self.get_instance(id) {
-                    match self.view_mode {
-                        ViewMode::Agent => {
-                            let icon = match inst.status {
-                                Status::Running => ICON_RUNNING,
-                                Status::Waiting => ICON_WAITING,
-                                Status::Idle => ICON_IDLE,
-                                Status::Unknown => ICON_UNKNOWN,
-                                Status::Stopped => ICON_STOPPED,
-                                Status::Error => ICON_ERROR,
-                                Status::Starting => ICON_STARTING,
-                                Status::Deleting => ICON_DELETING,
-                            };
-                            let color = match inst.status {
-                                Status::Running => theme.running,
-                                Status::Waiting => theme.waiting,
-                                Status::Idle => theme.idle,
-                                Status::Unknown => theme.waiting,
-                                Status::Stopped => theme.dimmed,
-                                Status::Error => theme.error,
-                                Status::Starting => theme.dimmed,
-                                Status::Deleting => theme.waiting,
-                            };
-                            let style = Style::default().fg(color);
-                            (icon, Cow::Borrowed(&inst.title), style)
-                        }
-                        ViewMode::Terminal => {
-                            // For sandboxed sessions, check the appropriate terminal based on mode
-                            let terminal_mode = if inst.is_sandboxed() {
-                                self.get_terminal_mode(id)
-                            } else {
-                                TerminalMode::Host
-                            };
-                            let terminal_running = match terminal_mode {
-                                TerminalMode::Container => inst
-                                    .container_terminal_tmux_session()
-                                    .map(|s| s.exists())
-                                    .unwrap_or(false),
-                                TerminalMode::Host => inst
-                                    .terminal_tmux_session()
-                                    .map(|s| s.exists())
-                                    .unwrap_or(false),
-                            };
-                            let (icon, color) = if terminal_running {
-                                (ICON_RUNNING, theme.terminal_active)
-                            } else {
-                                (ICON_IDLE, theme.dimmed)
-                            };
-                            let style = Style::default().fg(color);
-                            (icon, Cow::Borrowed(&inst.title), style)
-                        }
+                    {
+                        let icon = match inst.status {
+                            Status::Running => ICON_RUNNING,
+                            Status::Waiting => ICON_WAITING,
+                            Status::Idle => ICON_IDLE,
+                            Status::Unknown => ICON_UNKNOWN,
+                            Status::Stopped => ICON_STOPPED,
+                            Status::Error => ICON_ERROR,
+                            Status::Starting => ICON_STARTING,
+                            Status::Deleting => ICON_DELETING,
+                        };
+                        let color = match inst.status {
+                            Status::Running => theme.running,
+                            Status::Waiting => theme.waiting,
+                            Status::Idle => theme.idle,
+                            Status::Unknown => theme.waiting,
+                            Status::Stopped => theme.dimmed,
+                            Status::Error => theme.error,
+                            Status::Starting => theme.dimmed,
+                            Status::Deleting => theme.waiting,
+                        };
+                        let style = Style::default().fg(color);
+                        (icon, Cow::Borrowed(&inst.title), style)
                     }
                 } else {
                     (
@@ -325,23 +291,10 @@ impl HomeView {
                     ));
                 }
                 if inst.is_sandboxed() {
-                    match self.view_mode {
-                        ViewMode::Agent => {
-                            line_spans.push(Span::styled(
-                                " [sandbox]",
-                                Style::default().fg(theme.sandbox),
-                            ));
-                        }
-                        ViewMode::Terminal => {
-                            let mode = self.get_terminal_mode(id);
-                            let mode_text = match mode {
-                                TerminalMode::Container => " [container]",
-                                TerminalMode::Host => " [host]",
-                            };
-                            line_spans
-                                .push(Span::styled(mode_text, Style::default().fg(theme.sandbox)));
-                        }
-                    }
+                    line_spans.push(Span::styled(
+                        " [sandbox]",
+                        Style::default().fg(theme.sandbox),
+                    ));
                 }
             }
         }
@@ -390,181 +343,25 @@ impl HomeView {
     }
 
     /// Refresh terminal preview cache if needed (for host terminals)
-    pub(super) fn refresh_terminal_preview_cache_if_needed(
-        &mut self,
-        width: u16,
-        height: u16,
-    ) -> bool {
-        const PREVIEW_REFRESH_MS: u128 = 250;
-
-        let needs_refresh = match &self.selected_session {
-            Some(id) => {
-                self.terminal_preview_cache.session_id.as_ref() != Some(id)
-                    || self.terminal_preview_cache.dimensions != (width, height)
-                    || self
-                        .terminal_preview_cache
-                        .last_refresh
-                        .elapsed()
-                        .as_millis()
-                        > PREVIEW_REFRESH_MS
-            }
-            None => false,
-        };
-
-        if needs_refresh {
-            if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.get_instance(id) {
-                    let new_content = inst
-                        .terminal_tmux_session()
-                        .and_then(|s| s.capture_pane(height as usize))
-                        .unwrap_or_default();
-
-                    let changed = new_content != self.terminal_preview_cache.content
-                        || self.terminal_preview_cache.session_id.as_ref() != Some(id);
-
-                    self.terminal_preview_cache.content = new_content;
-                    self.terminal_preview_cache.session_id = Some(id.clone());
-                    self.terminal_preview_cache.dimensions = (width, height);
-                    self.terminal_preview_cache.last_refresh = Instant::now();
-                    return changed;
-                }
-            }
-        }
-        false
-    }
-
-    /// Refresh container terminal preview cache if needed
-    pub(super) fn refresh_container_terminal_preview_cache_if_needed(
-        &mut self,
-        width: u16,
-        height: u16,
-    ) -> bool {
-        const PREVIEW_REFRESH_MS: u128 = 250;
-
-        let needs_refresh = match &self.selected_session {
-            Some(id) => {
-                self.container_terminal_preview_cache.session_id.as_ref() != Some(id)
-                    || self.container_terminal_preview_cache.dimensions != (width, height)
-                    || self
-                        .container_terminal_preview_cache
-                        .last_refresh
-                        .elapsed()
-                        .as_millis()
-                        > PREVIEW_REFRESH_MS
-            }
-            None => false,
-        };
-
-        if needs_refresh {
-            if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.get_instance(id) {
-                    let new_content = inst
-                        .container_terminal_tmux_session()
-                        .and_then(|s| s.capture_pane(height as usize))
-                        .unwrap_or_default();
-
-                    let changed = new_content != self.container_terminal_preview_cache.content
-                        || self.container_terminal_preview_cache.session_id.as_ref() != Some(id);
-
-                    self.container_terminal_preview_cache.content = new_content;
-                    self.container_terminal_preview_cache.session_id = Some(id.clone());
-                    self.container_terminal_preview_cache.dimensions = (width, height);
-                    self.container_terminal_preview_cache.last_refresh = Instant::now();
-                    return changed;
-                }
-            }
-        }
-        false
-    }
-
     fn render_preview(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let title = match self.view_mode {
-            ViewMode::Agent => " Preview ",
-            ViewMode::Terminal => " Terminal Preview ",
-        };
-        let (border_color, title_color) = match self.view_mode {
-            ViewMode::Agent => (theme.border, theme.title),
-            ViewMode::Terminal => (theme.terminal_border, theme.terminal_border),
-        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .title(title)
-            .title_style(Style::default().fg(title_color));
+            .border_style(Style::default().fg(theme.border))
+            .title(" Preview ")
+            .title_style(Style::default().fg(theme.title));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        match self.view_mode {
-            ViewMode::Agent => {
-                if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.get_instance(id) {
-                        Preview::render_with_cache(
-                            frame,
-                            inner,
-                            inst,
-                            &self.preview_cache.content,
-                            theme,
-                        );
-                    }
-                } else {
-                    let hint = Paragraph::new("Select a session to preview")
-                        .style(Style::default().fg(theme.dimmed))
-                        .alignment(Alignment::Center);
-                    frame.render_widget(hint, inner);
-                }
+        if let Some(id) = &self.selected_session {
+            if let Some(inst) = self.get_instance(id) {
+                Preview::render_with_cache(frame, inner, inst, &self.preview_cache.content, theme);
             }
-            ViewMode::Terminal => {
-                // Clone id early to avoid borrow conflicts
-                let selected_id = self.selected_session.clone();
-
-                if let Some(id) = selected_id {
-                    // Determine which terminal to preview based on mode
-                    let terminal_mode = if let Some(inst) = self.get_instance(&id) {
-                        if inst.is_sandboxed() {
-                            self.get_terminal_mode(&id)
-                        } else {
-                            TerminalMode::Host
-                        }
-                    } else {
-                        TerminalMode::Host
-                    };
-
-                    // Now borrow instance for rendering
-                    if let Some(inst) = self.get_instance(&id) {
-                        let (terminal_running, preview_content) = match terminal_mode {
-                            TerminalMode::Container => {
-                                let running = inst
-                                    .container_terminal_tmux_session()
-                                    .map(|s| s.exists())
-                                    .unwrap_or(false);
-                                (running, &self.container_terminal_preview_cache.content)
-                            }
-                            TerminalMode::Host => {
-                                let running = inst
-                                    .terminal_tmux_session()
-                                    .map(|s| s.exists())
-                                    .unwrap_or(false);
-                                (running, &self.terminal_preview_cache.content)
-                            }
-                        };
-
-                        Preview::render_terminal_preview(
-                            frame,
-                            inner,
-                            inst,
-                            terminal_running,
-                            preview_content,
-                            theme,
-                        );
-                    }
-                } else {
-                    let hint = Paragraph::new("Select a session to preview terminal")
-                        .style(Style::default().fg(theme.dimmed))
-                        .alignment(Alignment::Center);
-                    frame.render_widget(hint, inner);
-                }
-            }
+        } else {
+            let hint = Paragraph::new("Select a session to preview")
+                .style(Style::default().fg(theme.dimmed))
+                .alignment(Alignment::Center);
+            frame.render_widget(hint, inner);
         }
     }
 
@@ -573,15 +370,7 @@ impl HomeView {
         let desc_style = Style::default().fg(theme.dimmed);
         let sep_style = Style::default().fg(theme.border);
 
-        let (mode_indicator, mode_color) = match self.view_mode {
-            ViewMode::Agent => ("[Agent]", theme.waiting),
-            ViewMode::Terminal => ("[Term]", theme.terminal_border),
-        };
-        let mode_style = Style::default().fg(mode_color).bold();
-
         let mut spans = vec![
-            Span::styled(format!(" {} ", mode_indicator), mode_style),
-            Span::styled("│", sep_style),
             Span::styled(" j/k", key_style),
             Span::styled(" Nav ", desc_style),
         ];
@@ -600,26 +389,6 @@ impl HomeView {
                 Span::styled(" Enter", key_style),
                 Span::styled(enter_action_text, desc_style),
             ])
-        }
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(" t", key_style),
-            Span::styled(" View ", desc_style),
-        ]);
-
-        // Show c: container/host hint for sandboxed sessions in Terminal view
-        if self.view_mode == ViewMode::Terminal {
-            if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.get_instance(id) {
-                    if inst.is_sandboxed() {
-                        spans.extend([
-                            Span::styled("│", sep_style),
-                            Span::styled(" c", key_style),
-                            Span::styled(" Mode ", desc_style),
-                        ]);
-                    }
-                }
-            }
         }
 
         spans.extend([

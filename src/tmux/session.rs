@@ -90,11 +90,12 @@ impl Session {
             return Ok(());
         }
 
-        // Kill the entire process tree first to ensure child processes are terminated.
-        // This handles cases where tools like Claude spawn subprocesses that may
+        // Kill process trees for ALL panes in the session. This ensures child
+        // processes are terminated even for user-created or auto-split panes
+        // (e.g. right pane). Agents like Claude spawn subprocesses that may
         // survive tmux's SIGHUP signal.
-        if let Some(pane_pid) = self.get_pane_pid() {
-            process::kill_process_tree(pane_pid);
+        for pid in self.all_pane_pids() {
+            process::kill_process_tree(pid);
         }
 
         let output = Command::new("tmux")
@@ -228,6 +229,20 @@ impl Session {
         }
     }
 
+    fn all_pane_pids(&self) -> Vec<u32> {
+        Command::new("tmux")
+            .args(["list-panes", "-t", &self.name, "-F", "#{pane_pid}"])
+            .output()
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| l.trim().parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get_pane_pid(&self) -> Option<u32> {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
         process::get_pane_pid(&target)
@@ -245,6 +260,41 @@ impl Session {
             &content, tool, fg_pid,
         ))
     }
+}
+
+/// Split an existing session's window horizontally and run a command in the new
+/// right pane. Sets `remain-on-exit on` on the new pane so it stays visible if
+/// the command exits.
+pub fn split_window_right(session_name: &str, working_dir: &str, command: &str) -> Result<()> {
+    let mut args = vec![
+        "split-window".to_string(),
+        "-h".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+        command.to_string(),
+    ];
+
+    // Set remain-on-exit on the new (right) pane. After split-window the new
+    // pane is the active pane, so we can target it without an explicit pane ID
+    // by using the session name (which resolves to the active pane).
+    append_remain_on_exit_args(&mut args, session_name);
+
+    // Select the original (left) pane back so that the user lands on the agent pane
+    args.extend([
+        ";".to_string(),
+        "select-pane".to_string(),
+        "-t".to_string(),
+        format!("{}:.0", session_name),
+    ]);
+
+    let output = Command::new("tmux").args(&args).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to split window: {}", stderr);
+    }
+    Ok(())
 }
 
 fn sanitize_session_name(name: &str) -> String {

@@ -3,13 +3,11 @@
 mod session;
 pub mod status_bar;
 pub(crate) mod status_detection;
-mod terminal_session;
 pub(crate) mod utils;
 
-pub use session::Session;
+pub use session::{split_window_right, Session};
 pub use status_bar::{get_session_info_for_current, get_status_for_current_session};
 pub use status_detection::detect_status_from_content;
-pub use terminal_session::{ContainerTerminalSession, TerminalSession};
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -17,8 +15,6 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 pub const SESSION_PREFIX: &str = "aoe_";
-pub const TERMINAL_PREFIX: &str = "aoe_term_";
-pub const CONTAINER_TERMINAL_PREFIX: &str = "aoe_cterm_";
 
 static SESSION_CACHE: RwLock<SessionCache> = RwLock::new(SessionCache {
     data: None,

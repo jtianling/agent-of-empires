@@ -14,7 +14,7 @@ instead of disconnecting the client entirely.
 
 ### Requirement: Detach key returns to parent session when inside managed session
 When AoE is running inside an existing tmux session and the user has switched to an AoE-managed
-session (prefixed `aoe_`, `aoe_term_`, or `aoe_cterm_`), pressing the tmux detach shortcut
+session (prefixed `aoe_`), pressing the tmux detach shortcut
 (`Ctrl+b d`) SHALL switch back to the AoE tmux session that initiated the attach flow instead of
 fully detaching the tmux client or merely returning to the most recently visited managed session.
 
@@ -39,8 +39,7 @@ fully detaching the tmux client or merely returning to the most recently visited
 - **THEN** `detach-client` executes as normal (the client disconnects from tmux)
 
 #### Scenario: Binding is set after each switch-client call
-- **WHEN** AoE calls `switch-client` to attach to any managed session type (agent, terminal, or
-  container terminal)
+- **WHEN** AoE calls `switch-client` to attach to a managed agent session
 - **THEN** the `d` key binding is configured in the tmux server to use the nested-detach behavior
 - **AND** the binding records the AoE session that initiated the attach as the return target
 
@@ -115,7 +114,7 @@ session scope SHALL be the current session's exact `group_path`; sessions with a
   visited them
 
 #### Scenario: Bindings are set before attach
-- **WHEN** any session type (agent, terminal, container terminal) is attached via `attach()`
+- **WHEN** an agent session is attached via `attach()`
 - **THEN** the `n` and `p` key bindings are configured in the tmux server before the attach call
 - **AND** the bindings work in both nested tmux mode (TMUX env set) and non-nested mode
 

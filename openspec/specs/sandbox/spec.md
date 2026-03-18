@@ -25,7 +25,6 @@ to install packages and modify the filesystem freely without affecting the host.
 | `cpu_limit` | `Option<String>` | None | Docker CPU quota (e.g. `"2"`) |
 | `memory_limit` | `Option<String>` | None | Docker memory limit (e.g. `"4g"`) |
 | `port_mappings` | `Vec<String>` | `[]` | Port forwards (`host:container`) |
-| `default_terminal_mode` | `DefaultTerminalMode` | `Host` | Terminal toggles to host or container shell |
 | `volume_ignores` | `Vec<String>` | `[]` | Subdirs excluded from bind mount via anonymous volumes |
 | `mount_ssh` | `bool` | `false` | Mount `~/.ssh` into container |
 | `custom_instruction` | `Option<String>` | None | System prompt injected at agent launch |
@@ -44,13 +43,6 @@ Both runtimes implement the `ContainerRuntimeInterface` trait, providing:
 - `start()` / `stop()` -- lifecycle control
 - `exec_command(opts, cmd)` -- build exec command string
 - `is_running()` / `exists()` -- state queries
-
-### DefaultTerminalMode
-
-```
-Host       -- The 't' key opens a host shell in the project directory
-Container  -- The 't' key opens a shell inside the running container
-```
 
 ## Container Lifecycle
 
@@ -95,12 +87,6 @@ named volumes mapped to agent-specific config directories:
 - `claude`: `/root/.claude`
 - `cursor`: `/root/.cursor`
 
-## Container Terminal
-
-Sandboxed sessions support two terminal types (toggled with `t` key):
-- **Host terminal**: a plain bash shell in the project directory on the host
-- **Container terminal**: `docker exec -it <container> /bin/bash` inside the running container
-
 ## Functional Requirements
 
 - **FR-001**: Container MUST be created before the agent session starts.
@@ -112,7 +98,6 @@ Sandboxed sessions support two terminal types (toggled with `t` key):
 - **FR-007**: The container runtime MUST be selectable per profile or global config.
 - **FR-008**: Auth volumes (claude, cursor config dirs) MUST be automatically shared from host into container.
 - **FR-009**: `on_create` and `on_launch` hooks MUST run inside the container for sandboxed sessions.
-- **FR-010**: The `container_terminal` mode MUST exec into the running container, not start a new one.
 
 ## Success Criteria
 

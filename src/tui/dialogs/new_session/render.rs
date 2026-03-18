@@ -39,6 +39,7 @@ impl NewSessionDialog {
             Constraint::Length(2), // Title
             Constraint::Length(2), // Path
             Constraint::Length(2), // Tool (always shown, interactive or not)
+            Constraint::Length(2), // Right Pane (always shown)
         ]);
         if !is_terminal {
             constraints.push(Constraint::Length(2)); // YOLO mode checkbox
@@ -100,6 +101,11 @@ impl NewSessionDialog {
         // Field index calculations (must match handle_key)
         let title_field: usize = 0;
         let mut fi: usize = 2 + if has_tool_selection { 1 } else { 0 };
+        let right_pane_field = {
+            let f = fi;
+            fi += 1;
+            f
+        };
         let yolo_mode_field = if !is_terminal {
             let f = fi;
             fi += 1;
@@ -219,6 +225,43 @@ impl NewSessionDialog {
             frame.render_widget(Paragraph::new(Line::from(tool_spans)), chunks[ci]);
         }
         ci += 1;
+
+        // Right Pane (always visible)
+        {
+            let is_rp_focused = self.focused_field == right_pane_field;
+            let rp_label_style = if is_rp_focused {
+                Style::default().fg(theme.accent).underlined()
+            } else {
+                Style::default().fg(theme.text)
+            };
+
+            let mut rp_spans = vec![Span::styled("Right Pane:", rp_label_style), Span::raw(" ")];
+
+            // Index 0 = "none", 1+ = available_tools[index-1]
+            let rp_options_count = self.available_tools.len() + 1;
+            for idx in 0..rp_options_count {
+                let is_selected = idx == self.right_pane_tool_index;
+                let style = if is_selected {
+                    Style::default().fg(theme.accent).bold()
+                } else {
+                    Style::default().fg(theme.dimmed)
+                };
+
+                if idx > 0 {
+                    rp_spans.push(Span::raw("  "));
+                }
+                rp_spans.push(Span::styled(if is_selected { "● " } else { "○ " }, style));
+                let name = if idx == 0 {
+                    "none"
+                } else {
+                    self.available_tools[idx - 1]
+                };
+                rp_spans.push(Span::styled(name, style));
+            }
+
+            frame.render_widget(Paragraph::new(Line::from(rp_spans)), chunks[ci]);
+            ci += 1;
+        }
 
         // YOLO Mode checkbox (hidden for terminal)
         if !is_terminal {
@@ -860,8 +903,8 @@ impl NewSessionDialog {
         let show_sandbox_options_help = has_sandbox && self.sandbox_enabled;
 
         let dialog_width: u16 = HELP_DIALOG_WIDTH;
-        // Base fields: Title, Path, YOLO, Worktree, New Branch, Group + close hint
-        let base_height: u16 = 20;
+        // Base fields: Title, Path, Right Pane, YOLO, Worktree, New Branch, Group + close hint
+        let base_height: u16 = 23;
         let dialog_height: u16 = base_height
             + if has_tool_selection { 3 } else { 0 }
             + if has_sandbox { 3 } else { 0 }
@@ -890,14 +933,14 @@ impl NewSessionDialog {
             if idx == 3 && !has_tool_selection {
                 continue; // Tool
             }
-            // idx 4 (YOLO), 5 (Worktree), 6 (New Branch) always shown
-            if idx == 7 && !has_sandbox {
+            // idx 4 (Right Pane), 5 (YOLO), 6 (Worktree), 7 (New Branch) always shown
+            if idx == 8 && !has_sandbox {
                 continue; // Sandbox
             }
-            if (8..=9).contains(&idx) && !show_sandbox_options_help {
+            if (9..=10).contains(&idx) && !show_sandbox_options_help {
                 continue; // Image, Env
             }
-            // idx 10 (Group) always shown
+            // idx 11 (Group) always shown
 
             lines.push(Line::from(Span::styled(
                 help.name,

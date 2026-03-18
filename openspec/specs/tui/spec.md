@@ -18,8 +18,8 @@ operations available via CLI are also available in the TUI, plus additional view
 │  (groups + sessions)   │  (status, path, branch, etc) │
 │                        │                              │
 │  [n]ew  [d]elete  [?]  │  [Enter] attach              │
-│  [t] toggle terminal   │  [D] diff view               │
-│  [s] settings          │  [r] restart                 │
+│  [s] settings          │  [D] diff view               │
+│                        │  [r] restart                 │
 └────────────────────────┴──────────────────────────────┘
 
 ┌─ Diff View ────────────────────────────────────────────┐
@@ -47,8 +47,7 @@ operations available via CLI are also available in the TUI, plus additional view
 | Key | Action |
 |-----|--------|
 | `n` | New session |
-| `Enter` | Attach to selected session |
-| `t` | Toggle terminal view (host or container) |
+| `Enter` | Attach to selected agent session |
 | `D` | Open diff view for selected session |
 | `d` | Delete selected session |
 | `r` | Restart selected session |

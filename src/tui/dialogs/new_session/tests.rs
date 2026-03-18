@@ -91,13 +91,16 @@ fn test_tab_cycles_fields_single_tool() {
     assert_eq!(dialog.focused_field, 1); // path
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 2); // yolo mode
+    assert_eq!(dialog.focused_field, 2); // right pane
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 3); // worktree branch
+    assert_eq!(dialog.focused_field, 3); // yolo mode
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // group
+    assert_eq!(dialog.focused_field, 4); // worktree branch
+
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, 5); // group
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -113,16 +116,19 @@ fn test_tab_cycles_fields_single_tool_with_worktree() {
     assert_eq!(dialog.focused_field, 1); // path
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 2); // yolo mode
+    assert_eq!(dialog.focused_field, 2); // right pane
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 3); // worktree branch
+    assert_eq!(dialog.focused_field, 3); // yolo mode
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // new branch checkbox (now visible)
+    assert_eq!(dialog.focused_field, 4); // worktree branch
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // group
+    assert_eq!(dialog.focused_field, 5); // new branch checkbox (now visible)
+
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, 6); // group
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -140,13 +146,16 @@ fn test_tab_cycles_fields_multi_tool() {
     assert_eq!(dialog.focused_field, 2); // tool selection
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 3); // yolo mode
+    assert_eq!(dialog.focused_field, 3); // right pane
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // worktree branch
+    assert_eq!(dialog.focused_field, 4); // yolo mode
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // group
+    assert_eq!(dialog.focused_field, 5); // worktree branch
+
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, 6); // group
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start (no new_branch without worktree)
@@ -158,13 +167,16 @@ fn test_backtab_cycles_fields_reverse() {
     assert_eq!(dialog.focused_field, 0); // title
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 4); // group (last field without worktree/docker)
+    assert_eq!(dialog.focused_field, 5); // group (last field without worktree/docker)
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 3); // worktree branch
+    assert_eq!(dialog.focused_field, 4); // worktree branch
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 2); // yolo mode
+    assert_eq!(dialog.focused_field, 3); // yolo mode
+
+    dialog.handle_key(shift_key(KeyCode::BackTab));
+    assert_eq!(dialog.focused_field, 2); // right pane
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
     assert_eq!(dialog.focused_field, 1); // path
@@ -334,7 +346,7 @@ fn test_tab_always_navigates_from_path_field() {
     dialog.handle_key(key(KeyCode::Tab));
 
     // Tab should navigate to next field, not accept ghost
-    assert_eq!(dialog.focused_field, 2); // yolo mode
+    assert_eq!(dialog.focused_field, 2); // right pane
 }
 
 #[test]
@@ -417,7 +429,7 @@ fn test_ctrl_a_jumps_to_start_of_path() {
 #[test]
 fn test_char_input_to_group() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 4; // group (single tool, single profile: title=0, path=1, yolo=2, worktree=3, group=4)
+    dialog.focused_field = 5; // group (single tool: title=0, path=1, right_pane=2, yolo=3, worktree=4, group=5)
     dialog.handle_key(key(KeyCode::Char('w')));
     dialog.handle_key(key(KeyCode::Char('o')));
     dialog.handle_key(key(KeyCode::Char('r')));
@@ -483,7 +495,7 @@ fn test_tool_selection_ignored_on_text_field() {
 #[test]
 fn test_tool_selection_ignored_single_tool() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 2; // yolo in single-tool mode (tool not interactive)
+    dialog.focused_field = 2; // right_pane in single-tool mode (tool not interactive)
     dialog.handle_key(key(KeyCode::Left));
     assert_eq!(dialog.tool_index, 0);
 }
@@ -541,8 +553,8 @@ fn test_new_branch_checkbox_default_true() {
 fn test_new_branch_checkbox_toggle() {
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature-branch".to_string());
-    // new_branch checkbox (single profile): title=0, path=1, yolo=2, worktree=3, new_branch=4
-    dialog.focused_field = 4;
+    // new_branch checkbox: title=0, path=1, right_pane=2, yolo=3, worktree=4, new_branch=5
+    dialog.focused_field = 5;
     assert!(dialog.create_new_branch);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -556,7 +568,7 @@ fn test_new_branch_checkbox_toggle() {
 fn test_submit_respects_create_new_branch() {
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature-branch".to_string());
-    dialog.focused_field = 4; // new_branch
+    dialog.focused_field = 5; // new_branch
     dialog.handle_key(key(KeyCode::Char(' '))); // Toggle off
 
     let result = dialog.handle_key(key(KeyCode::Enter));
@@ -573,12 +585,13 @@ fn test_new_branch_field_hidden_without_worktree() {
     let mut dialog = single_tool_dialog();
     assert_eq!(dialog.focused_field, 0);
 
-    // Tab through (single profile): title(0) -> path(1) -> yolo(2) -> worktree(3) -> group(4) -> wrap to 0
+    // Tab through: title(0) -> path(1) -> right_pane(2) -> yolo(3) -> worktree(4) -> group(5) -> wrap to 0
     dialog.handle_key(key(KeyCode::Tab)); // 1 (path)
-    dialog.handle_key(key(KeyCode::Tab)); // 2 (yolo)
-    dialog.handle_key(key(KeyCode::Tab)); // 3 (worktree)
-    dialog.handle_key(key(KeyCode::Tab)); // 4 (group)
-    assert_eq!(dialog.focused_field, 4);
+    dialog.handle_key(key(KeyCode::Tab)); // 2 (right pane)
+    dialog.handle_key(key(KeyCode::Tab)); // 3 (yolo)
+    dialog.handle_key(key(KeyCode::Tab)); // 4 (worktree)
+    dialog.handle_key(key(KeyCode::Tab)); // 5 (group)
+    assert_eq!(dialog.focused_field, 5);
     dialog.handle_key(key(KeyCode::Tab)); // Should wrap to 0
     assert_eq!(dialog.focused_field, 0);
 }
@@ -606,14 +619,14 @@ fn test_tab_skips_sandbox_options_in_main_form() {
     dialog.sandbox_enabled = true;
 
     // With sandbox enabled, sandbox sub-options are in separate mode now.
-    // Main form (single profile): title(0), path(1), tool(2), yolo(3), worktree(4), sandbox(5), group(6)
-    for _ in 0..5 {
+    // Main form: title(0), path(1), tool(2), right_pane(3), yolo(4), worktree(5), sandbox(6), group(7)
+    for _ in 0..6 {
         dialog.handle_key(key(KeyCode::Tab));
     }
-    assert_eq!(dialog.focused_field, 5); // sandbox field
+    assert_eq!(dialog.focused_field, 6); // sandbox field
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // group field (no sandbox sub-options inline)
+    assert_eq!(dialog.focused_field, 7); // group field (no sandbox sub-options inline)
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -625,14 +638,14 @@ fn test_tab_skips_sandbox_when_disabled() {
     dialog.docker_available = true;
     dialog.sandbox_enabled = false;
 
-    // Single profile: title(0), path(1), tool(2), yolo(3), worktree(4), sandbox(5), group(6)
-    for _ in 0..5 {
+    // title(0), path(1), tool(2), right_pane(3), yolo(4), worktree(5), sandbox(6), group(7)
+    for _ in 0..6 {
         dialog.handle_key(key(KeyCode::Tab));
     }
-    assert_eq!(dialog.focused_field, 5); // sandbox field
+    assert_eq!(dialog.focused_field, 6); // sandbox field
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // group field
+    assert_eq!(dialog.focused_field, 7); // group field
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -744,7 +757,7 @@ fn test_yolo_mode_toggle() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
-    dialog.focused_field = 3; // yolo mode field (single profile: title=0, path=1, tool=2, yolo=3)
+    dialog.focused_field = 4; // yolo mode field (title=0, path=1, tool=2, right_pane=3, yolo=4)
     assert!(!dialog.yolo_mode);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -796,8 +809,8 @@ fn test_disabling_sandbox_does_not_reset_yolo_mode() {
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
     dialog.yolo_mode = true;
-    // sandbox field (single profile): title=0, path=1, tool=2, yolo=3, worktree=4, sandbox=5
-    dialog.focused_field = 5;
+    // sandbox field: title=0, path=1, tool=2, right_pane=3, yolo=4, worktree=5, sandbox=6
+    dialog.focused_field = 6;
 
     dialog.handle_key(key(KeyCode::Char(' ')));
     assert!(!dialog.sandbox_enabled);
@@ -1026,8 +1039,8 @@ fn test_ctrl_p_on_sandbox_enters_config_mode() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
-    // sandbox field (single profile): title=0, path=1, tool=2, yolo=3, worktree=4, sandbox=5
-    dialog.focused_field = 5;
+    // sandbox field: title=0, path=1, tool=2, right_pane=3, yolo=4, worktree=5, sandbox=6
+    dialog.focused_field = 6;
 
     let result = dialog.handle_key(ctrl_key(KeyCode::Char('p')));
     assert!(matches!(result, DialogResult::Continue));
@@ -1040,7 +1053,7 @@ fn test_enter_on_sandbox_submits() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
-    dialog.focused_field = 6; // sandbox field
+    dialog.focused_field = 7; // group field (title=0, path=1, tool=2, right_pane=3, yolo=4, worktree=5, sandbox=6, group=7)
 
     let result = dialog.handle_key(key(KeyCode::Enter));
     // Enter should submit, not enter config mode
@@ -1053,7 +1066,7 @@ fn test_ctrl_p_on_disabled_sandbox_does_not_open_config() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = false;
-    dialog.focused_field = 6; // sandbox field
+    dialog.focused_field = 7; // group field
 
     dialog.handle_key(ctrl_key(KeyCode::Char('p')));
     assert!(!dialog.sandbox_config_mode);
@@ -1131,8 +1144,8 @@ fn test_reuse_worktree_flag_false_when_not_confirmed() {
 #[test]
 fn test_reuse_worktree_confirmation_cleared_on_text_input() {
     let mut dialog = single_tool_dialog();
-    // worktree field: title=0, path=1, yolo=2, worktree=3
-    dialog.focused_field = 3;
+    // worktree field: title=0, path=1, right_pane=2, yolo=3, worktree=4
+    dialog.focused_field = 4;
     dialog.confirm_reuse_worktree = true;
     dialog.error_message = Some("Worktree exists".to_string());
 
@@ -1140,6 +1153,60 @@ fn test_reuse_worktree_confirmation_cleared_on_text_input() {
 
     assert!(!dialog.confirm_reuse_worktree);
     assert!(dialog.error_message.is_none());
+}
+
+#[test]
+fn test_right_pane_default_none() {
+    let dialog = multi_tool_dialog();
+    assert_eq!(dialog.right_pane_tool_index, 0);
+}
+
+#[test]
+fn test_right_pane_cycle_left_right() {
+    let mut dialog = multi_tool_dialog();
+    // right pane field: title=0, path=1, tool=2, right_pane=3
+    dialog.focused_field = 3;
+    assert_eq!(dialog.right_pane_tool_index, 0); // none
+
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(dialog.right_pane_tool_index, 1); // claude
+
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(dialog.right_pane_tool_index, 2); // opencode
+
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(dialog.right_pane_tool_index, 0); // wrap to none
+
+    dialog.handle_key(key(KeyCode::Left));
+    assert_eq!(dialog.right_pane_tool_index, 2); // wrap to opencode
+}
+
+#[test]
+fn test_right_pane_none_submits_without_tool() {
+    let mut dialog = multi_tool_dialog();
+    assert_eq!(dialog.right_pane_tool_index, 0); // none
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    match result {
+        DialogResult::Submit(data) => {
+            assert!(data.right_pane_tool.is_none());
+        }
+        _ => panic!("Expected Submit"),
+    }
+}
+
+#[test]
+fn test_right_pane_selected_tool_submits() {
+    let mut dialog = multi_tool_dialog();
+    dialog.right_pane_tool_index = 2; // opencode (index 2 maps to available_tools[1])
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    match result {
+        DialogResult::Submit(data) => {
+            assert_eq!(data.right_pane_tool, Some("opencode".to_string()));
+        }
+        _ => panic!("Expected Submit"),
+    }
 }
 
 #[test]

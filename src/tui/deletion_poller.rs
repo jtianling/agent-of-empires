@@ -139,9 +139,6 @@ impl DeletionPoller {
         // Tmux kill - non-fatal if session already gone
         let _ = request.instance.kill();
 
-        // Kill paired terminal session if it exists
-        let _ = request.instance.kill_terminal();
-
         // Clean up hook status files
         crate::hooks::cleanup_hook_status_dir(&request.instance.id);
 

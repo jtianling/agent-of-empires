@@ -1,8 +1,8 @@
 //! Setting field definitions and config mapping
 
 use crate::session::{
-    validate_check_interval, Config, ContainerRuntimeName, DefaultTerminalMode, ProfileConfig,
-    TmuxMouseMode, TmuxStatusBarMode,
+    validate_check_interval, Config, ContainerRuntimeName, ProfileConfig, TmuxMouseMode,
+    TmuxStatusBarMode,
 };
 use crate::sound::{validate_sound_exists, SoundMode};
 use crate::tui::styles::AVAILABLE_THEMES;
@@ -59,7 +59,6 @@ pub enum FieldKey {
     SandboxAutoCleanup,
     CpuLimit,
     MemoryLimit,
-    DefaultTerminalMode,
     ExtraVolumes,
     PortMappings,
     VolumeIgnores,
@@ -459,11 +458,6 @@ fn build_sandbox_fields(
         sb.and_then(|s| s.memory_limit.clone()),
         sb.map(|s| s.memory_limit.is_some()).unwrap_or(false),
     );
-    let (default_terminal_mode, o6) = resolve_value(
-        scope,
-        global.sandbox.default_terminal_mode,
-        sb.and_then(|s| s.default_terminal_mode),
-    );
     let (extra_volumes, o_ev) = resolve_value(
         scope,
         global.sandbox.extra_volumes.clone(),
@@ -496,21 +490,10 @@ fn build_sandbox_fields(
         sb.and_then(|s| s.container_runtime),
     );
 
-    let terminal_mode_selected = match default_terminal_mode {
-        DefaultTerminalMode::Host => 0,
-        DefaultTerminalMode::Container => 1,
-    };
-
     let container_runtime_selected = match container_runtime {
         ContainerRuntimeName::Docker => 0,
         ContainerRuntimeName::AppleContainer => 1,
     };
-
-    let global_terminal_mode_selected = match global.sandbox.default_terminal_mode {
-        DefaultTerminalMode::Host => 0,
-        DefaultTerminalMode::Container => 1,
-    };
-    let terminal_mode_options = vec!["Host".into(), "Container".into()];
 
     let global_container_runtime_selected = match global.sandbox.container_runtime {
         ContainerRuntimeName::Docker => 0,
@@ -586,24 +569,6 @@ fn build_sandbox_fields(
             inherited_display: inherited_if(
                 o_mem,
                 FieldValue::OptionalText(global.sandbox.memory_limit.clone()),
-            ),
-        },
-        SettingField {
-            key: FieldKey::DefaultTerminalMode,
-            label: "Default Terminal Mode",
-            description: "Default terminal for sandboxed sessions (toggle with 'c' key)",
-            value: FieldValue::Select {
-                selected: terminal_mode_selected,
-                options: terminal_mode_options.clone(),
-            },
-            category: SettingsCategory::Sandbox,
-            has_override: o6,
-            inherited_display: inherited_if(
-                o6,
-                FieldValue::Select {
-                    selected: global_terminal_mode_selected,
-                    options: terminal_mode_options,
-                },
             ),
         },
         SettingField {
@@ -1153,12 +1118,6 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::CustomInstruction, FieldValue::OptionalText(v)) => {
             config.sandbox.custom_instruction = v.clone();
         }
-        (FieldKey::DefaultTerminalMode, FieldValue::Select { selected, .. }) => {
-            config.sandbox.default_terminal_mode = match selected {
-                0 => DefaultTerminalMode::Host,
-                _ => DefaultTerminalMode::Container,
-            };
-        }
         (FieldKey::ContainerRuntime, FieldValue::Select { selected, .. }) => {
             config.sandbox.container_runtime = match selected {
                 0 => ContainerRuntimeName::Docker,
@@ -1318,15 +1277,6 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
                 .sandbox
                 .get_or_insert_with(SandboxConfigOverride::default);
             s.custom_instruction = v.clone();
-        }
-        (FieldKey::DefaultTerminalMode, FieldValue::Select { selected, .. }) => {
-            let mode = match selected {
-                0 => DefaultTerminalMode::Host,
-                _ => DefaultTerminalMode::Container,
-            };
-            set_profile_override(mode, &mut config.sandbox, |s, val| {
-                s.default_terminal_mode = val
-            });
         }
         (FieldKey::ContainerRuntime, FieldValue::Select { selected, .. }) => {
             let runtime = match selected {

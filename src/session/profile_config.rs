@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 
-use super::config::{
-    Config, ContainerRuntimeName, DefaultTerminalMode, TmuxMouseMode, TmuxStatusBarMode,
-};
+use super::config::{Config, ContainerRuntimeName, TmuxMouseMode, TmuxStatusBarMode};
 use super::{ensure_profile_dir, get_profile_dir};
 
 /// Profile-specific settings. All fields are Option<T> - None means "inherit from global"
@@ -117,9 +115,6 @@ pub struct SandboxConfigOverride {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_limit: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_terminal_mode: Option<DefaultTerminalMode>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_ignores: Option<Vec<String>>,
@@ -243,9 +238,6 @@ pub fn apply_sandbox_overrides(
     }
     if let Some(ref memory_limit) = source.memory_limit {
         target.memory_limit = Some(memory_limit.clone());
-    }
-    if let Some(default_terminal_mode) = source.default_terminal_mode {
-        target.default_terminal_mode = default_terminal_mode;
     }
     if let Some(ref volume_ignores) = source.volume_ignores {
         target.volume_ignores = volume_ignores.clone();

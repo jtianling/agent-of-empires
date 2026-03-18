@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use super::{HomeView, TerminalMode, ViewMode};
+use super::HomeView;
 use crate::session::config::{load_config, save_config, SortOrder};
 use crate::session::{flatten_tree, list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
@@ -392,30 +392,6 @@ impl HomeView {
             KeyCode::Char('P') => {
                 self.show_profile_picker();
             }
-            KeyCode::Char('t') => {
-                self.view_mode = match self.view_mode {
-                    ViewMode::Agent => ViewMode::Terminal,
-                    ViewMode::Terminal => ViewMode::Agent,
-                };
-            }
-            KeyCode::Char('c') => {
-                // Toggle container/host terminal mode (only in Terminal view for sandboxed sessions)
-                if self.view_mode == ViewMode::Terminal {
-                    if let Some(id) = &self.selected_session {
-                        if let Some(inst) = self.get_instance(id) {
-                            if inst.is_sandboxed() {
-                                let id = id.clone();
-                                self.toggle_terminal_mode(&id);
-                            } else {
-                                self.info_dialog = Some(InfoDialog::new(
-                                    "Not Available",
-                                    "Only sandboxed sessions support container terminals. This session runs directly on the host.",
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
             KeyCode::Char('/') => {
                 self.search_active = true;
                 self.search_query = Input::default();
@@ -521,13 +497,6 @@ impl HomeView {
             }
             KeyCode::Char('d') => {
                 // Deletion only allowed in Agent View
-                if self.view_mode == ViewMode::Terminal {
-                    self.info_dialog = Some(InfoDialog::new(
-                        "Cannot Delete Terminal",
-                        "Terminals cannot be deleted directly. Switch to Agent View (press 't') and delete the agent session instead.",
-                    ));
-                    return None;
-                }
                 if let Some(session_id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(session_id) {
                         if inst.status == Status::Deleting {
@@ -645,21 +614,7 @@ impl HomeView {
                             return None;
                         }
                     }
-                    return match self.view_mode {
-                        ViewMode::Agent => Some(Action::AttachSession(id.to_string())),
-                        ViewMode::Terminal => {
-                            let terminal_mode = if let Some(inst) = self.get_instance(id) {
-                                if inst.is_sandboxed() {
-                                    self.get_terminal_mode(id)
-                                } else {
-                                    TerminalMode::Host
-                                }
-                            } else {
-                                TerminalMode::Host
-                            };
-                            Some(Action::AttachTerminal(id.to_string(), terminal_mode))
-                        }
-                    };
+                    return Some(Action::AttachSession(id.to_string()));
                 } else if let Some(Item::Group { path, .. }) = self.flat_items.get(self.cursor) {
                     let path = path.clone();
                     self.toggle_group_collapsed(&path);
@@ -874,13 +829,17 @@ impl HomeView {
             .is_some_and(|h| !h.on_create.is_empty() || !h.on_launch.is_empty());
 
         if data.sandbox || has_hooks {
+            let right_pane_tool = data.right_pane_tool.clone();
             self.request_creation(data, hooks);
+            self.pending_right_pane_tool = right_pane_tool;
             return None;
         }
 
+        let right_pane_tool = data.right_pane_tool.clone();
         match self.create_session(data) {
             Ok(session_id) => {
                 self.new_dialog = None;
+                self.pending_right_pane_tool = right_pane_tool;
                 Some(Action::AttachSession(session_id))
             }
             Err(e) => {

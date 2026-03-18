@@ -42,8 +42,6 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
         (
             "Views",
             vec![
-                ("t", "Toggle Agent/Terminal view"),
-                ("c", "Toggle container/host (sandbox)"),
                 ("D", "Diff view (git changes)"),
                 ("H/L", "Resize list panel"),
                 ("o", "Cycle sort forward"),

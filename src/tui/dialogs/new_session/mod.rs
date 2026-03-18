@@ -15,7 +15,7 @@ use tui_input::Input;
 
 use super::DialogResult;
 use crate::containers::{self, ContainerRuntimeInterface};
-use crate::session::config::{DefaultTerminalMode, SandboxConfig};
+use crate::session::config::SandboxConfig;
 use crate::session::repo_config::HookProgress;
 #[cfg(test)]
 use crate::session::Config;
@@ -49,6 +49,10 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     FieldHelp {
         name: "Tool",
         description: "Which AI tool to use (Ctrl+P to configure command and extra args)",
+    },
+    FieldHelp {
+        name: "Right Pane",
+        description: "Optional tool for an auto-created right pane (Left/Right to cycle)",
     },
     FieldHelp {
         name: "YOLO Mode",
@@ -104,6 +108,8 @@ pub struct NewSessionData {
     pub command_override: String,
     /// Whether to reuse an existing worktree instead of failing
     pub reuse_worktree: bool,
+    /// Optional tool to launch in a right pane (auto-split). None or empty = no split.
+    pub right_pane_tool: Option<String>,
 }
 
 /// Spinner frames for loading animation
@@ -115,6 +121,8 @@ pub struct NewSessionDialog {
     pub(super) path: Input,
     pub(super) group: Input,
     pub(super) tool_index: usize,
+    /// Right pane tool index: 0 = "none", 1+ maps to available_tools[index-1]
+    pub(super) right_pane_tool_index: usize,
     pub(super) focused_field: usize,
     pub(super) available_tools: Vec<&'static str>,
     pub(super) existing_titles: Vec<String>,
@@ -178,6 +186,8 @@ pub struct NewSessionDialog {
     /// Whether the user has been warned about reusing an existing worktree.
     /// On first Enter the warning is shown; on second Enter the session is created with reuse.
     pub(super) confirm_reuse_worktree: bool,
+    /// Saved yolo_mode value before switching to shell, restored on switch back.
+    saved_yolo_mode: Option<bool>,
 }
 
 /// Shared logic for handling key events in an editable list (env keys or env values).
@@ -286,9 +296,6 @@ fn build_inherited_settings(sandbox: &SandboxConfig) -> Vec<(String, String)> {
     if let Some(ref mem) = sandbox.memory_limit {
         settings.push(("Memory Limit".to_string(), mem.clone()));
     }
-    if sandbox.default_terminal_mode == DefaultTerminalMode::Container {
-        settings.push(("Terminal Mode".to_string(), "container".to_string()));
-    }
     settings
 }
 
@@ -358,6 +365,7 @@ impl NewSessionDialog {
             path: Input::new(current_dir),
             group: Input::new(default_group.unwrap_or_default()),
             tool_index,
+            right_pane_tool_index: 0,
             focused_field: 0,
             available_tools,
             existing_titles,
@@ -400,6 +408,7 @@ impl NewSessionDialog {
             group_ghost: None,
             confirm_create_dir: None,
             confirm_reuse_worktree: false,
+            saved_yolo_mode: None,
         }
     }
 
@@ -489,6 +498,7 @@ impl NewSessionDialog {
             path: Input::new(path),
             group: Input::default(),
             tool_index,
+            right_pane_tool_index: 0,
             focused_field: 0,
             available_tools: tools,
             existing_titles: Vec::new(),
@@ -531,6 +541,7 @@ impl NewSessionDialog {
             group_ghost: None,
             confirm_create_dir: None,
             confirm_reuse_worktree: false,
+            saved_yolo_mode: None,
         }
     }
 
@@ -542,6 +553,7 @@ impl NewSessionDialog {
             path: Input::new(path),
             group: Input::default(),
             tool_index: 0,
+            right_pane_tool_index: 0,
             focused_field: 0,
             available_tools: tools,
             existing_titles: Vec::new(),
@@ -584,6 +596,7 @@ impl NewSessionDialog {
             group_ghost: None,
             confirm_create_dir: None,
             confirm_reuse_worktree: false,
+            saved_yolo_mode: None,
         }
     }
 
@@ -655,7 +668,7 @@ impl NewSessionDialog {
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
-        // Field order: title, path, [tool], [yolo], [worktree],
+        // Field order: title, path, [tool], right_pane, [yolo], [worktree],
         //   [new_branch], [sandbox], group
         let mut fi: usize = 2; // title + path
         let tool_field = if has_tool_selection {
@@ -664,6 +677,11 @@ impl NewSessionDialog {
             f
         } else {
             usize::MAX
+        };
+        let right_pane_field = {
+            let f = fi;
+            fi += 1;
+            f
         };
         let yolo_mode_field = if !is_terminal {
             let f = fi;
@@ -843,6 +861,16 @@ impl NewSessionDialog {
                 }
                 DialogResult::Continue
             }
+            KeyCode::Left if self.focused_field == right_pane_field => {
+                let len = self.available_tools.len() + 1; // +1 for "none"
+                self.right_pane_tool_index = (self.right_pane_tool_index + len - 1) % len;
+                DialogResult::Continue
+            }
+            KeyCode::Right | KeyCode::Char(' ') if self.focused_field == right_pane_field => {
+                let len = self.available_tools.len() + 1; // +1 for "none"
+                self.right_pane_tool_index = (self.right_pane_tool_index + 1) % len;
+                DialogResult::Continue
+            }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.focused_field == yolo_mode_field =>
             {
@@ -851,6 +879,7 @@ impl NewSessionDialog {
             }
             _ => {
                 if self.focused_field != tool_field
+                    && self.focused_field != right_pane_field
                     && self.focused_field != new_branch_field
                     && self.focused_field != sandbox_field
                     && self.focused_field != yolo_mode_field
@@ -1025,11 +1054,13 @@ impl NewSessionDialog {
                 .cloned()
                 .unwrap_or_default(),
         );
-        // Reset agent-specific fields when switching to shell
         if tool == "shell" {
+            self.saved_yolo_mode = Some(self.yolo_mode);
             self.yolo_mode = false;
             self.worktree_branch = Input::default();
             self.create_new_branch = true;
+        } else if let Some(saved) = self.saved_yolo_mode.take() {
+            self.yolo_mode = saved;
         }
     }
 
@@ -1039,9 +1070,10 @@ impl NewSessionDialog {
         let is_terminal = self.is_terminal_selected();
         let base = 0;
 
-        // Field layout: [profile], title, path, [tool], [yolo], [worktree],
+        // Field layout: [profile], title, path, [tool], right_pane, [yolo], [worktree],
         //   [new_branch], [sandbox], group
         let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
+        fi += 1; // right_pane (always visible)
         let worktree_field = if !is_terminal {
             fi += 1; // yolo
             let f = fi;
@@ -1140,6 +1172,13 @@ impl NewSessionDialog {
             extra_args: self.extra_args.value().trim().to_string(),
             command_override: self.command_override.value().trim().to_string(),
             reuse_worktree: self.confirm_reuse_worktree,
+            right_pane_tool: if self.right_pane_tool_index == 0 {
+                None
+            } else {
+                self.available_tools
+                    .get(self.right_pane_tool_index - 1)
+                    .map(|t| t.to_string())
+            },
         })
     }
 

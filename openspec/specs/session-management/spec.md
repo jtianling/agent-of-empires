@@ -30,7 +30,6 @@ The primary data structure representing a session.
 | `created_at` | `DateTime<Utc>` | Creation timestamp |
 | `worktree_info` | `Option<WorktreeInfo>` | Git worktree details if applicable |
 | `sandbox_info` | `Option<SandboxInfo>` | Container sandbox details if applicable |
-| `terminal_info` | `Option<TerminalInfo>` | Paired terminal session details |
 
 ### Status Enum
 
@@ -68,15 +67,6 @@ Tracks container sandbox state for a session.
 | `container_name` | `String` | Named container handle |
 | `extra_env` | `Option<Vec<String>>` | Session-specific env vars (`KEY` or `KEY=VALUE`) |
 | `custom_instruction` | `Option<String>` | Instruction text injected into agent's system prompt |
-
-### TerminalInfo
-
-Tracks the optional paired shell terminal session.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `created` | `bool` | Whether the terminal tmux session exists |
-| `created_at` | `Option<DateTime<Utc>>` | When the terminal was created |
 
 ## Session Lifecycle
 
@@ -139,31 +129,13 @@ cycling to the current profile.
 - **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
 - **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
 
-#### Scenario: Terminal session attach sets bindings
-- **WHEN** `TerminalSession::attach(profile)` is called
-- **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
-- **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
-
-#### Scenario: Container terminal session attach sets bindings
-- **WHEN** `ContainerTerminalSession::attach(profile)` is called
-- **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
-- **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
-
 ### Requirement: Agent pane ID is stored on session creation
-When an AoE-managed tmux session is created, the system SHALL capture the initial pane's `#{pane_id}` and store it as the session-level tmux option `@aoe_agent_pane`. This applies to all session types (agent, terminal, container terminal).
+When an AoE-managed tmux session is created, the system SHALL capture the initial pane's `#{pane_id}` and store it as the session-level tmux option `@aoe_agent_pane`.
 
 #### Scenario: Pane ID stored atomically with session creation
 - **WHEN** `Session::create_with_size()` creates a new tmux session
 - **THEN** the session SHALL have a `@aoe_agent_pane` option set to the pane ID of the initial pane (e.g. `%42`)
 - **AND** the option SHALL be set atomically in the same tmux command chain as session creation
-
-#### Scenario: Terminal session stores pane ID
-- **WHEN** `TerminalSession::create()` creates a new tmux session
-- **THEN** the session SHALL have a `@aoe_agent_pane` option set to the initial pane ID
-
-#### Scenario: Container terminal session stores pane ID
-- **WHEN** `ContainerTerminalSession::create()` creates a new tmux session
-- **THEN** the session SHALL have a `@aoe_agent_pane` option set to the initial pane ID
 
 ### Requirement: Pane health checks target the stored agent pane
 All pane health check functions (`is_pane_dead`, `is_pane_running_shell`, `get_pane_pid`) SHALL target the stored agent pane ID rather than the session's currently active pane. If no stored pane ID exists, the functions SHALL fall back to targeting the session name.

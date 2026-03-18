@@ -28,7 +28,6 @@ pub struct Theme {
     // Background and borders
     pub background: Color,
     pub border: Color,
-    pub terminal_border: Color,
     pub selection: Color,
     pub session_selection: Color,
 
@@ -43,7 +42,6 @@ pub struct Theme {
     pub waiting: Color,
     pub idle: Color,
     pub error: Color,
-    pub terminal_active: Color,
 
     // UI elements
     pub group: Color,
@@ -75,7 +73,6 @@ impl Theme {
         Self {
             background: Color::Rgb(16, 20, 18),
             border: Color::Rgb(45, 70, 55),
-            terminal_border: Color::Rgb(70, 130, 180),
             selection: Color::Rgb(30, 50, 40),
             session_selection: Color::Rgb(60, 60, 60),
 
@@ -88,7 +85,6 @@ impl Theme {
             waiting: Color::Rgb(255, 180, 60),
             idle: Color::Rgb(60, 100, 70),
             error: Color::Rgb(255, 100, 80),
-            terminal_active: Color::Rgb(130, 170, 255),
 
             group: Color::Rgb(100, 220, 160),
             search: Color::Rgb(180, 255, 200),
@@ -113,7 +109,6 @@ impl Theme {
         Self {
             background: Color::Rgb(36, 40, 59),
             border: Color::Rgb(65, 72, 104),
-            terminal_border: Color::Rgb(61, 89, 161),
             selection: Color::Rgb(54, 74, 130),
             session_selection: Color::Rgb(65, 72, 104),
 
@@ -126,7 +121,6 @@ impl Theme {
             waiting: Color::Rgb(224, 175, 104),
             idle: Color::Rgb(86, 95, 137),
             error: Color::Rgb(247, 118, 142),
-            terminal_active: Color::Rgb(122, 162, 247),
 
             group: Color::Rgb(125, 207, 255),
             search: Color::Rgb(187, 154, 247),
@@ -151,7 +145,6 @@ impl Theme {
         Self {
             background: Color::Rgb(239, 241, 245),
             border: Color::Rgb(188, 192, 204),
-            terminal_border: Color::Rgb(4, 165, 229),
             selection: Color::Rgb(220, 224, 232),
             session_selection: Color::Rgb(204, 208, 218),
 
@@ -164,7 +157,6 @@ impl Theme {
             waiting: Color::Rgb(223, 142, 29),
             idle: Color::Rgb(156, 160, 176),
             error: Color::Rgb(210, 15, 57),
-            terminal_active: Color::Rgb(30, 102, 245),
 
             group: Color::Rgb(23, 146, 153),
             search: Color::Rgb(114, 135, 253),
@@ -191,7 +183,6 @@ impl Theme {
         Self {
             background: Color::Rgb(40, 42, 54),
             border: Color::Rgb(68, 71, 90),
-            terminal_border: Color::Rgb(139, 233, 253),
             selection: Color::Rgb(68, 71, 90),
             session_selection: Color::Rgb(98, 114, 164),
 
@@ -204,7 +195,6 @@ impl Theme {
             waiting: Color::Rgb(255, 184, 108),
             idle: Color::Rgb(98, 114, 164),
             error: Color::Rgb(255, 85, 85),
-            terminal_active: Color::Rgb(139, 233, 253),
 
             group: Color::Rgb(139, 233, 253),
             search: Color::Rgb(241, 250, 140),

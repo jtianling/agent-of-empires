@@ -17,14 +17,6 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalInfo {
-    #[serde(default)]
-    pub created: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -98,10 +90,6 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_info: Option<SandboxInfo>,
 
-    // Paired terminal session
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_info: Option<TerminalInfo>,
-
     // Runtime state (not serialized)
     #[serde(skip)]
     pub last_error_check: Option<std::time::Instant>,
@@ -128,7 +116,6 @@ impl Instance {
             last_accessed_at: None,
             worktree_info: None,
             sandbox_info: None,
-            terminal_info: None,
             last_error_check: None,
             last_start_time: None,
             last_error: None,
@@ -177,101 +164,6 @@ impl Instance {
         tmux::Session::new(&self.id, &self.title)
     }
 
-    pub fn terminal_tmux_session(&self) -> Result<tmux::TerminalSession> {
-        tmux::TerminalSession::new(&self.id, &self.title)
-    }
-
-    pub fn has_terminal(&self) -> bool {
-        self.terminal_info
-            .as_ref()
-            .map(|t| t.created)
-            .unwrap_or(false)
-    }
-
-    pub fn start_terminal(&mut self) -> Result<()> {
-        self.start_terminal_with_size(None)
-    }
-
-    pub fn start_terminal_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
-        let session = self.terminal_tmux_session()?;
-
-        let is_new = !session.exists();
-        if is_new {
-            session.create_with_size(&self.project_path, None, size)?;
-        }
-
-        // Apply all configured tmux options to terminal sessions too
-        if is_new {
-            self.apply_terminal_tmux_options();
-        }
-
-        self.terminal_info = Some(TerminalInfo {
-            created: true,
-            created_at: Some(Utc::now()),
-        });
-
-        Ok(())
-    }
-
-    pub fn kill_terminal(&self) -> Result<()> {
-        let session = self.terminal_tmux_session()?;
-        if session.exists() {
-            session.kill()?;
-        }
-        Ok(())
-    }
-
-    pub fn container_terminal_tmux_session(&self) -> Result<tmux::ContainerTerminalSession> {
-        tmux::ContainerTerminalSession::new(&self.id, &self.title)
-    }
-
-    pub fn has_container_terminal(&self) -> bool {
-        self.container_terminal_tmux_session()
-            .map(|s| s.exists())
-            .unwrap_or(false)
-    }
-
-    pub fn start_container_terminal_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
-        if !self.is_sandboxed() {
-            anyhow::bail!("Cannot create container terminal for non-sandboxed session");
-        }
-
-        let container = self.get_container_for_instance()?;
-        let sandbox = self.sandbox_info.as_ref().unwrap();
-
-        let env_args = build_docker_env_args(sandbox);
-        let env_part = if env_args.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", env_args)
-        };
-
-        // Get workspace path inside container (handles bare repo worktrees correctly)
-        let container_workdir = self.container_workdir();
-
-        let cmd = container.exec_command(
-            Some(&format!("-w {} {}", container_workdir, env_part)),
-            "/bin/bash",
-        );
-
-        let session = self.container_terminal_tmux_session()?;
-        let is_new = !session.exists();
-        if is_new {
-            session.create_with_size(&self.project_path, Some(&cmd), size)?;
-            self.apply_container_terminal_tmux_options();
-        }
-
-        Ok(())
-    }
-
-    pub fn kill_container_terminal(&self) -> Result<()> {
-        let session = self.container_terminal_tmux_session()?;
-        if session.exists() {
-            session.kill()?;
-        }
-        Ok(())
-    }
-
     fn sandbox_display(&self) -> Option<crate::tmux::status_bar::SandboxDisplay> {
         self.sandbox_info.as_ref().and_then(|s| {
             if s.enabled {
@@ -294,11 +186,6 @@ impl Instance {
             branch,
             sandbox.as_ref(),
         );
-    }
-
-    fn apply_container_terminal_tmux_options(&self) {
-        let name = tmux::ContainerTerminalSession::generate_name(&self.id, &self.title);
-        self.apply_session_tmux_options(&name, &format!("{} (container)", self.title));
     }
 
     pub fn start(&mut self) -> Result<()> {
@@ -506,21 +393,8 @@ impl Instance {
         }
     }
 
-    fn apply_terminal_tmux_options(&self) {
-        let name = tmux::TerminalSession::generate_name(&self.id, &self.title);
-        self.apply_session_tmux_options(&name, &format!("{} (terminal)", self.title));
-    }
-
     pub fn refresh_agent_tmux_options(&self) {
         self.apply_tmux_options();
-    }
-
-    pub fn refresh_terminal_tmux_options(&self) {
-        self.apply_terminal_tmux_options();
-    }
-
-    pub fn refresh_container_terminal_tmux_options(&self) {
-        self.apply_container_terminal_tmux_options();
     }
 
     pub fn get_container_for_instance(&mut self) -> Result<containers::DockerContainer> {
@@ -1073,39 +947,6 @@ mod tests {
         // ID should be 16 hex characters
         assert_eq!(inst.id.len(), 16);
         assert!(inst.id.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_has_terminal_false_by_default() {
-        let inst = Instance::new("test", "/tmp/test");
-        assert!(!inst.has_terminal());
-    }
-
-    #[test]
-    fn test_has_terminal_true_when_created() {
-        let mut inst = Instance::new("test", "/tmp/test");
-        inst.terminal_info = Some(TerminalInfo {
-            created: true,
-            created_at: Some(Utc::now()),
-        });
-        assert!(inst.has_terminal());
-    }
-
-    #[test]
-    fn test_terminal_info_none_means_no_terminal() {
-        let inst = Instance::new("test", "/tmp/test");
-        assert!(inst.terminal_info.is_none());
-        assert!(!inst.has_terminal());
-    }
-
-    #[test]
-    fn test_terminal_info_created_false_means_no_terminal() {
-        let mut inst = Instance::new("test", "/tmp/test");
-        inst.terminal_info = Some(TerminalInfo {
-            created: false,
-            created_at: None,
-        });
-        assert!(!inst.has_terminal());
     }
 
     #[test]

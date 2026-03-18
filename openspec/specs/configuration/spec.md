@@ -72,7 +72,6 @@ auto_cleanup = true
 cpu_limit = ""               # optional
 memory_limit = ""            # optional
 port_mappings = []
-default_terminal_mode = "host"
 volume_ignores = []
 mount_ssh = false
 custom_instruction = ""      # optional

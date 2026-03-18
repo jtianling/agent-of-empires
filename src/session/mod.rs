@@ -14,12 +14,12 @@ mod storage;
 pub use crate::sound::{SoundConfig, SoundConfigOverride};
 pub use config::{
     get_claude_config_dir, get_update_settings, load_config, save_config, ClaudeConfig, Config,
-    ContainerRuntimeName, DefaultTerminalMode, SandboxConfig, SessionConfig, ThemeConfig,
-    TmuxMouseMode, TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
+    ContainerRuntimeName, SandboxConfig, SessionConfig, ThemeConfig, TmuxMouseMode,
+    TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
 };
 pub use environment::validate_env_entry;
 pub use groups::{flatten_tree, Group, GroupTree, Item};
-pub use instance::{Instance, SandboxInfo, Status, TerminalInfo, WorktreeInfo};
+pub use instance::{Instance, SandboxInfo, Status, WorktreeInfo};
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,
     validate_check_interval, validate_memory_limit, validate_path_exists, validate_volume_format,
@@ -134,7 +134,6 @@ pub fn delete_profile(name: &str) -> Result<()> {
         if let Ok(instances) = storage.load() {
             for inst in &instances {
                 let _ = inst.kill();
-                let _ = inst.kill_terminal();
                 crate::hooks::cleanup_hook_status_dir(&inst.id);
             }
         }

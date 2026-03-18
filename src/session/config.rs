@@ -281,10 +281,6 @@ pub struct SandboxConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_mappings: Vec<String>,
 
-    /// Default terminal mode for sandboxed sessions (host or container)
-    #[serde(default)]
-    pub default_terminal_mode: DefaultTerminalMode,
-
     /// Relative directory paths to exclude from the host bind mount via anonymous volumes
     #[serde(default)]
     pub volume_ignores: Vec<String>,
@@ -322,7 +318,6 @@ impl Default for SandboxConfig {
             cpu_limit: None,
             memory_limit: None,
             port_mappings: Vec::new(),
-            default_terminal_mode: DefaultTerminalMode::default(),
             volume_ignores: Vec::new(),
             mount_ssh: false,
             custom_instruction: None,
@@ -340,17 +335,6 @@ fn default_sandbox_environment() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
-}
-
-/// Default terminal mode for sandboxed sessions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DefaultTerminalMode {
-    /// Default to host terminal (shell on the host machine)
-    #[default]
-    Host,
-    /// Default to container terminal (shell inside the Docker container)
-    Container,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

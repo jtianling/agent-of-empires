@@ -14,7 +14,7 @@ use tui_input::Input;
 
 use crate::session::{
     config::{load_config, save_config, SortOrder},
-    flatten_tree, resolve_config, DefaultTerminalMode, Group, GroupTree, Instance, Item, Storage,
+    flatten_tree, resolve_config, Group, GroupTree, Instance, Item, Storage,
 };
 use crate::tmux::AvailableTools;
 
@@ -28,22 +28,6 @@ use super::dialogs::{
 use super::diff::DiffView;
 use super::settings::SettingsView;
 use super::status_poller::StatusPoller;
-
-/// View mode for the home screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ViewMode {
-    #[default]
-    Agent,
-    Terminal,
-}
-
-/// Terminal mode for sandboxed sessions (container vs host)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TerminalMode {
-    #[default]
-    Host,
-    Container,
-}
 
 /// Cached preview content to avoid subprocess calls on every frame
 pub(super) struct PreviewCache {
@@ -104,7 +88,6 @@ pub struct HomeView {
     pub(super) cursor: usize,
     pub(super) selected_session: Option<String>,
     pub(super) selected_group: Option<String>,
-    pub(super) view_mode: ViewMode,
     pub(super) sort_order: SortOrder,
 
     // Dialogs
@@ -125,6 +108,8 @@ pub struct HomeView {
     pub(super) pending_attach_after_warning: Option<String>,
     /// Session to stop after the confirmation dialog is accepted
     pub(super) pending_stop_session: Option<String>,
+    /// Right pane tool to launch after next session attach (one-shot, consumed on use)
+    pub(super) pending_right_pane_tool: Option<String>,
 
     // Search
     pub(super) search_active: bool,
@@ -154,13 +139,6 @@ pub struct HomeView {
 
     // Performance: preview caching
     pub(super) preview_cache: PreviewCache,
-    pub(super) terminal_preview_cache: PreviewCache,
-    pub(super) container_terminal_preview_cache: PreviewCache,
-
-    // Terminal mode for sandboxed sessions (per-session, ephemeral)
-    pub(super) terminal_modes: HashMap<String, TerminalMode>,
-    // Default terminal mode from config
-    pub(super) default_terminal_mode: TerminalMode,
 
     // Sound config for state transition sounds
     pub(super) sound_config: crate::sound::SoundConfig,
@@ -188,48 +166,14 @@ impl HomeView {
         redraw
     }
 
-    /// Update preview caches for the currently selected session and view mode.
+    /// Update preview caches for the currently selected session.
     /// This should be called before rendering to ensure all data is pre-fetched.
     pub fn update_caches(&mut self, width: u16, height: u16) {
-        // Adjust width/height for border
         let inner_width = width.saturating_sub(2);
         let inner_height = height.saturating_sub(2);
 
-        match self.view_mode {
-            ViewMode::Agent => {
-                if self.refresh_preview_cache_if_needed(inner_width, inner_height) {
-                    self.needs_redraw = true;
-                }
-            }
-            ViewMode::Terminal => {
-                let selected_id = self.selected_session.clone();
-                if let Some(id) = selected_id {
-                    let terminal_mode = if let Some(inst) = self.get_instance(&id) {
-                        if inst.is_sandboxed() {
-                            self.get_terminal_mode(&id)
-                        } else {
-                            TerminalMode::Host
-                        }
-                    } else {
-                        TerminalMode::Host
-                    };
-
-                    let changed = match terminal_mode {
-                        TerminalMode::Container => self
-                            .refresh_container_terminal_preview_cache_if_needed(
-                                inner_width,
-                                inner_height,
-                            ),
-                        TerminalMode::Host => {
-                            self.refresh_terminal_preview_cache_if_needed(inner_width, inner_height)
-                        }
-                    };
-
-                    if changed {
-                        self.needs_redraw = true;
-                    }
-                }
-            }
+        if self.refresh_preview_cache_if_needed(inner_width, inner_height) {
+            self.needs_redraw = true;
         }
     }
 
@@ -246,15 +190,8 @@ impl HomeView {
             .collect();
         let group_tree = GroupTree::new_with_groups(&instances, &groups);
 
-        // Load the resolved config to get the default terminal mode, sound config, and sort order
+        // Load the resolved config to get sound config and sort order
         let resolved = resolve_config(storage.profile());
-        let default_terminal_mode = resolved
-            .as_ref()
-            .map(|config| match config.sandbox.default_terminal_mode {
-                DefaultTerminalMode::Host => TerminalMode::Host,
-                DefaultTerminalMode::Container => TerminalMode::Container,
-            })
-            .unwrap_or_default();
         let sound_config = resolved
             .as_ref()
             .map(|config| config.sound.clone())
@@ -277,7 +214,6 @@ impl HomeView {
             cursor: 0,
             selected_session: None,
             selected_group: None,
-            view_mode: ViewMode::default(),
             sort_order,
             show_help: false,
             new_dialog: None,
@@ -293,6 +229,7 @@ impl HomeView {
             profile_picker_dialog: None,
             pending_attach_after_warning: None,
             pending_stop_session: None,
+            pending_right_pane_tool: None,
             search_active: false,
             search_query: Input::default(),
             search_matches: Vec::new(),
@@ -306,10 +243,6 @@ impl HomeView {
             creation_cancelled: false,
             on_launch_hooks_ran: HashSet::new(),
             preview_cache: PreviewCache::default(),
-            terminal_preview_cache: PreviewCache::default(),
-            container_terminal_preview_cache: PreviewCache::default(),
-            terminal_modes: HashMap::new(),
-            default_terminal_mode,
             sound_config,
             settings_view: None,
             settings_close_confirm: false,
@@ -562,6 +495,11 @@ impl HomeView {
         }
     }
 
+    /// Consume the pending right pane tool (one-shot, set during session creation).
+    pub fn take_pending_right_pane_tool(&mut self) -> Option<String> {
+        self.pending_right_pane_tool.take()
+    }
+
     /// Check if on_launch hooks already ran for this session (and consume the flag).
     pub fn take_on_launch_hooks_ran(&mut self, session_id: &str) -> bool {
         self.on_launch_hooks_ran.remove(session_id)
@@ -803,35 +741,8 @@ impl HomeView {
         }
     }
 
-    /// Like `mutate_instance`, but for fallible operations. Clones the entry,
-    /// applies `f` to the clone, and writes back to both collections only on
-    /// success -- neither collection is modified on error.
-    pub(super) fn try_mutate_instance(
-        &mut self,
-        id: &str,
-        f: impl FnOnce(&mut Instance) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
-            let mut updated = inst.clone();
-            f(&mut updated)?;
-            *inst = updated.clone();
-            self.instance_map.insert(id.to_string(), updated);
-        }
-        Ok(())
-    }
-
     pub fn set_instance_error(&mut self, id: &str, error: Option<String>) {
         self.mutate_instance(id, |inst| inst.last_error = error);
-    }
-
-    pub fn start_terminal_for_instance_with_size(
-        &mut self,
-        id: &str,
-        size: Option<(u16, u16)>,
-    ) -> anyhow::Result<()> {
-        self.try_mutate_instance(id, |inst| inst.start_terminal_with_size(size))?;
-        self.save()?;
-        Ok(())
     }
 
     pub fn select_session_by_id(&mut self, session_id: &str) {
@@ -860,16 +771,9 @@ impl HomeView {
 
     pub fn select_session_by_managed_tmux_name(&mut self, tmux_session_name: &str) -> bool {
         for instance in &self.instances {
-            let matches_agent = crate::tmux::Session::generate_name(&instance.id, &instance.title)
-                == tmux_session_name;
-            let matches_terminal =
-                crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title)
-                    == tmux_session_name;
-            let matches_container =
-                crate::tmux::ContainerTerminalSession::generate_name(&instance.id, &instance.title)
-                    == tmux_session_name;
-
-            if matches_agent || matches_terminal || matches_container {
+            if crate::tmux::Session::generate_name(&instance.id, &instance.title)
+                == tmux_session_name
+            {
                 let session_id = instance.id.clone();
                 self.select_session_by_id(&session_id);
                 return self.selected_session.as_deref() == Some(session_id.as_str());
@@ -879,44 +783,11 @@ impl HomeView {
         false
     }
 
-    /// Get the terminal mode for a session (uses config default if not set)
-    pub fn get_terminal_mode(&self, session_id: &str) -> TerminalMode {
-        self.terminal_modes
-            .get(session_id)
-            .copied()
-            .unwrap_or(self.default_terminal_mode)
-    }
-
     /// Refresh all config-dependent state from the current profile's config.
     /// Call this after settings are saved to pick up any changes.
     pub fn refresh_from_config(&mut self) {
         if let Ok(config) = resolve_config(self.storage.profile()) {
-            // Refresh default terminal mode for sandboxed sessions
-            self.default_terminal_mode = match config.sandbox.default_terminal_mode {
-                DefaultTerminalMode::Host => TerminalMode::Host,
-                DefaultTerminalMode::Container => TerminalMode::Container,
-            };
-
-            // Refresh sound config
             self.sound_config = config.sound.clone();
         }
-    }
-
-    /// Toggle terminal mode between Container and Host for a session
-    pub fn toggle_terminal_mode(&mut self, session_id: &str) {
-        let current = self.get_terminal_mode(session_id);
-        let new_mode = match current {
-            TerminalMode::Container => TerminalMode::Host,
-            TerminalMode::Host => TerminalMode::Container,
-        };
-        self.terminal_modes.insert(session_id.to_string(), new_mode);
-    }
-
-    pub fn start_container_terminal_for_instance_with_size(
-        &mut self,
-        id: &str,
-        size: Option<(u16, u16)>,
-    ) -> anyhow::Result<()> {
-        self.try_mutate_instance(id, |inst| inst.start_container_terminal_with_size(size))
     }
 }

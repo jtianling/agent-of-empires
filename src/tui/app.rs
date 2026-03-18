@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::home::{HomeView, TerminalMode};
+use super::home::HomeView;
 use super::styles::load_theme;
 use super::styles::Theme;
 use super::tab_title;
@@ -49,6 +49,52 @@ where
     }
 
     Ok(result)
+}
+
+/// Build the tmux command for a right pane tool. Wraps with Ctrl-Z disablement
+/// and container exec for sandboxed sessions, mirroring the main tool's wrapping.
+fn build_right_pane_command(instance: &crate::session::Instance, tool_name: &str) -> String {
+    let agent = crate::agents::get_agent(tool_name);
+
+    // For "shell", use the user's shell; for agents, use the registered binary.
+    let binary = if tool_name == "shell" {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    } else {
+        agent
+            .map(|a| a.binary.to_string())
+            .unwrap_or_else(|| "bash".to_string())
+    };
+
+    // Apply YOLO mode when the session has yolo enabled
+    let mut cmd = binary.clone();
+    let mut env_prefix = String::new();
+    if instance.is_yolo_mode() && tool_name != "shell" {
+        match agent.and_then(|a| a.yolo.as_ref()) {
+            Some(crate::agents::YoloMode::CliFlag(flag)) => {
+                cmd = format!("{} {}", cmd, flag);
+            }
+            Some(crate::agents::YoloMode::EnvVar(key, value)) => {
+                let escaped_v = value.replace('\'', "'\\''");
+                env_prefix = format!("{}='{}' ", key, escaped_v);
+            }
+            None => {}
+        }
+    }
+
+    let escaped = cmd.replace('\'', "'\\''");
+
+    if instance.is_sandboxed() && instance.sandbox_info.is_some() {
+        let container = crate::containers::DockerContainer::from_session_id(&instance.id);
+        let workdir = instance.container_workdir();
+        let docker_cmd = container.exec_command(Some(&format!("-w {}", workdir)), &cmd);
+        let docker_escaped = docker_cmd.replace('\'', "'\\''");
+        format!(
+            "{}bash -c 'stty susp undef; exec {}'",
+            env_prefix, docker_escaped
+        )
+    } else {
+        format!("{}bash -c 'stty susp undef; exec {}'", env_prefix, escaped)
+    }
 }
 
 fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, profile: &str) {
@@ -392,9 +438,6 @@ impl App {
             Action::AttachSession(id) => {
                 self.attach_session(&id, terminal)?;
             }
-            Action::AttachTerminal(id, mode) => {
-                self.attach_terminal(&id, mode, terminal)?;
-            }
             Action::SwitchProfile(profile) => {
                 let storage = Storage::new(&profile)?;
                 let tools = self.home.available_tools();
@@ -508,6 +551,22 @@ impl App {
                 return Ok(());
             }
             self.home.set_instance_error(session_id, None);
+
+            // Split right pane if requested (one-shot, consumed here).
+            // This happens AFTER create_with_size stored @aoe_agent_pane on the
+            // left pane, so status detection continues to target the correct pane.
+            if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
+                let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+                let right_cmd = build_right_pane_command(&inst, &right_tool);
+                if let Err(e) =
+                    crate::tmux::split_window_right(&session_name, &inst.project_path, &right_cmd)
+                {
+                    tracing::warn!("Failed to split right pane: {}", e);
+                }
+            }
+        } else {
+            // Session already running -- discard any pending right pane request
+            self.home.take_pending_right_pane_tool();
         }
 
         let attach_client_name = std::env::var("TMUX")
@@ -540,105 +599,6 @@ impl App {
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux attach returned error: {}", e);
-        }
-
-        Ok(())
-    }
-
-    fn attach_terminal(
-        &mut self,
-        session_id: &str,
-        mode: TerminalMode,
-        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    ) -> Result<()> {
-        let instance = match self.home.get_instance(session_id) {
-            Some(inst) => inst.clone(),
-            None => return Ok(()),
-        };
-
-        // Get terminal size to pass to tmux session creation
-        let size = crate::terminal::get_size();
-
-        let attach_client_name = std::env::var("TMUX")
-            .ok()
-            .and_then(|_| crate::tmux::get_current_client_name())
-            .or_else(crate::tmux::get_tty_name);
-
-        // Prepare the tmux session before leaving TUI mode
-        let client_for_attach = attach_client_name.clone();
-        let attach_fn: Box<dyn FnOnce() -> Result<()>> = match mode {
-            TerminalMode::Container if instance.is_sandboxed() => {
-                let container_session = instance.container_terminal_tmux_session()?;
-                if !container_session.exists() || container_session.is_pane_dead() {
-                    if container_session.exists() {
-                        let _ = container_session.kill();
-                    }
-                    if let Err(e) = self
-                        .home
-                        .start_container_terminal_for_instance_with_size(session_id, size)
-                    {
-                        self.home
-                            .set_instance_error(session_id, Some(e.to_string()));
-                        return Ok(());
-                    }
-                }
-                instance.refresh_container_terminal_tmux_options();
-                let p = self.home.storage.profile().to_string();
-                Box::new(move || {
-                    container_session.attach_with_client(&p, client_for_attach.as_deref())
-                })
-            }
-            _ => {
-                let terminal_session = instance.terminal_tmux_session()?;
-                if !terminal_session.exists() || terminal_session.is_pane_dead() {
-                    if terminal_session.exists() {
-                        let _ = terminal_session.kill();
-                    }
-                    if let Err(e) = self
-                        .home
-                        .start_terminal_for_instance_with_size(session_id, size)
-                    {
-                        self.home
-                            .set_instance_error(session_id, Some(e.to_string()));
-                        return Ok(());
-                    }
-                }
-                instance.refresh_terminal_tmux_options();
-                let p = self.home.storage.profile().to_string();
-                Box::new(move || {
-                    terminal_session.attach_with_client(&p, client_for_attach.as_deref())
-                })
-            }
-        };
-        if let Some(client_name) = &attach_client_name {
-            let session_name = match mode {
-                TerminalMode::Container if instance.is_sandboxed() => {
-                    crate::tmux::ContainerTerminalSession::generate_name(
-                        &instance.id,
-                        &instance.title,
-                    )
-                }
-                _ => crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title),
-            };
-            // This tracks the last managed session visited so home-screen
-            // selection can follow nested detach. The detach return target is
-            // seeded separately by the attach path in tmux utils.
-            crate::tmux::utils::set_last_detached_session_for_client(client_name, &session_name);
-            self.pending_nested_detach_client = Some(client_name.clone());
-        }
-
-        let attach_result = with_raw_mode_disabled(terminal, attach_fn)?;
-        reapply_tui_title(terminal, self.home.storage.profile());
-
-        self.needs_redraw = true;
-        crate::tmux::refresh_session_cache();
-        self.home.reload()?;
-        if !self.try_restore_selection_from_client_context() {
-            self.home.select_session_by_id(session_id);
-        }
-
-        if let Err(e) = attach_result {
-            tracing::warn!("tmux terminal attach returned error: {}", e);
         }
 
         Ok(())
@@ -725,7 +685,6 @@ impl App {
 pub enum Action {
     Quit,
     AttachSession(String),
-    AttachTerminal(String, TerminalMode),
     SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),
@@ -740,15 +699,9 @@ mod tests {
     fn test_action_enum() {
         let quit = Action::Quit;
         let attach = Action::AttachSession("test-id".to_string());
-        let attach_terminal =
-            Action::AttachTerminal("test-id".to_string(), TerminalMode::Container);
 
         assert_eq!(quit, Action::Quit);
         assert_eq!(attach, Action::AttachSession("test-id".to_string()));
-        assert_eq!(
-            attach_terminal,
-            Action::AttachTerminal("test-id".to_string(), TerminalMode::Container)
-        );
     }
 
     #[test]
@@ -756,10 +709,6 @@ mod tests {
         let original = Action::AttachSession("session-123".to_string());
         let cloned = original.clone();
         assert_eq!(original, cloned);
-
-        let terminal_action = Action::AttachTerminal("session-123".to_string(), TerminalMode::Host);
-        let terminal_cloned = terminal_action.clone();
-        assert_eq!(terminal_action, terminal_cloned);
     }
 
     #[test]

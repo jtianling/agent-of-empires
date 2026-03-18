@@ -400,10 +400,6 @@ fn instance_for_tmux_session_name<'a>(
 
 fn matches_managed_tmux_name(instance: &Instance, tmux_session_name: &str) -> bool {
     crate::tmux::Session::generate_name(&instance.id, &instance.title) == tmux_session_name
-        || crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title)
-            == tmux_session_name
-        || crate::tmux::ContainerTerminalSession::generate_name(&instance.id, &instance.title)
-            == tmux_session_name
 }
 
 fn current_tmux_session_name(client_name: Option<&str>) -> anyhow::Result<Option<String>> {
@@ -496,7 +492,8 @@ pub fn strip_ansi(content: &str) -> String {
     result
 }
 
-pub fn sanitize_session_name(name: &str) -> String {
+#[cfg(test)]
+pub(crate) fn sanitize_session_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -756,28 +753,17 @@ mod tests {
     }
 
     #[test]
-    fn test_instance_for_tmux_session_name_matches_terminal_variants() {
+    fn test_instance_for_tmux_session_name_matches_agent_session() {
         let instance = instance_with_created_at("Skills Manager", "/tmp/skills", Utc::now());
         let instances = vec![instance.clone()];
 
         let agent_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
-        let terminal_name =
-            crate::tmux::TerminalSession::generate_name(&instance.id, &instance.title);
-        let container_name =
-            crate::tmux::ContainerTerminalSession::generate_name(&instance.id, &instance.title);
 
         assert_eq!(
             instance_for_tmux_session_name(&instances, &agent_name).map(|i| i.id.as_str()),
             Some(instance.id.as_str())
         );
-        assert_eq!(
-            instance_for_tmux_session_name(&instances, &terminal_name).map(|i| i.id.as_str()),
-            Some(instance.id.as_str())
-        );
-        assert_eq!(
-            instance_for_tmux_session_name(&instances, &container_name).map(|i| i.id.as_str()),
-            Some(instance.id.as_str())
-        );
+        assert!(instance_for_tmux_session_name(&instances, "nonexistent_session").is_none());
     }
 
     #[test]
