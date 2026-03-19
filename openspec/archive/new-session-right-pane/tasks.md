@@ -28,7 +28,7 @@
 
 - [x] 5.1 Add unit tests for the new dialog field (right pane selection cycling, default "none", submission data)
 - [x] 5.2 Add unit test verifying `@aoe_agent_pane` is not affected by the split-window operation
-- [ ] 5.3 Manual test: create session with right pane tool, verify dual-pane layout with correct tools
-- [ ] 5.4 Manual test: detach from left pane and right pane, verify both return to AoE correctly
-- [ ] 5.5 Manual test: verify status detection targets left pane after split
+- [x] 5.3 Manual test: create session with right pane tool, verify dual-pane layout with correct tools
+- [x] 5.4 Manual test: detach from left pane and right pane, verify both return to AoE correctly
+- [x] 5.5 Manual test: verify status detection targets left pane after split
 - [x] 5.6 Run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure no regressions
