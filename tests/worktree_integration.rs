@@ -262,3 +262,66 @@ fn test_create_new_branch_with_b_flag() {
         .is_ok();
     assert!(branch_exists_after);
 }
+
+#[test]
+fn test_worktree_agent_dirs_sync_and_cleanup() {
+    let (repo_dir, repo, _config_dir) = setup_test_environment();
+    let repo_path = repo_dir.path();
+
+    // Add .gitignore with agent dirs
+    std::fs::write(repo_path.join(".gitignore"), ".claude\n.codex\n").unwrap();
+    {
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(".gitignore")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "Add .gitignore", &tree, &[&head])
+            .unwrap();
+    }
+
+    // Create agent dirs in source repo
+    let claude_dir = repo_path.join(".claude");
+    std::fs::create_dir(&claude_dir).unwrap();
+    std::fs::write(claude_dir.join("config.json"), r#"{"key":"value"}"#).unwrap();
+
+    let codex_dir = repo_path.join(".codex");
+    std::fs::create_dir(&codex_dir).unwrap();
+    std::fs::write(codex_dir.join("settings.yaml"), "mode: fast").unwrap();
+
+    // Create worktree
+    let git_wt = GitWorktree::new(repo_path.to_path_buf()).unwrap();
+    let wt_path = repo_path.join("agent-sync-worktree");
+
+    // Need a new branch for the worktree
+    {
+        let head = repo.head().unwrap();
+        let commit = head.peel_to_commit().unwrap();
+        repo.branch("agent-sync-test", &commit, false).unwrap();
+    }
+
+    git_wt
+        .create_worktree("agent-sync-test", &wt_path, false)
+        .unwrap();
+
+    // Verify agent dirs were copied to worktree
+    assert!(
+        wt_path.join(".claude/config.json").exists(),
+        ".claude should be copied to worktree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join(".claude/config.json")).unwrap(),
+        r#"{"key":"value"}"#
+    );
+    assert!(
+        wt_path.join(".codex/settings.yaml").exists(),
+        ".codex should be copied to worktree"
+    );
+
+    // Remove the worktree (cleanup should remove agent dirs first)
+    git_wt.remove_worktree(&wt_path, false).unwrap();
+
+    assert!(!wt_path.exists(), "Worktree should be fully removed");
+}

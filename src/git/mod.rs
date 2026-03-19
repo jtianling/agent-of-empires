@@ -7,8 +7,49 @@ pub mod diff;
 pub mod error;
 pub mod template;
 
+/// Well-known code-agent hidden directories that should be synced to worktrees.
+/// These directories are typically `.gitignore`'d and contain agent-specific
+/// configuration (skills, project context, instructions).
+const AGENT_DIRS: &[&str] = &[
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".cursor",
+    ".aider",
+    ".continue",
+];
+
 use error::{GitError, Result};
 use template::{resolve_template, TemplateVars};
+
+/// Check if a path is gitignored in the given repo using `git check-ignore -q`.
+/// Returns `true` if the path is ignored, `false` if tracked or not ignored.
+fn is_gitignored(repo_path: &Path, dir_name: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["check-ignore", "-q", dir_name])
+        .current_dir(repo_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Recursively copy a directory and all its contents.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
+}
 
 /// Open a git repository at the given path without searching parent directories.
 /// Unlike `git2::Repository::discover`, this does not walk up the directory tree,
@@ -199,7 +240,60 @@ impl GitWorktree {
         // the repo is mounted at different locations (e.g., in Docker containers).
         Self::convert_git_file_to_relative(path)?;
 
+        Self::sync_agent_dirs_to_worktree(&self.repo_path, path);
+
         Ok(())
+    }
+
+    /// Copy `.gitignore`'d agent directories from the source repo to a new worktree.
+    /// Failures are logged but do not prevent worktree creation.
+    fn sync_agent_dirs_to_worktree(source_dir: &Path, worktree_dir: &Path) {
+        for &dir_name in AGENT_DIRS {
+            let source_path = source_dir.join(dir_name);
+            let target_path = worktree_dir.join(dir_name);
+
+            if !source_path.is_dir() {
+                continue;
+            }
+            if target_path.exists() {
+                continue;
+            }
+            if !is_gitignored(source_dir, dir_name) {
+                continue;
+            }
+
+            if let Err(e) = copy_dir_recursive(&source_path, &target_path) {
+                tracing::warn!("Failed to copy agent dir {} to worktree: {}", dir_name, e);
+            } else {
+                tracing::debug!("Copied agent dir {} to worktree", dir_name);
+            }
+        }
+    }
+
+    /// Remove `.gitignore`'d agent directories from a worktree before deletion.
+    /// Returns `true` if all cleanups succeeded (or there was nothing to clean).
+    pub fn cleanup_agent_dirs_from_worktree(worktree_dir: &Path) -> bool {
+        let mut all_ok = true;
+        for &dir_name in AGENT_DIRS {
+            let dir_path = worktree_dir.join(dir_name);
+            if !dir_path.is_dir() {
+                continue;
+            }
+            if !is_gitignored(worktree_dir, dir_name) {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&dir_path) {
+                tracing::warn!(
+                    "Failed to clean up agent dir {} from worktree: {}",
+                    dir_name,
+                    e
+                );
+                all_ok = false;
+            } else {
+                tracing::debug!("Cleaned up agent dir {} from worktree", dir_name);
+            }
+        }
+        all_ok
     }
 
     /// Prune stale worktree entries whose directories no longer exist on disk.
@@ -322,12 +416,15 @@ impl GitWorktree {
             return Err(GitError::WorktreeNotFound(path.to_path_buf()));
         }
 
+        let cleanup_ok = Self::cleanup_agent_dirs_from_worktree(path);
+        let use_force = force || !cleanup_ok;
+
         let path_str = path
             .to_str()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path"))?;
 
         let mut args = vec!["worktree", "remove"];
-        if force {
+        if use_force {
             args.push("--force");
         }
         args.push(path_str);
@@ -1224,5 +1321,194 @@ mod tests {
 
         assert!(wt_path.exists());
         assert!(wt_path.join(".git").exists());
+    }
+
+    // ---- Agent directory sync/cleanup tests ----
+
+    /// Set up a test repo with a .gitignore and some agent directories.
+    /// Returns (temp_dir, repo, repo_path).
+    fn setup_repo_with_agent_dirs() -> (TempDir, PathBuf) {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+
+        std::fs::write(repo_path.join(".gitignore"), ".claude\n.codex\n").unwrap();
+
+        {
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(".gitignore")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Add .gitignore", &tree, &[&head])
+                .unwrap();
+        }
+
+        let claude_dir = repo_path.join(".claude");
+        std::fs::create_dir_all(claude_dir.join("sub")).unwrap();
+        std::fs::write(claude_dir.join("config.json"), "{}").unwrap();
+        std::fs::write(claude_dir.join("sub/data.txt"), "nested").unwrap();
+
+        let codex_dir = repo_path.join(".codex");
+        std::fs::create_dir(&codex_dir).unwrap();
+        std::fs::write(codex_dir.join("settings.yaml"), "key: val").unwrap();
+
+        (dir, repo_path)
+    }
+
+    #[test]
+    fn test_is_gitignored_identifies_ignored_paths() {
+        let (_dir, repo_path) = setup_repo_with_agent_dirs();
+
+        assert!(is_gitignored(&repo_path, ".claude"));
+        assert!(is_gitignored(&repo_path, ".codex"));
+        // .gitignore itself is tracked, not ignored
+        assert!(!is_gitignored(&repo_path, ".gitignore"));
+        // Non-existent dirs that aren't in .gitignore
+        assert!(!is_gitignored(&repo_path, ".gemini"));
+    }
+
+    #[test]
+    fn test_sync_agent_dirs_copies_gitignored_dirs() {
+        let (_dir, repo_path) = setup_repo_with_agent_dirs();
+        let target_dir = TempDir::new().unwrap();
+
+        // Initialize a git repo in target so is_gitignored can run there too
+        // (but the check is against source_dir, not target)
+        GitWorktree::sync_agent_dirs_to_worktree(&repo_path, target_dir.path());
+
+        // .claude and .codex should be copied
+        assert!(target_dir.path().join(".claude/config.json").exists());
+        assert!(target_dir.path().join(".claude/sub/data.txt").exists());
+        assert!(target_dir.path().join(".codex/settings.yaml").exists());
+
+        // .gemini shouldn't exist (not in source)
+        assert!(!target_dir.path().join(".gemini").exists());
+    }
+
+    #[test]
+    fn test_sync_agent_dirs_skips_existing_target() {
+        let (_dir, repo_path) = setup_repo_with_agent_dirs();
+        let target_dir = TempDir::new().unwrap();
+
+        // Pre-create .claude in target with different content
+        let target_claude = target_dir.path().join(".claude");
+        std::fs::create_dir(&target_claude).unwrap();
+        std::fs::write(target_claude.join("existing.txt"), "don't overwrite me").unwrap();
+
+        GitWorktree::sync_agent_dirs_to_worktree(&repo_path, target_dir.path());
+
+        // .claude should keep its original content, not be overwritten
+        assert!(target_claude.join("existing.txt").exists());
+        assert!(!target_claude.join("config.json").exists());
+
+        // .codex should still be copied
+        assert!(target_dir.path().join(".codex/settings.yaml").exists());
+    }
+
+    #[test]
+    fn test_sync_agent_dirs_skips_tracked_dirs() {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+
+        // Create .claude as a tracked directory (no .gitignore entry)
+        let claude_dir = repo_path.join(".claude");
+        std::fs::create_dir(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("tracked.txt"), "tracked").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".claude/tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &repo.signature().unwrap(),
+            &repo.signature().unwrap(),
+            "Add tracked .claude",
+            &tree,
+            &[&head],
+        )
+        .unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        GitWorktree::sync_agent_dirs_to_worktree(&repo_path, target_dir.path());
+
+        // .claude should NOT be copied since it's tracked (not gitignored)
+        assert!(!target_dir.path().join(".claude").exists());
+
+        drop(dir);
+    }
+
+    #[test]
+    fn test_cleanup_agent_dirs_removes_gitignored_dirs() {
+        let worktree_dir = TempDir::new().unwrap();
+        git2::Repository::init(worktree_dir.path()).unwrap();
+        std::fs::write(worktree_dir.path().join(".gitignore"), ".claude\n.codex\n").unwrap();
+
+        let claude_wt = worktree_dir.path().join(".claude");
+        std::fs::create_dir(&claude_wt).unwrap();
+        std::fs::write(claude_wt.join("config.json"), "{}").unwrap();
+
+        let codex_wt = worktree_dir.path().join(".codex");
+        std::fs::create_dir(&codex_wt).unwrap();
+        std::fs::write(codex_wt.join("settings.yaml"), "key: val").unwrap();
+
+        let result = GitWorktree::cleanup_agent_dirs_from_worktree(worktree_dir.path());
+
+        assert!(result);
+        assert!(!claude_wt.exists());
+        assert!(!codex_wt.exists());
+    }
+
+    #[test]
+    fn test_cleanup_agent_dirs_skips_tracked_dirs() {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+
+        // Create tracked .claude directory
+        let claude_dir = repo_path.join(".claude");
+        std::fs::create_dir(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("tracked.txt"), "tracked").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".claude/tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &repo.signature().unwrap(),
+            &repo.signature().unwrap(),
+            "Add tracked .claude",
+            &tree,
+            &[&head],
+        )
+        .unwrap();
+
+        let result = GitWorktree::cleanup_agent_dirs_from_worktree(&repo_path);
+
+        // Should return true (no failures), but .claude should still exist
+        assert!(result);
+        assert!(claude_dir.exists());
+
+        drop(dir);
     }
 }
