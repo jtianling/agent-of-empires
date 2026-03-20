@@ -140,6 +140,8 @@ When an AoE-managed tmux session is created, the system SHALL capture the initia
 ### Requirement: Pane health checks target the stored agent pane
 All pane health check functions (`is_pane_dead`, `is_pane_running_shell`, `get_pane_pid`) SHALL target the stored agent pane ID rather than the session's currently active pane. If no stored pane ID exists, the functions SHALL fall back to targeting the session name.
 
+Additionally, the `Session` struct SHALL expose a `pane_count()` method that returns the number of panes in the session, and a `respawn_agent_pane(command)` method that respawns only the agent pane.
+
 #### Scenario: Health check with user-created split panes
 - **WHEN** a session has user-created split panes via tmux shortcuts
 - **AND** the active pane is a user-created shell (not the agent pane)
@@ -163,7 +165,18 @@ All pane health check functions (`is_pane_dead`, `is_pane_running_shell`, `get_p
 - **WHEN** the agent process exits or crashes in the original pane
 - **AND** user-created split panes are still running shells
 - **THEN** `is_pane_dead()` SHALL return true (or `is_pane_running_shell()` SHALL return true)
-- **AND** AoE SHALL correctly detect the agent has exited and restart the session
+- **AND** AoE SHALL correctly detect the agent has exited
+
+#### Scenario: Attach-time recovery prefers respawn for multi-pane sessions
+- **WHEN** the agent pane is dead during attach
+- **AND** the session has more than one pane
+- **THEN** the system SHALL use `respawn-pane` instead of `kill-session`
+- **AND** the session layout and user-created panes SHALL be preserved
+
+#### Scenario: Attach-time recovery uses kill-session for single-pane sessions
+- **WHEN** the agent pane is dead during attach
+- **AND** the session has exactly one pane
+- **THEN** the system SHALL use the existing `kill-session` + recreate flow
 
 ### Requirement: Session creation sets group default directory for new groups
 When creating a session that causes a new group to be created, the system SHALL set the group's `default_directory` to the session's `project_path`. This applies only when the group did not exist before the session was created.

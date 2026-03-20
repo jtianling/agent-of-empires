@@ -243,6 +243,45 @@ impl Session {
             .unwrap_or_default()
     }
 
+    pub fn pane_count(&self) -> usize {
+        Command::new("tmux")
+            .args(["list-panes", "-t", &self.name])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+            .unwrap_or(0)
+    }
+
+    pub fn respawn_agent_pane(&self, command: &str, working_dir: &str) -> Result<()> {
+        let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
+
+        let output = Command::new("tmux")
+            .args([
+                "respawn-pane",
+                "-k",
+                "-c",
+                working_dir,
+                "-t",
+                &target,
+                command,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to respawn agent pane: {}", stderr);
+        }
+
+        Ok(())
+    }
+
+    pub fn kill_agent_pane_process_tree(&self) {
+        let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
+        if let Some(pid) = process::get_pane_pid(&target) {
+            process::kill_process_tree(pid);
+        }
+    }
+
     pub fn get_pane_pid(&self) -> Option<u32> {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
         process::get_pane_pid(&target)

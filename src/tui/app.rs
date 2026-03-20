@@ -446,6 +446,37 @@ impl App {
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
             }
+            Action::RespawnAgentPane(id) => {
+                if let Some(inst) = self.home.get_instance(&id) {
+                    let mut inst_clone = inst.clone();
+                    let tmux_session = match inst_clone.tmux_session() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("Failed to get tmux session: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    if !tmux_session.exists() {
+                        return self.attach_session(&id, terminal);
+                    }
+
+                    self.home
+                        .set_instance_status(&id, crate::session::Status::Starting);
+                    if let Err(e) = inst_clone.respawn_agent_pane() {
+                        tracing::error!("Failed to respawn agent pane: {}", e);
+                        self.home.set_instance_error(&id, Some(e.to_string()));
+                        self.home
+                            .set_instance_status(&id, crate::session::Status::Error);
+                        return Ok(());
+                    }
+                    self.home.set_instance_error(&id, None);
+                    crate::tmux::refresh_session_cache();
+
+                    // Auto-attach so the user sees the restarted agent immediately
+                    self.attach_session(&id, terminal)?;
+                }
+            }
             Action::StopSession(id) => {
                 if let Some(inst) = self.home.get_instance(&id) {
                     let inst_clone = inst.clone();
@@ -491,77 +522,95 @@ impl App {
 
         let tmux_session = instance.tmux_session()?;
 
-        if !tmux_session.exists()
-            || tmux_session.is_pane_dead()
-            || (!instance.expects_shell() && tmux_session.is_pane_running_shell())
-        {
-            if tmux_session.exists() {
-                let _ = tmux_session.kill();
-            }
-            // Show warning (once) if custom instruction is configured for an unsupported agent
-            if instance.is_sandboxed() {
-                let has_instruction = instance
-                    .sandbox_info
-                    .as_ref()
-                    .and_then(|s| s.custom_instruction.as_ref())
-                    .is_some_and(|i| !i.is_empty());
+        // Skip restart check if the instance was just started/respawned (grace period
+        // prevents the brief bash wrapper phase from triggering is_pane_running_shell)
+        let needs_restart = instance.status != crate::session::Status::Starting
+            && (!tmux_session.exists()
+                || tmux_session.is_pane_dead()
+                || (!instance.expects_shell() && tmux_session.is_pane_running_shell()));
 
-                if has_instruction
-                    && !crate::agents::get_agent(&instance.tool)
-                        .is_some_and(|a| a.instruction_flag.is_some())
-                {
-                    let config = load_config()?.unwrap_or_default();
-                    if !config.app_state.has_seen_custom_instruction_warning {
-                        self.home.info_dialog = Some(
-                            crate::tui::dialogs::InfoDialog::new(
-                                "Custom Instruction Not Supported",
-                                &format!(
-                                    "'{}' does not support custom instruction injection. The session will launch without the custom instruction.",
-                                    instance.tool
+        if needs_restart {
+            let session_exists = tmux_session.exists();
+            let multi_pane = session_exists && tmux_session.pane_count() > 1;
+
+            if multi_pane {
+                // Respawn only the agent pane, preserving user-created panes and layout
+                self.home
+                    .set_instance_status(session_id, crate::session::Status::Starting);
+                let mut inst = instance.clone();
+                if let Err(e) = inst.respawn_agent_pane() {
+                    self.home
+                        .set_instance_error(session_id, Some(e.to_string()));
+                    self.home
+                        .set_instance_status(session_id, crate::session::Status::Error);
+                    return Ok(());
+                }
+                self.home.set_instance_error(session_id, None);
+                self.home.take_pending_right_pane_tool();
+            } else {
+                // Single-pane or non-existent session: kill and recreate from scratch
+                if session_exists {
+                    let _ = tmux_session.kill();
+                }
+                // Show warning (once) if custom instruction is configured for an unsupported agent
+                if instance.is_sandboxed() {
+                    let has_instruction = instance
+                        .sandbox_info
+                        .as_ref()
+                        .and_then(|s| s.custom_instruction.as_ref())
+                        .is_some_and(|i| !i.is_empty());
+
+                    if has_instruction
+                        && !crate::agents::get_agent(&instance.tool)
+                            .is_some_and(|a| a.instruction_flag.is_some())
+                    {
+                        let config = load_config()?.unwrap_or_default();
+                        if !config.app_state.has_seen_custom_instruction_warning {
+                            self.home.info_dialog = Some(
+                                crate::tui::dialogs::InfoDialog::new(
+                                    "Custom Instruction Not Supported",
+                                    &format!(
+                                        "'{}' does not support custom instruction injection. The session will launch without the custom instruction.",
+                                        instance.tool
+                                    ),
                                 ),
-                            ),
-                        );
-                        self.home.pending_attach_after_warning = Some(session_id.to_string());
+                            );
+                            self.home.pending_attach_after_warning = Some(session_id.to_string());
 
-                        // Persist the "seen" flag so it only shows once
-                        let mut config = config;
-                        config.app_state.has_seen_custom_instruction_warning = true;
-                        save_config(&config)?;
+                            let mut config = config;
+                            config.app_state.has_seen_custom_instruction_warning = true;
+                            save_config(&config)?;
 
-                        return Ok(());
+                            return Ok(());
+                        }
                     }
                 }
-            }
 
-            // Get terminal size to pass to tmux session creation
-            // This ensures the session starts at the correct size instead of 80x24 default
-            let size = crate::terminal::get_size();
+                let size = crate::terminal::get_size();
+                let skip_on_launch = self.home.take_on_launch_hooks_ran(session_id);
 
-            // Skip on_launch hooks if they already ran in the background creation poller
-            let skip_on_launch = self.home.take_on_launch_hooks_ran(session_id);
-
-            self.home
-                .set_instance_status(session_id, crate::session::Status::Starting);
-            let mut inst = instance.clone();
-            if let Err(e) = inst.start_with_size_opts(size, skip_on_launch) {
                 self.home
-                    .set_instance_error(session_id, Some(e.to_string()));
-                self.home
-                    .set_instance_status(session_id, crate::session::Status::Error);
-                return Ok(());
-            }
-            self.home.set_instance_error(session_id, None);
+                    .set_instance_status(session_id, crate::session::Status::Starting);
+                let mut inst = instance.clone();
+                if let Err(e) = inst.start_with_size_opts(size, skip_on_launch) {
+                    self.home
+                        .set_instance_error(session_id, Some(e.to_string()));
+                    self.home
+                        .set_instance_status(session_id, crate::session::Status::Error);
+                    return Ok(());
+                }
+                self.home.set_instance_error(session_id, None);
 
-            // Split right pane if requested (one-shot, consumed here).
-            // This happens AFTER create_with_size stored @aoe_agent_pane on the
-            // left pane, so status detection continues to target the correct pane.
-            if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
-                let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
-                let right_cmd = build_right_pane_command(&inst, &right_tool);
-                if let Err(e) =
-                    crate::tmux::split_window_right(&session_name, &inst.project_path, &right_cmd)
-                {
-                    tracing::warn!("Failed to split right pane: {}", e);
+                if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
+                    let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+                    let right_cmd = build_right_pane_command(&inst, &right_tool);
+                    if let Err(e) = crate::tmux::split_window_right(
+                        &session_name,
+                        &inst.project_path,
+                        &right_cmd,
+                    ) {
+                        tracing::warn!("Failed to split right pane: {}", e);
+                    }
                 }
             }
         } else {
@@ -685,6 +734,7 @@ impl App {
 pub enum Action {
     Quit,
     AttachSession(String),
+    RespawnAgentPane(String),
     SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),

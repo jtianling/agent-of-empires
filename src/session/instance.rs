@@ -214,27 +214,7 @@ impl Instance {
         let on_launch_hooks = if skip_on_launch {
             None
         } else {
-            // Start with global+profile hooks as the base
-            let profile = super::config::resolve_default_profile();
-            let mut resolved_on_launch = super::profile_config::resolve_config(&profile)
-                .map(|c| c.hooks.on_launch)
-                .unwrap_or_default();
-
-            // Check if repo has trusted hooks that override
-            match super::repo_config::check_hook_trust(Path::new(&self.project_path)) {
-                Ok(super::repo_config::HookTrustStatus::Trusted(hooks))
-                    if !hooks.on_launch.is_empty() =>
-                {
-                    resolved_on_launch = hooks.on_launch.clone();
-                }
-                _ => {}
-            }
-
-            if resolved_on_launch.is_empty() {
-                None
-            } else {
-                Some(resolved_on_launch)
-            }
+            self.resolve_on_launch_hooks()
         };
 
         // Install status-detection hooks for agents that support them
@@ -253,30 +233,45 @@ impl Instance {
             }
         }
 
-        let cmd = if self.is_sandboxed() {
-            let container = self.get_container_for_instance()?;
-            // Run on_launch hooks inside the container
+        // Ensure container is running for sandboxed sessions, then execute hooks
+        if self.is_sandboxed() {
+            self.get_container_for_instance()?;
             if let Some(ref hook_cmds) = on_launch_hooks {
-                if let Some(ref sandbox) = self.sandbox_info {
-                    let workdir = self.container_workdir();
-                    if let Err(e) = super::repo_config::execute_hooks_in_container(
-                        hook_cmds,
-                        &sandbox.container_name,
-                        &workdir,
-                    ) {
-                        tracing::warn!("on_launch hook failed in container: {}", e);
-                    }
-                }
+                self.execute_on_launch_hooks(hook_cmds);
             }
+        } else if let Some(ref hook_cmds) = on_launch_hooks {
+            self.execute_on_launch_hooks(hook_cmds);
+        }
 
-            let sandbox = self.sandbox_info.as_ref().unwrap();
+        let cmd = self.build_agent_command();
+        tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
+        session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
+
+        // Apply all configured tmux options (status bar, mouse, etc.)
+        self.apply_tmux_options();
+
+        self.status = Status::Starting;
+        self.last_start_time = Some(std::time::Instant::now());
+
+        Ok(())
+    }
+
+    /// Build the agent launch command string. Pure command construction with no
+    /// side effects (no hooks, no container lifecycle management).
+    pub fn build_agent_command(&self) -> Option<String> {
+        let agent = crate::agents::get_agent(&self.tool);
+
+        if self.is_sandboxed() {
+            let sandbox = self.sandbox_info.as_ref()?;
+            let container = DockerContainer::from_session_id(&self.id);
+
             let base_cmd = if self.extra_args.is_empty() {
                 self.get_tool_command().to_string()
             } else {
                 format!("{} {}", self.get_tool_command(), self.extra_args)
             };
             let mut tool_cmd = if self.is_yolo_mode() {
-                if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
+                if let Some(yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
                         crate::agents::YoloMode::CliFlag(flag) => {
                             format!("{} {}", base_cmd, flag)
@@ -300,23 +295,12 @@ impl Instance {
             }
 
             let mut env_args = build_docker_env_args(sandbox);
-            // Pass AOE_INSTANCE_ID into the container
             env_args = format!("{} -e AOE_INSTANCE_ID={}", env_args, self.id);
             let env_part = format!("{} ", env_args);
             Some(wrap_command_ignore_suspend(
                 &container.exec_command(Some(&env_part), &tool_cmd),
             ))
         } else {
-            // Run on_launch hooks on host for non-sandboxed sessions
-            if let Some(ref hook_cmds) = on_launch_hooks {
-                if let Err(e) =
-                    super::repo_config::execute_hooks(hook_cmds, Path::new(&self.project_path))
-                {
-                    tracing::warn!("on_launch hook failed: {}", e);
-                }
-            }
-
-            // Track whether this agent supports hooks (needs AOE_INSTANCE_ID)
             let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
 
             if self.command.is_empty() {
@@ -369,12 +353,69 @@ impl Instance {
                 }
                 Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
             }
-        };
+        }
+    }
 
-        tracing::debug!("container cmd: {}", cmd.as_ref().map_or("none", |v| v));
-        session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
+    fn resolve_on_launch_hooks(&self) -> Option<Vec<String>> {
+        let profile = super::config::resolve_default_profile();
+        let mut resolved = super::profile_config::resolve_config(&profile)
+            .map(|c| c.hooks.on_launch)
+            .unwrap_or_default();
 
-        // Apply all configured tmux options (status bar, mouse, etc.)
+        match super::repo_config::check_hook_trust(Path::new(&self.project_path)) {
+            Ok(super::repo_config::HookTrustStatus::Trusted(hooks))
+                if !hooks.on_launch.is_empty() =>
+            {
+                resolved = hooks.on_launch.clone();
+            }
+            _ => {}
+        }
+
+        if resolved.is_empty() {
+            None
+        } else {
+            Some(resolved)
+        }
+    }
+
+    fn execute_on_launch_hooks(&self, hook_cmds: &[String]) {
+        if self.is_sandboxed() {
+            if let Some(ref sandbox) = self.sandbox_info {
+                let workdir = self.container_workdir();
+                if let Err(e) = super::repo_config::execute_hooks_in_container(
+                    hook_cmds,
+                    &sandbox.container_name,
+                    &workdir,
+                ) {
+                    tracing::warn!("on_launch hook failed in container: {}", e);
+                }
+            }
+        } else if let Err(e) =
+            super::repo_config::execute_hooks(hook_cmds, Path::new(&self.project_path))
+        {
+            tracing::warn!("on_launch hook failed: {}", e);
+        }
+    }
+
+    /// Respawn only the agent pane, preserving the tmux session layout.
+    /// Runs on-launch hooks, rebuilds the agent command, and respawns the pane.
+    pub fn respawn_agent_pane(&mut self) -> Result<()> {
+        let session = self.tmux_session()?;
+        if !session.exists() {
+            anyhow::bail!("Session does not exist");
+        }
+
+        if let Some(ref hook_cmds) = self.resolve_on_launch_hooks() {
+            self.execute_on_launch_hooks(hook_cmds);
+        }
+
+        let cmd = self
+            .build_agent_command()
+            .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
+
+        session.kill_agent_pane_process_tree();
+        session.respawn_agent_pane(&cmd, &self.project_path)?;
+
         self.apply_tmux_options();
 
         self.status = Status::Starting;

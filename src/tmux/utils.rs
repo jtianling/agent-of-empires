@@ -536,7 +536,9 @@ pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
 
     let value = String::from_utf8(output.stdout).ok()?;
     let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.contains('#') {
+        // Discard unexpanded format specifiers (e.g. "#{pane_id}") from sessions
+        // created before the -F flag fix
         None
     } else {
         Some(trimmed.to_string())
@@ -544,9 +546,11 @@ pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
 }
 
 pub fn append_store_pane_id_args(args: &mut Vec<String>, target: &str) {
+    // -F enables format expansion so #{pane_id} resolves to the actual pane ID (e.g. %42)
     args.extend([
         ";".to_string(),
         "set-option".to_string(),
+        "-F".to_string(),
         "-t".to_string(),
         target.to_string(),
         "@aoe_agent_pane".to_string(),

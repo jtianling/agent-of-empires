@@ -548,6 +548,16 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('R') => {
+                if let Some(id) = &self.selected_session {
+                    if let Some(inst) = self.get_instance(id) {
+                        if inst.status == Status::Deleting {
+                            return None;
+                        }
+                    }
+                    return Some(Action::RespawnAgentPane(id.to_string()));
+                }
+            }
             KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
