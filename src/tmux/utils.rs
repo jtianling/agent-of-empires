@@ -288,6 +288,20 @@ pub fn setup_session_cycle_bindings(profile: &str) {
             .output()
             .ok();
     }
+    // Ctrl+q in root table: detach if in aoe_* session, pass through otherwise.
+    // In nested mode, apply_managed_session_bindings() overwrites this with the
+    // more sophisticated switch-client command.
+    Command::new("tmux")
+        .args([
+            "bind-key",
+            "-T",
+            "root",
+            "C-q",
+            "run-shell",
+            "session=\"#{session_name}\"; case \"$session\" in aoe_*) tmux detach-client ;; *) tmux send-keys C-q ;; esac",
+        ])
+        .output()
+        .ok();
 }
 
 fn tag_sessions_with_profile(profile: &str) {
