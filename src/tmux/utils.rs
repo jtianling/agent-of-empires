@@ -53,6 +53,10 @@ pub fn cleanup_nested_detach_binding() {
         .args(["bind-key", "d", "detach-client"])
         .output()
         .ok();
+    Command::new("tmux")
+        .args(["unbind-key", "-T", "root", "C-q"])
+        .output()
+        .ok();
     cleanup_session_cycle_bindings();
 }
 
@@ -127,7 +131,28 @@ fn apply_managed_session_bindings(client_name: Option<&str>) {
         .args(["bind-key", "p", "run-shell", &prev_cmd])
         .output()
         .ok();
+    // Ctrl+q in root table: detach if in aoe_* session, otherwise pass through.
+    let root_ctrl_q_cmd = root_ctrl_q_run_shell_cmd();
+    Command::new("tmux")
+        .args([
+            "bind-key",
+            "-T",
+            "root",
+            "C-q",
+            "run-shell",
+            &root_ctrl_q_cmd,
+        ])
+        .output()
+        .ok();
     let _ = client_name;
+}
+
+fn root_ctrl_q_run_shell_cmd() -> String {
+    let detach = detach_run_shell_cmd();
+    format!(
+        "session=\"#{{session_name}}\"; case \"$session\" in aoe_*) {} ;; *) tmux send-keys C-q ;; esac",
+        detach
+    )
 }
 
 pub fn refresh_bindings(client_name: Option<&str>) -> anyhow::Result<()> {
@@ -142,6 +167,10 @@ pub fn refresh_bindings(client_name: Option<&str>) -> anyhow::Result<()> {
     } else {
         Command::new("tmux")
             .args(["bind-key", "d", "detach-client"])
+            .output()
+            .ok();
+        Command::new("tmux")
+            .args(["unbind-key", "-T", "root", "C-q"])
             .output()
             .ok();
         cleanup_session_cycle_bindings();
@@ -281,6 +310,10 @@ pub fn cleanup_session_cycle_bindings() {
     for key in ["n", "p", "h", "j", "k", "l"] {
         Command::new("tmux").args(["unbind-key", key]).output().ok();
     }
+    Command::new("tmux")
+        .args(["unbind-key", "-T", "root", "C-q"])
+        .output()
+        .ok();
 }
 
 fn shell_escape(s: &str) -> String {
@@ -782,6 +815,14 @@ mod tests {
         assert!(cmd.contains(
             "switch-client -c \"$client_name\" -l 2>/dev/null || tmux detach-client -t \"$client_name\""
         ));
+    }
+
+    #[test]
+    fn test_root_ctrl_q_cmd_guards_on_session_name() {
+        let cmd = root_ctrl_q_run_shell_cmd();
+        assert!(cmd.contains("case \"$session\" in aoe_*)"));
+        assert!(cmd.contains("send-keys C-q"));
+        assert!(cmd.contains("@aoe_return_session_${client_key}"));
     }
 
     #[test]

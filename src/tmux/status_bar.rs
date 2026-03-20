@@ -73,9 +73,9 @@ pub fn apply_status_bar(
     set_session_option(
         session_name,
         "status-left",
-        " #[fg=colour46,bold]#S#[fg=colour252,nobold] │ #[fg=colour245]Ctrl+b d#[fg=colour240] detach #[fg=colour245]Ctrl+b n/p#[fg=colour240] switch ",
+        " #[fg=colour46,bold]#S#[fg=colour252,nobold] │ #[fg=colour245]Ctrl+q#[fg=colour240]/#[fg=colour245]Ctrl+b d#[fg=colour240] detach #[fg=colour245]Ctrl+b n/p#[fg=colour240] switch ",
     )?;
-    set_session_option(session_name, "status-left-length", "70")?;
+    set_session_option(session_name, "status-left-length", "80")?;
 
     Ok(())
 }
