@@ -12,6 +12,8 @@ const CODEX_TITLE_MONITOR_PID_OPTION: &str = "@aoe_codex_title_monitor_pid";
 const CODEX_TITLE_MONITOR_TITLE_OPTION: &str = "@aoe_codex_title_monitor_title";
 const CODEX_TITLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_WAITING_TITLE_PREFIX: &str = "\u{270b} ";
+const STATUS_LEFT_FORMAT: &str =
+    " #[fg=colour46,bold]#S#[fg=colour252,nobold] │ #[fg=colour245]Ctrl+q#[fg=colour240]/#[fg=colour245]Ctrl+b d#[fg=colour240] detach #[fg=colour245]Ctrl+b 1-9 space#[fg=colour240] jump ";
 
 /// Information about a sandboxed session for status bar display.
 pub struct SandboxDisplay {
@@ -70,11 +72,7 @@ pub fn apply_status_bar(
 
     // Dark background with light text - matches aoe phosphor theme
     set_session_option(session_name, "status-style", "bg=colour235,fg=colour252")?;
-    set_session_option(
-        session_name,
-        "status-left",
-        " #[fg=colour46,bold]#S#[fg=colour252,nobold] │ #[fg=colour245]Ctrl+q#[fg=colour240]/#[fg=colour245]Ctrl+b d#[fg=colour240] detach #[fg=colour245]Ctrl+b n/p#[fg=colour240] switch #[fg=colour245]Ctrl+b 1-9#[fg=colour240] jump ",
-    )?;
+    set_session_option(session_name, "status-left", STATUS_LEFT_FORMAT)?;
     set_session_option(session_name, "status-left-length", "80")?;
 
     Ok(())
@@ -405,5 +403,11 @@ mod tests {
         // so get_status_for_current_session should also return None
         // This test just verifies the function doesn't panic
         let _ = get_status_for_current_session();
+    }
+
+    #[test]
+    fn test_status_left_format_matches_documented_key_hints() {
+        assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b 1-9 space"));
+        assert!(!STATUS_LEFT_FORMAT.contains("Ctrl+b n/p"));
     }
 }

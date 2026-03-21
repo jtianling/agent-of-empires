@@ -37,6 +37,8 @@ pub struct SwitchSessionArgs {
     direction: Option<String>,
     #[arg(long, conflicts_with = "direction")]
     index: Option<usize>,
+    #[arg(long, conflicts_with = "index")]
+    global: bool,
     #[arg(long, default_value = "default")]
     profile: String,
     #[arg(long)]
@@ -104,6 +106,7 @@ pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
     } else {
         crate::tmux::utils::switch_aoe_session(
             args.direction.as_deref().unwrap_or("next"),
+            args.global,
             &args.profile,
             args.client_name.as_deref(),
         )

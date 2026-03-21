@@ -492,6 +492,25 @@ fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_targ
     assert_ne!(h.current_client_session(), blog_writer);
     assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
 
+    let switch_global = h.run_cli_in_tmux(&[
+        "tmux",
+        "switch-session",
+        "--direction",
+        "next",
+        "--global",
+        "--profile",
+        "default",
+        "--client-name",
+        &client_name,
+    ]);
+    assert!(
+        switch_global.status.success(),
+        "aoe tmux switch-session --global failed: {}",
+        String::from_utf8_lossy(&switch_global.stderr)
+    );
+    h.wait_for_client_session(&client_name, &blog_writer);
+    assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
+
     let detach_cmd = concat!(
         "client_name=\"$(tmux display-message -p '#{client_name}')\"; ",
         "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",

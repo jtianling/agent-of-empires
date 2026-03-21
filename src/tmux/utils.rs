@@ -31,7 +31,7 @@ pub fn setup_nested_detach_binding(
 
     let aoe_bin = shell_escape(&aoe_bin_path());
     let hook_cmd = format!(
-        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l ; unbind-key 1 ; unbind-key 2 ; unbind-key 3 ; unbind-key 4 ; unbind-key 5 ; unbind-key 6 ; unbind-key 7 ; unbind-key 8 ; unbind-key 9""##,
+        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p ; unbind-key N ; unbind-key P ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l ; unbind-key 1 ; unbind-key 2 ; unbind-key 3 ; unbind-key 4 ; unbind-key 5 ; unbind-key 6 ; unbind-key 7 ; unbind-key 8 ; unbind-key 9""##,
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
@@ -68,14 +68,23 @@ fn aoe_bin_path() -> String {
 }
 
 fn session_cycle_run_shell_cmds(profile: &str) -> (String, String) {
+    session_cycle_run_shell_cmds_with_scope(profile, false)
+}
+
+fn session_cycle_global_run_shell_cmds(profile: &str) -> (String, String) {
+    session_cycle_run_shell_cmds_with_scope(profile, true)
+}
+
+fn session_cycle_run_shell_cmds_with_scope(profile: &str, global: bool) -> (String, String) {
     let aoe_bin = aoe_bin_path();
     let escaped = shell_escape(&aoe_bin);
     let escaped_profile = shell_escape(profile);
+    let global_flag = if global { " --global" } else { "" };
     let next = format!(
-        "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction next --profile {escaped_profile} --client-name \"$client_name\""
+        "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction next{global_flag} --profile {escaped_profile} --client-name \"$client_name\""
     );
     let prev = format!(
-        "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction prev --profile {escaped_profile} --client-name \"$client_name\""
+        "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction prev{global_flag} --profile {escaped_profile} --client-name \"$client_name\""
     );
     (next, prev)
 }
@@ -123,27 +132,31 @@ fn detach_run_shell_cmd() -> String {
     )
 }
 
-fn cycle_run_shell_cmd(direction: &str) -> String {
+fn cycle_run_shell_cmd(direction: &str, global: bool) -> String {
     let aoe_bin = shell_escape(&aoe_bin_path());
+    let global_flag = if global { " --global" } else { "" };
     format!(
         concat!(
             "client_name=\"#{{client_name}}\"; ",
             "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
             "profile=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
             "if [ -n \"$profile\" ]; then ",
-            "{} tmux switch-session --direction {} --profile \"$profile\" --client-name \"$client_name\"; ",
+            "{} tmux switch-session --direction {}{} --profile \"$profile\" --client-name \"$client_name\"; ",
             "fi"
         ),
         AOE_ORIGIN_PROFILE_OPTION_PREFIX,
         aoe_bin,
-        direction
+        direction,
+        global_flag
     )
 }
 
 fn apply_managed_session_bindings(client_name: Option<&str>) {
     let detach_cmd = detach_run_shell_cmd();
-    let next_cmd = cycle_run_shell_cmd("next");
-    let prev_cmd = cycle_run_shell_cmd("prev");
+    let next_cmd = cycle_run_shell_cmd("next", false);
+    let prev_cmd = cycle_run_shell_cmd("prev", false);
+    let global_next_cmd = cycle_run_shell_cmd("next", true);
+    let global_prev_cmd = cycle_run_shell_cmd("prev", true);
     Command::new("tmux")
         .args(["bind-key", "d", "run-shell", &detach_cmd])
         .output()
@@ -154,6 +167,14 @@ fn apply_managed_session_bindings(client_name: Option<&str>) {
         .ok();
     Command::new("tmux")
         .args(["bind-key", "p", "run-shell", &prev_cmd])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "N", "run-shell", &global_next_cmd])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "P", "run-shell", &global_prev_cmd])
         .output()
         .ok();
     // Ctrl+q in root table: detach if in aoe_* session, otherwise pass through.
@@ -345,12 +366,21 @@ pub fn setup_session_cycle_bindings(profile: &str) {
     tag_sessions_with_profile(profile);
 
     let (switch_next, switch_prev) = session_cycle_run_shell_cmds(profile);
+    let (switch_global_next, switch_global_prev) = session_cycle_global_run_shell_cmds(profile);
     Command::new("tmux")
         .args(["bind-key", "n", "run-shell", &switch_next])
         .output()
         .ok();
     Command::new("tmux")
         .args(["bind-key", "p", "run-shell", &switch_prev])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "N", "run-shell", &switch_global_next])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "P", "run-shell", &switch_global_prev])
         .output()
         .ok();
     for (key, dir) in [("h", "-L"), ("j", "-D"), ("k", "-U"), ("l", "-R")] {
@@ -444,7 +474,7 @@ fn tag_sessions_with_profile(profile: &str) {
 }
 
 pub fn cleanup_session_cycle_bindings() {
-    for key in ["n", "p", "h", "j", "k", "l"] {
+    for key in ["n", "p", "N", "P", "h", "j", "k", "l"] {
         Command::new("tmux").args(["unbind-key", key]).output().ok();
     }
     Command::new("tmux")
@@ -485,6 +515,7 @@ fn shell_escape(s: &str) -> String {
 
 pub fn switch_aoe_session(
     direction: &str,
+    global: bool,
     profile: &str,
     client_name: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -493,12 +524,11 @@ pub fn switch_aoe_session(
     let Some(current) = current_tmux_session_name(client_name)? else {
         return Ok(());
     };
-    let sessions = ordered_profile_sessions_for_cycle(
-        &instances,
-        &groups,
-        current_home_sort_order(),
-        &current,
-    );
+    let sessions = if global {
+        ordered_global_profile_sessions_for_cycle(&instances, &groups, current_home_sort_order())
+    } else {
+        ordered_profile_sessions_for_cycle(&instances, &groups, current_home_sort_order(), &current)
+    };
 
     if sessions.len() <= 1 {
         return Ok(());
@@ -536,6 +566,30 @@ fn ordered_profile_sessions_for_cycle(
     ordered_scoped_profile_session_names(instances, groups, sort_order, current)
         .into_iter()
         .filter(|name| tmux_session_exists(name))
+        .collect()
+}
+
+fn ordered_global_profile_sessions_for_cycle(
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+) -> Vec<String> {
+    let expanded_groups = expanded_groups(groups);
+    ordered_profile_session_names(instances, &expanded_groups, sort_order)
+        .into_iter()
+        .filter(|name| tmux_session_exists(name))
+        .collect()
+}
+
+fn expanded_groups(groups: &[Group]) -> Vec<Group> {
+    groups
+        .iter()
+        .cloned()
+        .map(|mut group| {
+            group.collapsed = false;
+            group.children.clear();
+            group
+        })
         .collect()
 }
 
@@ -1016,12 +1070,28 @@ mod tests {
 
     #[test]
     fn test_cycle_run_shell_cmd_uses_saved_profile() {
-        let cmd = cycle_run_shell_cmd("next");
+        let cmd = cycle_run_shell_cmd("next", false);
         assert!(cmd.contains("@aoe_origin_profile_${client_key}"));
         assert!(cmd.contains("tmux show-option -gv"));
         assert!(cmd.contains(
             "tmux switch-session --direction next --profile \"$profile\" --client-name \"$client_name\""
         ));
+    }
+
+    #[test]
+    fn test_cycle_run_shell_cmd_adds_global_flag_when_requested() {
+        let cmd = cycle_run_shell_cmd("prev", true);
+        assert!(cmd.contains("@aoe_origin_profile_${client_key}"));
+        assert!(cmd.contains(
+            "tmux switch-session --direction prev --global --profile \"$profile\" --client-name \"$client_name\""
+        ));
+    }
+
+    #[test]
+    fn test_session_cycle_global_run_shell_cmds_include_global_flag() {
+        let (next, prev) = session_cycle_global_run_shell_cmds("default");
+        assert!(next.contains("--direction next --global"));
+        assert!(prev.contains("--direction prev --global"));
     }
 
     #[test]
@@ -1095,6 +1165,33 @@ mod tests {
                 &visible.id,
                 &visible.title
             )]
+        );
+    }
+
+    #[test]
+    fn test_ordered_global_profile_sessions_for_cycle_ignores_collapsed_groups() {
+        let now = Utc::now();
+        let visible = instance_with_created_at("Visible", "/tmp/v", now);
+        let mut hidden = instance_with_created_at("Hidden", "/tmp/h", now + Duration::seconds(1));
+        hidden.group_path = "work".to_string();
+        let instances = vec![visible.clone(), hidden.clone()];
+        let groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: true,
+            default_directory: None,
+            children: Vec::new(),
+        }];
+
+        let sessions =
+            ordered_profile_session_names(&instances, &expanded_groups(&groups), SortOrder::Newest);
+
+        assert_eq!(
+            sessions,
+            vec![
+                crate::tmux::Session::generate_name(&visible.id, &visible.title),
+                crate::tmux::Session::generate_name(&hidden.id, &hidden.title),
+            ]
         );
     }
 
