@@ -31,7 +31,7 @@ pub fn setup_nested_detach_binding(
 
     let aoe_bin = shell_escape(&aoe_bin_path());
     let hook_cmd = format!(
-        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l""##,
+        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l ; unbind-key 1 ; unbind-key 2 ; unbind-key 3 ; unbind-key 4 ; unbind-key 5 ; unbind-key 6 ; unbind-key 7 ; unbind-key 8 ; unbind-key 9""##,
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
@@ -78,6 +78,31 @@ fn session_cycle_run_shell_cmds(profile: &str) -> (String, String) {
         "client_name=\"#{{client_name}}\"; {escaped} tmux switch-session --direction prev --profile {escaped_profile} --client-name \"$client_name\""
     );
     (next, prev)
+}
+
+fn index_jump_run_shell_cmd(index: usize, profile: &str) -> String {
+    let aoe_bin = shell_escape(&aoe_bin_path());
+    let escaped_profile = shell_escape(profile);
+    format!(
+        "client_name=\"#{{client_name}}\"; {aoe_bin} tmux switch-session --index {index} --profile {escaped_profile} --client-name \"$client_name\""
+    )
+}
+
+fn index_jump_run_shell_cmd_from_option(index: usize) -> String {
+    let aoe_bin = shell_escape(&aoe_bin_path());
+    format!(
+        concat!(
+            "client_name=\"#{{client_name}}\"; ",
+            "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
+            "profile=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
+            "if [ -n \"$profile\" ]; then ",
+            "{} tmux switch-session --index {} --profile \"$profile\" --client-name \"$client_name\"; ",
+            "fi"
+        ),
+        AOE_ORIGIN_PROFILE_OPTION_PREFIX,
+        aoe_bin,
+        index
+    )
 }
 
 fn detach_run_shell_cmd() -> String {
@@ -144,6 +169,52 @@ fn apply_managed_session_bindings(client_name: Option<&str>) {
         ])
         .output()
         .ok();
+
+    // Override number jump bindings with profile-from-option variants (nested mode)
+    for first_digit in 1..=9u8 {
+        let table_name = format!("aoe-{}", first_digit);
+
+        Command::new("tmux")
+            .args([
+                "bind-key",
+                &first_digit.to_string(),
+                "switch-client",
+                "-T",
+                &table_name,
+            ])
+            .output()
+            .ok();
+
+        let single_cmd = index_jump_run_shell_cmd_from_option(first_digit as usize);
+        Command::new("tmux")
+            .args([
+                "bind-key",
+                "-T",
+                &table_name,
+                "Space",
+                "run-shell",
+                &single_cmd,
+            ])
+            .output()
+            .ok();
+
+        for second_digit in 0..=9u8 {
+            let two_digit_index = (first_digit as usize) * 10 + (second_digit as usize);
+            let two_digit_cmd = index_jump_run_shell_cmd_from_option(two_digit_index);
+            Command::new("tmux")
+                .args([
+                    "bind-key",
+                    "-T",
+                    &table_name,
+                    &second_digit.to_string(),
+                    "run-shell",
+                    &two_digit_cmd,
+                ])
+                .output()
+                .ok();
+        }
+    }
+
     let _ = client_name;
 }
 
@@ -302,6 +373,58 @@ pub fn setup_session_cycle_bindings(profile: &str) {
         ])
         .output()
         .ok();
+
+    // Number jump: Ctrl+b 1-9 enters aoe-N key tables for two-phase digit input
+    setup_number_jump_bindings(profile);
+}
+
+fn setup_number_jump_bindings(profile: &str) {
+    for first_digit in 1..=9u8 {
+        let table_name = format!("aoe-{}", first_digit);
+
+        // Bind Ctrl+b <digit> -> switch to aoe-N key table
+        Command::new("tmux")
+            .args([
+                "bind-key",
+                &first_digit.to_string(),
+                "switch-client",
+                "-T",
+                &table_name,
+            ])
+            .output()
+            .ok();
+
+        // In aoe-N table: Space confirms single-digit jump
+        let single_cmd = index_jump_run_shell_cmd(first_digit as usize, profile);
+        Command::new("tmux")
+            .args([
+                "bind-key",
+                "-T",
+                &table_name,
+                "Space",
+                "run-shell",
+                &single_cmd,
+            ])
+            .output()
+            .ok();
+
+        // In aoe-N table: 0-9 auto-confirms two-digit jump
+        for second_digit in 0..=9u8 {
+            let two_digit_index = (first_digit as usize) * 10 + (second_digit as usize);
+            let two_digit_cmd = index_jump_run_shell_cmd(two_digit_index, profile);
+            Command::new("tmux")
+                .args([
+                    "bind-key",
+                    "-T",
+                    &table_name,
+                    &second_digit.to_string(),
+                    "run-shell",
+                    &two_digit_cmd,
+                ])
+                .output()
+                .ok();
+        }
+    }
 }
 
 fn tag_sessions_with_profile(profile: &str) {
@@ -328,6 +451,28 @@ pub fn cleanup_session_cycle_bindings() {
         .args(["unbind-key", "-T", "root", "C-q"])
         .output()
         .ok();
+    cleanup_number_jump_bindings();
+}
+
+fn cleanup_number_jump_bindings() {
+    for digit in 1..=9u8 {
+        Command::new("tmux")
+            .args(["unbind-key", &digit.to_string()])
+            .output()
+            .ok();
+
+        let table_name = format!("aoe-{}", digit);
+        Command::new("tmux")
+            .args(["unbind-key", "-T", &table_name, "Space"])
+            .output()
+            .ok();
+        for second in 0..=9u8 {
+            Command::new("tmux")
+                .args(["unbind-key", "-T", &table_name, &second.to_string()])
+                .output()
+                .ok();
+        }
+    }
 }
 
 fn shell_escape(s: &str) -> String {
@@ -506,6 +651,36 @@ fn resolve_cycle_target(sessions: &[String], current: &str, direction: &str) -> 
     };
 
     sessions.get(target_idx).cloned()
+}
+
+pub fn switch_aoe_session_by_index(
+    index: usize,
+    profile: &str,
+    client_name: Option<&str>,
+) -> anyhow::Result<()> {
+    if index == 0 {
+        return Ok(());
+    }
+
+    let storage = crate::session::Storage::new(profile)?;
+    let (instances, groups) = storage.load_with_groups()?;
+    let sessions = ordered_profile_session_names(&instances, &groups, current_home_sort_order());
+
+    let existing: Vec<String> = sessions
+        .into_iter()
+        .filter(|name| tmux_session_exists(name))
+        .collect();
+
+    let Some(target_session) = existing.get(index - 1) else {
+        return Ok(());
+    };
+
+    if let Some(client_name) = client_name {
+        set_last_detached_session_for_client(client_name, target_session);
+    }
+
+    switch_client_to_session(target_session, client_name)?;
+    Ok(())
 }
 
 fn tmux_session_exists(name: &str) -> bool {
@@ -1023,6 +1198,88 @@ mod tests {
             ordered_scoped_profile_session_names(&instances, &groups, SortOrder::AZ, &current);
 
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_index_resolution_returns_correct_session() {
+        let now = Utc::now();
+        let a = instance_with_created_at("Alpha", "/tmp/a", now);
+        let b = instance_with_created_at("Beta", "/tmp/b", now + Duration::seconds(1));
+        let c = instance_with_created_at("Charlie", "/tmp/c", now + Duration::seconds(2));
+        let instances = vec![a.clone(), b.clone(), c.clone()];
+        let groups = vec![];
+
+        let sessions = ordered_profile_session_names(&instances, &groups, SortOrder::AZ);
+
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(
+            sessions.first(),
+            Some(&crate::tmux::Session::generate_name(&a.id, &a.title))
+        );
+        assert_eq!(
+            sessions.get(1),
+            Some(&crate::tmux::Session::generate_name(&b.id, &b.title))
+        );
+        assert_eq!(
+            sessions.get(2),
+            Some(&crate::tmux::Session::generate_name(&c.id, &c.title))
+        );
+        // Out of range returns None
+        assert_eq!(sessions.get(3), None);
+    }
+
+    #[test]
+    fn test_index_resolution_zero_is_invalid() {
+        let sessions = vec!["aoe_a".to_string(), "aoe_b".to_string()];
+        // Index 0 should not match any session (1-based indexing)
+        assert_eq!(sessions.get(0_usize.wrapping_sub(1)), None);
+    }
+
+    #[test]
+    fn test_index_resolution_with_groups_skips_group_headers() {
+        let now = Utc::now();
+        let a = instance_with_created_at("Alpha", "/tmp/a", now);
+        let mut b = instance_with_created_at("Beta", "/tmp/b", now + Duration::seconds(1));
+        b.group_path = "work".to_string();
+        let mut c = instance_with_created_at("Charlie", "/tmp/c", now + Duration::seconds(2));
+        c.group_path = "work".to_string();
+        let instances = vec![a.clone(), b.clone(), c.clone()];
+        let groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: false,
+            default_directory: None,
+            children: Vec::new(),
+        }];
+
+        let sessions = ordered_profile_session_names(&instances, &groups, SortOrder::AZ);
+
+        // All 3 sessions should be present (groups are filtered out)
+        assert_eq!(sessions.len(), 3);
+        // Index 1 = Alpha (ungrouped, appears first in AZ)
+        assert_eq!(
+            sessions.first(),
+            Some(&crate::tmux::Session::generate_name(&a.id, &a.title))
+        );
+        // Index 2 = Beta (in work group)
+        assert_eq!(
+            sessions.get(1),
+            Some(&crate::tmux::Session::generate_name(&b.id, &b.title))
+        );
+    }
+
+    #[test]
+    fn test_index_jump_run_shell_cmd_contains_index() {
+        let cmd = index_jump_run_shell_cmd(5, "default");
+        assert!(cmd.contains("--index 5"));
+        assert!(cmd.contains("--profile"));
+    }
+
+    #[test]
+    fn test_index_jump_run_shell_cmd_from_option_contains_index() {
+        let cmd = index_jump_run_shell_cmd_from_option(13);
+        assert!(cmd.contains("--index 13"));
+        assert!(cmd.contains("@aoe_origin_profile_"));
     }
 
     #[test]

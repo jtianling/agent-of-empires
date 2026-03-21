@@ -33,8 +33,10 @@ pub struct CodexTitleMonitorArgs {
 
 #[derive(Args)]
 pub struct SwitchSessionArgs {
-    #[arg(long)]
-    direction: String,
+    #[arg(long, required_unless_present = "index")]
+    direction: Option<String>,
+    #[arg(long, conflicts_with = "direction")]
+    index: Option<usize>,
     #[arg(long, default_value = "default")]
     profile: String,
     #[arg(long)]
@@ -93,9 +95,17 @@ pub fn run_refresh_bindings(args: RefreshBindingsArgs) -> Result<()> {
 }
 
 pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
-    crate::tmux::utils::switch_aoe_session(
-        &args.direction,
-        &args.profile,
-        args.client_name.as_deref(),
-    )
+    if let Some(index) = args.index {
+        crate::tmux::utils::switch_aoe_session_by_index(
+            index,
+            &args.profile,
+            args.client_name.as_deref(),
+        )
+    } else {
+        crate::tmux::utils::switch_aoe_session(
+            args.direction.as_deref().unwrap_or("next"),
+            &args.profile,
+            args.client_name.as_deref(),
+        )
+    }
 }

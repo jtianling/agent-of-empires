@@ -142,6 +142,19 @@ impl HomeView {
             return;
         }
 
+        // Build session index map: flat_items index -> 1-based session number
+        let mut session_index_map: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        let mut session_number = 1usize;
+        for (idx, item) in self.flat_items.iter().enumerate() {
+            if let Item::Session { .. } = item {
+                if session_number <= 99 {
+                    session_index_map.insert(idx, session_number);
+                    session_number += 1;
+                }
+            }
+        }
+
         let list_items: Vec<ListItem> = self
             .flat_items
             .iter()
@@ -150,7 +163,8 @@ impl HomeView {
                 let is_selected = idx == self.cursor;
                 let is_match =
                     !self.search_matches.is_empty() && self.search_matches.contains(&idx);
-                self.render_item(item, is_selected, is_match, theme)
+                let session_num = session_index_map.get(&idx).copied();
+                self.render_item(item, is_selected, is_match, session_num, theme)
             })
             .collect();
 
@@ -211,6 +225,7 @@ impl HomeView {
         item: &Item,
         is_selected: bool,
         is_match: bool,
+        session_num: Option<usize>,
         theme: &Theme,
     ) -> ListItem<'_> {
         let indent = get_indent(item.depth());
@@ -269,7 +284,13 @@ impl HomeView {
             }
         };
 
-        let mut line_spans = Vec::with_capacity(5);
+        let mut line_spans = Vec::with_capacity(6);
+        // Right-aligned 2-char numeric index prefix (blank for groups)
+        let num_prefix = match session_num {
+            Some(n) => format!("{:>2} ", n),
+            None => "   ".to_string(),
+        };
+        line_spans.push(Span::styled(num_prefix, Style::default().fg(theme.dimmed)));
         line_spans.push(Span::raw(indent));
         let icon_style = if is_match {
             Style::default().fg(theme.search)
@@ -419,6 +440,16 @@ impl HomeView {
             Span::styled(" q", key_style),
             Span::styled(" Quit", desc_style),
         ]);
+
+        if let Some(ref pending) = self.pending_jump {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(
+                    format!(" jump: {}_ ", pending.first_digit),
+                    Style::default().fg(theme.waiting).bold(),
+                ),
+            ]);
+        }
 
         let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.selection));
         frame.render_widget(status, area);

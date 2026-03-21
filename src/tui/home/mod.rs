@@ -76,6 +76,10 @@ pub(super) const ICON_DELETING: &str = "✗";
 pub(super) const ICON_COLLAPSED: &str = "▶";
 pub(super) const ICON_EXPANDED: &str = "▼";
 
+pub(super) struct PendingJump {
+    pub(super) first_digit: u8,
+}
+
 pub struct HomeView {
     pub(super) storage: Storage,
     pub(super) instances: Vec<Instance>,
@@ -110,6 +114,9 @@ pub struct HomeView {
     pub(super) pending_stop_session: Option<String>,
     /// Right pane tool to launch after next session attach (one-shot, consumed on use)
     pub(super) pending_right_pane_tool: Option<String>,
+
+    // Number jump
+    pub(super) pending_jump: Option<PendingJump>,
 
     // Search
     pub(super) search_active: bool,
@@ -230,6 +237,7 @@ impl HomeView {
             pending_attach_after_warning: None,
             pending_stop_session: None,
             pending_right_pane_tool: None,
+            pending_jump: None,
             search_active: false,
             search_query: Input::default(),
             search_matches: Vec::new(),

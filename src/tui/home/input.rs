@@ -376,6 +376,29 @@ impl HomeView {
             return None;
         }
 
+        // Clear pending jump if it somehow survived through a dialog cycle
+        if self.search_active {
+            self.pending_jump = None;
+        }
+
+        // Number jump: handle pending state or start new jump
+        if let Some(pending) = self.pending_jump.take() {
+            match key.code {
+                KeyCode::Char(c @ '0'..='9') => {
+                    let second = c as u8 - b'0';
+                    let target = (pending.first_digit as usize) * 10 + (second as usize);
+                    return self.execute_jump(target);
+                }
+                KeyCode::Char(' ') => {
+                    return self.execute_jump(pending.first_digit as usize);
+                }
+                _ => {
+                    // Cancel pending jump, don't consume the key
+                }
+            }
+            return None;
+        }
+
         // Normal mode keybindings
         match key.code {
             KeyCode::Esc => {
@@ -658,9 +681,38 @@ impl HomeView {
                     }
                 }
             }
+            // Start number jump on digit 1-9
+            KeyCode::Char(c @ '1'..='9') if key.modifiers == KeyModifiers::NONE => {
+                let digit = c as u8 - b'0';
+                self.pending_jump = Some(super::PendingJump { first_digit: digit });
+            }
             _ => {}
         }
 
+        None
+    }
+
+    fn execute_jump(&mut self, index: usize) -> Option<Action> {
+        let mut session_number = 0usize;
+        let mut found: Option<(usize, String)> = None;
+        for (idx, item) in self.flat_items.iter().enumerate() {
+            if let Item::Session { id, .. } = item {
+                session_number += 1;
+                if session_number == index {
+                    found = Some((idx, id.clone()));
+                    break;
+                }
+            }
+        }
+
+        let (cursor_idx, session_id) = found?;
+        self.cursor = cursor_idx;
+        self.update_selected();
+        if let Some(inst) = self.get_instance(&session_id) {
+            if inst.status != Status::Deleting {
+                return Some(Action::AttachSession(session_id));
+            }
+        }
         None
     }
 
