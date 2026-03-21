@@ -211,11 +211,17 @@ impl Session {
             return Ok(String::new());
         }
 
+        // Target the agent pane specifically (via @aoe_agent_pane) so that
+        // user-created panes (e.g. from Ctrl+B %) don't interfere with
+        // status detection. Falls back to the session name (active pane)
+        // when the option is not set.
+        let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
+
         let output = Command::new("tmux")
             .args([
                 "capture-pane",
                 "-t",
-                &self.name,
+                &target,
                 "-p",
                 "-S",
                 &format!("-{}", lines),

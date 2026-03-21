@@ -594,7 +594,13 @@ impl Instance {
             self.has_custom_command(),
             detected
         );
-        let is_shell_stale = || !self.expects_shell() && session.is_pane_running_shell();
+        // In multi-pane sessions, is_pane_running_shell may target a user-created
+        // shell pane (e.g. from Ctrl+B %) rather than the agent pane when
+        // @aoe_agent_pane is not set. Only treat a shell as stale for
+        // single-pane sessions where a shell unambiguously means the agent exited.
+        let is_single_pane = session.pane_count() <= 1;
+        let is_shell_stale =
+            || is_single_pane && !self.expects_shell() && session.is_pane_running_shell();
         self.status = match detected {
             Status::Idle if self.has_custom_command() => {
                 if session.is_pane_dead() || is_shell_stale() {

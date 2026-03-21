@@ -523,17 +523,24 @@ impl App {
 
         let tmux_session = instance.tmux_session()?;
 
-        // Skip restart check if the instance was just started/respawned (grace period
-        // prevents the brief bash wrapper phase from triggering is_pane_running_shell)
-        let needs_restart = instance.status != crate::session::Status::Starting
-            && (!tmux_session.exists()
+        // Determine whether the agent pane needs to be (re)started.
+        // Grace period: skip for freshly started/respawned instances (the brief
+        // bash wrapper phase would otherwise trigger is_pane_running_shell).
+        let is_starting = instance.status == crate::session::Status::Starting;
+        let session_exists = tmux_session.exists();
+        let multi_pane = session_exists && tmux_session.pane_count() > 1;
+
+        // For multi-pane sessions the is_pane_running_shell check is unreliable:
+        // user-created shell panes (Ctrl+B %) are legitimate and should not
+        // trigger a restart. Only restart when the agent pane itself is dead.
+        let needs_restart = !is_starting
+            && (!session_exists
                 || tmux_session.is_pane_dead()
-                || (!instance.expects_shell() && tmux_session.is_pane_running_shell()));
+                || (!multi_pane
+                    && !instance.expects_shell()
+                    && tmux_session.is_pane_running_shell()));
 
         if needs_restart {
-            let session_exists = tmux_session.exists();
-            let multi_pane = session_exists && tmux_session.pane_count() > 1;
-
             if multi_pane {
                 // Respawn only the agent pane, preserving user-created panes and layout
                 self.home
