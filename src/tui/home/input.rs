@@ -385,7 +385,7 @@ impl HomeView {
                     self.search_query = Input::default();
                 }
             }
-            KeyCode::Char('q') => return Some(Action::Quit),
+            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => return Some(Action::Quit),
             KeyCode::Char('?') => {
                 self.show_help = true;
             }

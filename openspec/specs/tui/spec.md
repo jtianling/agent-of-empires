@@ -54,7 +54,8 @@ operations available via CLI are also available in the TUI, plus additional view
 | `R` | Restart agent pane only |
 | `s` | Open settings |
 | `?` | Show help |
-| `q` / `Ctrl+c` | Quit |
+| `q` | Quit (only plain `q` with no modifiers; `Ctrl+Q` is ignored to prevent accidental quit after tmux detach) |
+| `Ctrl+c` | Quit |
 | `j` / `k` / arrows | Navigate sessions |
 | `g` | Create group |
 | `Tab` | Switch sort order |

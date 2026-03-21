@@ -79,7 +79,7 @@ impl SettingsView {
             }
 
             // Close from anywhere
-            (KeyCode::Char('q'), _) => {
+            (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 if self.has_changes {
                     SettingsAction::UnsavedChangesWarning
                 } else {
