@@ -407,6 +407,14 @@ fn set_global_option(option_key: &str, value: &str) {
         .ok();
 }
 
+fn unset_global_option(option_key: &str) {
+    Command::new("tmux")
+        .args(["set-option", "-gqu"])
+        .arg(option_key)
+        .output()
+        .ok();
+}
+
 fn get_global_option(option_key: &str) -> Option<String> {
     let output = Command::new("tmux")
         .args(["show-option", "-gv"])
@@ -450,7 +458,7 @@ fn get_tmux_session_option(session_name: &str, option: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn set_previous_session_for_client(client_name: &str, session_name: &str) {
+pub fn set_previous_session_for_client(client_name: &str, session_name: &str) {
     let option_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, client_name);
     set_global_option(&option_key, session_name);
 }
@@ -460,7 +468,16 @@ fn get_previous_session_for_client(client_name: &str) -> Option<String> {
     get_global_option(&option_key)
 }
 
-fn set_target_from_title(source_session: &str, target_session: &str) {
+pub fn clear_from_title(session_name: &str) {
+    unset_tmux_session_option(session_name, AOE_FROM_TITLE_OPTION);
+}
+
+pub fn clear_previous_session_for_client(client_name: &str) {
+    let option_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, client_name);
+    unset_global_option(&option_key);
+}
+
+pub fn set_target_from_title(source_session: &str, target_session: &str) {
     if let Some(source_title) = get_tmux_session_option(source_session, AOE_TITLE_OPTION) {
         set_tmux_session_option(target_session, AOE_FROM_TITLE_OPTION, &source_title);
     } else {
@@ -581,6 +598,18 @@ pub fn setup_session_cycle_bindings(profile: &str) {
             .output()
             .ok();
     }
+    Command::new("tmux")
+        .args([
+            "bind-key",
+            "-T",
+            "root",
+            "C-\\;",
+            "select-pane",
+            "-t",
+            ":.+",
+        ])
+        .output()
+        .ok();
     // Ctrl+q in root table: detach if in aoe_* session, pass through otherwise.
     // In nested mode, apply_managed_session_bindings() overwrites this with the
     // more sophisticated switch-client command.
@@ -669,10 +698,12 @@ pub fn cleanup_session_cycle_bindings() {
     for key in ["b", "n", "p", "N", "P", "h", "j", "k", "l"] {
         Command::new("tmux").args(["unbind-key", key]).output().ok();
     }
-    Command::new("tmux")
-        .args(["unbind-key", "-T", "root", "C-q"])
-        .output()
-        .ok();
+    for key in ["C-\\;", "C-q"] {
+        Command::new("tmux")
+            .args(["unbind-key", "-T", "root", key])
+            .output()
+            .ok();
+    }
     cleanup_number_jump_bindings();
 }
 
@@ -1738,6 +1769,62 @@ mod tests {
         kill_tmux_session(&alpha_session);
         kill_tmux_session(&beta_session);
         clear_global_option(&prev_key);
+    }
+
+    #[test]
+    #[serial]
+    fn test_clear_from_title_unsets_option() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        setup_test_home(&temp);
+
+        let session_name = format!("aoe_clear_from_title_{}", std::process::id());
+        create_tmux_session(&session_name);
+        set_tmux_session_option(&session_name, AOE_FROM_TITLE_OPTION, "Alpha");
+
+        assert_eq!(
+            get_tmux_session_option(&session_name, AOE_FROM_TITLE_OPTION),
+            Some("Alpha".to_string())
+        );
+
+        clear_from_title(&session_name);
+
+        assert_eq!(
+            get_tmux_session_option(&session_name, AOE_FROM_TITLE_OPTION),
+            None
+        );
+
+        kill_tmux_session(&session_name);
+    }
+
+    #[test]
+    #[serial]
+    fn test_clear_previous_session_for_client_unsets_option() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        setup_test_home(&temp);
+
+        let client_name = format!("/tmp/clear_prev_client_{}", std::process::id());
+        let option_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, &client_name);
+        set_global_option(&option_key, "aoe_target");
+
+        assert_eq!(
+            get_global_option(&option_key),
+            Some("aoe_target".to_string())
+        );
+
+        clear_previous_session_for_client(&client_name);
+
+        assert_eq!(get_global_option(&option_key), None);
+        clear_global_option(&option_key);
     }
 
     #[test]
