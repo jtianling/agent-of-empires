@@ -119,17 +119,21 @@ For sandboxed sessions, the command is wrapped in the container runtime's `exec`
 ## Requirements
 
 ### Requirement: Session attach configures tmux key bindings
-When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key
-bindings for navigation: `Ctrl+b d` for detach/return (nested mode only), `Ctrl+b n/p` for
-session cycling (all modes), and `Ctrl+b 1-9` for number jump via key tables (all modes). The
-`attach()` method accepts a `profile` parameter to scope session cycling and number jump to the
-current profile.
+When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key bindings for navigation: root-table `Ctrl+,` and `Ctrl+.` for session cycling, `Ctrl+b 1-9` for number jump via key tables, `Ctrl+b b` for back toggle, `Ctrl+b h/j/k/l` for pane navigation, and `Ctrl+;` for pane cycling. The `attach()` method accepts a `profile` parameter to scope session cycling and number jump to the current profile. The attach SHALL always use `attach-session` (never `switch-client`).
 
 #### Scenario: Agent session attach sets bindings
 - **WHEN** `Session::attach(profile)` is called
-- **THEN** session cycling bindings (`n`/`p`) are configured scoped to the given profile
+- **THEN** session cycling bindings (`Ctrl+,`/`Ctrl+.`) are configured scoped to the given profile
 - **AND** number jump bindings (`1`-`9` with `aoe-1` through `aoe-9` key tables) are configured
-- **AND** if TMUX env var is set and `switch-client` succeeds, the `d` binding is also configured
+- **AND** back toggle binding (`Ctrl+b b`) is configured
+- **AND** pane navigation bindings (`Ctrl+b h/j/k/l`) are configured
+- **AND** pane cycle binding (`Ctrl+;`) is configured
+- **AND** the system uses `attach-session` to attach the terminal
+
+#### Scenario: Attach always uses attach-session regardless of environment
+- **WHEN** `Session::attach(profile)` is called
+- **AND** the `TMUX` env var may or may not be set
+- **THEN** the system SHALL always use `tmux attach-session` (never `switch-client`)
 
 #### Scenario: Number jump bindings cleaned up on detach
 - **WHEN** `cleanup_session_cycle_bindings()` is called

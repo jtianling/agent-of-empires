@@ -102,20 +102,15 @@ E2E tests can produce asciinema recordings (`.cast`) and GIF files automatically
   - **macOS/Windows**: `~/.agent-of-empires/`
 - Keep user data out of commits. For repo-local experiments, use ignored paths like `./.agent-of-empires/`, `.env`, and `.mcp.json`.
 
-## Tmux Nested vs Non-Nested Environments
+## Tmux Keybinding Lifecycle
 
-AoE must support two distinct runtime modes for tmux integration, and bugs have repeatedly occurred from only handling one path:
-
-- **Nested mode** (`TMUX` env var is set): AoE is running inside an existing tmux session. Attach uses `switch-client`, and `setup_nested_detach_binding()` configures the custom `d` key and the `client-session-changed` hook.
-- **Non-nested mode** (`TMUX` env var is NOT set): AoE attaches via `attach-session`. Only `setup_session_cycle_bindings()` runs; nested detach hooks are not installed.
+AoE attaches to managed tmux sessions via `attach-session`. Keybindings are set up on attach and cleaned up on TUI exit.
 
 When adding or modifying tmux key bindings, session options, or attach behavior:
 
-1. **Always verify both paths.** Code in `apply_managed_session_bindings()` only runs in nested mode. Code in `setup_session_cycle_bindings()` runs in both modes. Choose the right location based on whether the feature should work everywhere or only when nested.
-2. **Test both modes manually** when feasible: start AoE from a bare terminal (non-nested) and from within an existing tmux session (nested).
-3. **Key binding lifecycle**: bindings set on attach must be cleaned up on exit (`cleanup_session_cycle_bindings`) and on session switch (the `client-session-changed` hook's non-managed branch).
-4. **New keybindings must work in BOTH modes.** This is a recurring source of bugs. When adding any new keybinding, always bind it in `setup_session_cycle_bindings()` first (which runs in both nested and non-nested modes). If nested mode needs different behavior, `apply_managed_session_bindings()` can overwrite it afterward. Never add a keybinding only in `apply_managed_session_bindings()` -- it will silently not work in non-nested mode while still appearing in the status bar.
-5. **Checklist for every keybinding change**: (a) binding added in `setup_session_cycle_bindings()`? (b) nested override in `apply_managed_session_bindings()` if needed? (c) cleanup in `cleanup_session_cycle_bindings()`? (d) cleanup in `cleanup_nested_detach_binding()`? (e) status bar hint matches actual availability? All five must be verified.
+1. **Key binding setup**: All keybindings are configured in `setup_session_cycle_bindings()` which runs before every `attach-session` call.
+2. **Key binding cleanup**: `cleanup_session_cycle_bindings()` runs on TUI exit to unbind all AoE-specific keys.
+3. **Checklist for every keybinding change**: (a) binding added in `setup_session_cycle_bindings()`? (b) cleanup in `cleanup_session_cycle_bindings()`? (c) status bar hint matches actual availability? All three must be verified.
 
 ## Terminal Title Handling
 

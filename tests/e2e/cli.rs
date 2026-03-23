@@ -25,6 +25,101 @@ fn client_context_option_key(prefix: &str, client_name: &str) -> String {
     format!("{prefix}{suffix}")
 }
 
+fn add_and_start_cycle_sessions(h: &TuiTestHarness) -> (String, String, String) {
+    let project = h.project_path();
+
+    for args in [
+        vec![
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            "Skills Manager Claude",
+            "--group",
+            "skills-manager",
+            "--cmd-override",
+            "sh",
+        ],
+        vec![
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            "Skills Manager Shell",
+            "--group",
+            "skills-manager",
+            "--cmd-override",
+            "sh",
+        ],
+        vec![
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            "Blog Writer",
+            "--group",
+            "blog-workspace",
+            "--cmd-override",
+            "sh",
+        ],
+    ] {
+        let output = h.run_cli(&args);
+        assert!(
+            output.status.success(),
+            "aoe add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for title in [
+        "Skills Manager Claude",
+        "Skills Manager Shell",
+        "Blog Writer",
+    ] {
+        let output = h.run_cli_in_tmux(&["session", "start", title]);
+        assert!(
+            output.status.success(),
+            "aoe session start failed for {}: {}",
+            title,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let sessions = read_sessions_json(h);
+    let lookup_tmux = |title: &str| {
+        let session = sessions
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .find(|session| session["title"].as_str() == Some(title))
+            .unwrap_or_else(|| panic!("missing session {}", title));
+        let id = session["id"].as_str().expect("session id");
+        agent_of_empires::tmux::Session::generate_name(id, title)
+    };
+
+    (
+        lookup_tmux("Skills Manager Claude"),
+        lookup_tmux("Skills Manager Shell"),
+        lookup_tmux("Blog Writer"),
+    )
+}
+
+fn wait_for_file_size(path: &std::path::Path, expected_len: u64) {
+    let start = std::time::Instant::now();
+    while start.elapsed() <= Duration::from_secs(5) {
+        if std::fs::metadata(path)
+            .map(|metadata| metadata.len() >= expected_len)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!(
+        "timed out waiting for {} to reach {} bytes",
+        path.display(),
+        expected_len
+    );
+}
+
 #[test]
 #[serial]
 fn test_cli_add_and_list() {
@@ -369,80 +464,11 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
 
 #[test]
 #[serial]
-fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_target() {
+fn test_hidden_switch_session_cycles_globally_and_preserves_return_target() {
     crate::harness::require_tmux!();
 
     let mut h = TuiTestHarness::new("cli_group_scoped_switch");
-    let project = h.project_path();
-
-    for args in [
-        vec![
-            "add",
-            project.to_str().unwrap(),
-            "-t",
-            "Skills Manager Claude",
-            "--group",
-            "skills-manager",
-            "--cmd-override",
-            "sh",
-        ],
-        vec![
-            "add",
-            project.to_str().unwrap(),
-            "-t",
-            "Skills Manager Shell",
-            "--group",
-            "skills-manager",
-            "--cmd-override",
-            "sh",
-        ],
-        vec![
-            "add",
-            project.to_str().unwrap(),
-            "-t",
-            "Blog Writer",
-            "--group",
-            "blog-workspace",
-            "--cmd-override",
-            "sh",
-        ],
-    ] {
-        let output = h.run_cli(&args);
-        assert!(
-            output.status.success(),
-            "aoe add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    for title in [
-        "Skills Manager Claude",
-        "Skills Manager Shell",
-        "Blog Writer",
-    ] {
-        let output = h.run_cli_in_tmux(&["session", "start", title]);
-        assert!(
-            output.status.success(),
-            "aoe session start failed for {}: {}",
-            title,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let sessions = read_sessions_json(&h);
-    let lookup_tmux = |title: &str| {
-        let session = sessions
-            .as_array()
-            .expect("sessions array")
-            .iter()
-            .find(|session| session["title"].as_str() == Some(title))
-            .unwrap_or_else(|| panic!("missing session {}", title));
-        let id = session["id"].as_str().expect("session id");
-        agent_of_empires::tmux::Session::generate_name(id, title)
-    };
-    let skills_claude = lookup_tmux("Skills Manager Claude");
-    let skills_shell = lookup_tmux("Skills Manager Shell");
-    let blog_writer = lookup_tmux("Blog Writer");
+    let (skills_claude, skills_shell, blog_writer) = add_and_start_cycle_sessions(&h);
 
     h.spawn_tui();
     h.attach_control_client();
@@ -470,7 +496,7 @@ fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_targ
         "aoe tmux switch-session failed: {}",
         String::from_utf8_lossy(&switch_next.stderr)
     );
-    h.wait_for_client_session(&client_name, &skills_shell);
+    h.wait_for_client_session(&client_name, &blog_writer);
     assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
 
     let switch_wrap = h.run_cli_in_tmux(&[
@@ -488,11 +514,28 @@ fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_targ
         "aoe tmux switch-session wrap failed: {}",
         String::from_utf8_lossy(&switch_wrap.stderr)
     );
-    h.wait_for_client_session(&client_name, &skills_claude);
-    assert_ne!(h.current_client_session(), blog_writer);
+    h.wait_for_client_session(&client_name, &skills_shell);
     assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
 
     let switch_global = h.run_cli_in_tmux(&[
+        "tmux",
+        "switch-session",
+        "--direction",
+        "next",
+        "--profile",
+        "default",
+        "--client-name",
+        &client_name,
+    ]);
+    assert!(
+        switch_global.status.success(),
+        "aoe tmux switch-session global cycle failed: {}",
+        String::from_utf8_lossy(&switch_global.stderr)
+    );
+    h.wait_for_client_session(&client_name, &skills_claude);
+    assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
+
+    let rejected_global = h.run_cli_in_tmux(&[
         "tmux",
         "switch-session",
         "--direction",
@@ -504,12 +547,15 @@ fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_targ
         &client_name,
     ]);
     assert!(
-        switch_global.status.success(),
-        "aoe tmux switch-session --global failed: {}",
-        String::from_utf8_lossy(&switch_global.stderr)
+        !rejected_global.status.success(),
+        "--global should be rejected once global cycling is the only mode"
     );
-    h.wait_for_client_session(&client_name, &blog_writer);
-    assert_eq!(h.tmux_show_global_option(&return_key), h.session_name());
+    let rejected_stderr = String::from_utf8_lossy(&rejected_global.stderr);
+    assert!(
+        rejected_stderr.contains("--global"),
+        "expected clap error to mention --global, got: {}",
+        rejected_stderr
+    );
 
     let detach_cmd = concat!(
         "client_name=\"$(tmux display-message -p '#{client_name}')\"; ",
@@ -525,4 +571,85 @@ fn test_hidden_switch_session_stays_within_group_scope_and_preserves_return_targ
     h.type_text_to_target(&skills_claude, detach_cmd);
     h.send_keys_to_target(&skills_claude, "Enter");
     h.wait_for_client_session(&client_name, h.session_name());
+}
+
+#[test]
+#[serial]
+fn test_root_cycle_bindings_work_after_attach_session_fallback() {
+    crate::harness::require_tmux!();
+
+    let h = TuiTestHarness::new("cli_root_cycle_attach_fallback");
+    let (skills_claude, skills_shell, blog_writer) = add_and_start_cycle_sessions(&h);
+    let fake_tmux_env = format!("{},999999,0", h.tmux_socket_path().display());
+
+    let mut attach = h.spawn_cli_attach_process("Skills Manager Claude", Some(&fake_tmux_env));
+    h.wait_for_client_count(1);
+
+    let client_name = h.tmux_single_client_name();
+    h.wait_for_client_session(&client_name, &skills_claude);
+
+    h.send_keys_to_client(&client_name, "C-.");
+    h.wait_for_client_session(&client_name, &blog_writer);
+
+    h.send_keys_to_client(&client_name, "C-b");
+    h.send_keys_to_client(&client_name, "b");
+    h.wait_for_client_session(&client_name, &skills_claude);
+
+    h.send_keys_to_client(&client_name, "C-,");
+    h.wait_for_client_session(&client_name, &skills_shell);
+
+    h.send_keys_to_client(&client_name, "C-b");
+    h.send_keys_to_client(&client_name, "b");
+    h.wait_for_client_session(&client_name, &skills_claude);
+
+    let passthrough_session = "plain_passthrough";
+    let passthrough_session_comma = "plain_passthrough_comma";
+    let ctrl_dot_file = h.home_path().join("ctrl-dot.bin");
+    let ctrl_comma_file = h.home_path().join("ctrl-comma.bin");
+    h.create_detached_shell_session(passthrough_session);
+    h.tmux_switch_client(&client_name, passthrough_session);
+    h.wait_for_client_session(&client_name, passthrough_session);
+    h.type_text_to_target(
+        passthrough_session,
+        &format!(
+            "stty raw -echo; dd bs=1 count=1 of={} 2>/dev/null; stty sane",
+            ctrl_dot_file.display()
+        ),
+    );
+    h.send_keys_to_target(passthrough_session, "Enter");
+    h.send_keys_to_client(&client_name, "C-.");
+    wait_for_file_size(&ctrl_dot_file, 1);
+    assert_eq!(
+        std::fs::metadata(&ctrl_dot_file)
+            .expect("ctrl-dot passthrough file metadata")
+            .len(),
+        1
+    );
+
+    h.create_detached_shell_session(passthrough_session_comma);
+    h.tmux_switch_client(&client_name, passthrough_session_comma);
+    h.wait_for_client_session(&client_name, passthrough_session_comma);
+    h.type_text_to_target(
+        passthrough_session_comma,
+        &format!(
+            "stty raw -echo; dd bs=1 count=1 of={} 2>/dev/null; stty sane",
+            ctrl_comma_file.display()
+        ),
+    );
+    h.send_keys_to_target(passthrough_session_comma, "Enter");
+    h.send_keys_to_client(&client_name, "C-,");
+    wait_for_file_size(&ctrl_comma_file, 1);
+    assert_eq!(
+        std::fs::metadata(&ctrl_comma_file)
+            .expect("ctrl-comma passthrough file metadata")
+            .len(),
+        1
+    );
+    assert_eq!(
+        h.tmux_client_session(&client_name),
+        passthrough_session_comma
+    );
+
+    let _ = attach.kill();
+    let _ = attach.wait();
 }

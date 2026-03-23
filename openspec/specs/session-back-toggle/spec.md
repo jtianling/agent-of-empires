@@ -46,15 +46,15 @@ When attached to an AoE-managed tmux session, pressing `Ctrl+b b` SHALL switch t
 - **THEN** no session switch SHALL occur
 
 ### Requirement: All jump types record previous session
-Every AoE session switch (group cycle n/p, global cycle N/P, number jump 1-9, and back toggle b) SHALL record the current session as the previous session before switching. This ensures Ctrl+b b always returns to wherever the user just came from, regardless of which navigation method was used.
+Every AoE session switch (`Ctrl+,`/`Ctrl+.`, number jump 1-9, and back toggle `Ctrl+b b`) SHALL record the current session as the previous session before switching. This ensures `Ctrl+b b` always returns to wherever the user just came from, regardless of which navigation method was used.
 
-#### Scenario: Previous session recorded on group cycle
-- **WHEN** the user is in session #3 and presses `Ctrl+b n` to cycle to session #4
+#### Scenario: Previous session recorded on reverse global cycle
+- **WHEN** the user is in session #3 and presses `Ctrl+,` to cycle to session #2
 - **AND** the user then presses `Ctrl+b b`
 - **THEN** the system SHALL switch to session #3
 
-#### Scenario: Previous session recorded on global cycle
-- **WHEN** the user is in session #3 and presses `Ctrl+b N` to cycle to session #8 in another group
+#### Scenario: Previous session recorded on forward global cycle
+- **WHEN** the user is in session #3 and presses `Ctrl+.` to cycle to session #4
 - **AND** the user then presses `Ctrl+b b`
 - **THEN** the system SHALL switch to session #3
 
@@ -64,22 +64,17 @@ Every AoE session switch (group cycle n/p, global cycle N/P, number jump 1-9, an
 - **THEN** the system SHALL switch to session #5
 
 ### Requirement: Back toggle keybinding lifecycle
-The `Ctrl+b b` binding SHALL follow the same lifecycle as existing navigation bindings (n/p/N/P):
-- Set up in `setup_session_cycle_bindings()` (works in both nested and non-nested modes)
-- Overridden in `apply_managed_session_bindings()` for nested mode with profile-from-option
-- Cleaned up in `cleanup_session_cycle_bindings()` and `cleanup_nested_detach_binding()`
+The `Ctrl+b b` binding SHALL follow a simplified lifecycle with only setup and cleanup:
+- Set up in `setup_session_cycle_bindings()` with the profile hardcoded in the shell command
+- Cleaned up in `cleanup_session_cycle_bindings()`
 
-#### Scenario: Binding set in non-nested mode
+#### Scenario: Binding set during session cycle setup
 - **WHEN** `setup_session_cycle_bindings()` is called with a profile
-- **THEN** key `b` SHALL be bound in the prefix table to execute the back-toggle command
+- **THEN** key `b` SHALL be bound in the prefix table to execute the back-toggle command with the profile hardcoded
 
 #### Scenario: Binding cleaned up on detach
 - **WHEN** `cleanup_session_cycle_bindings()` is called
 - **THEN** key `b` SHALL be unbound from the prefix table
-
-#### Scenario: Binding cleaned up in nested mode exit
-- **WHEN** `cleanup_nested_detach_binding()` is called
-- **THEN** key `b` SHALL be unbound
 
 ### Requirement: CLI switch-session supports --back parameter
 The `aoe tmux switch-session` command SHALL accept a `--back` flag that reads the stored previous session for the given client and switches to it. The `--back` flag conflicts with `--direction` and `--index`.
@@ -114,7 +109,7 @@ The status bar SHALL display the current session's 1-based index number (matchin
 - **THEN** the status bar SHALL show "3" as the index
 
 #### Scenario: Index set on every switch type
-- **WHEN** the user navigates to a session via any method (n/p, N/P, 1-9, b)
+- **WHEN** the user navigates to a session via any method (Ctrl+,/Ctrl+., 1-9, b)
 - **THEN** the target session's `@aoe_index` SHALL be updated to its current position in the ordered session list
 
 ### Requirement: Status bar layout
@@ -158,7 +153,7 @@ When the user enters a session from the AoE TUI (via the home screen), the syste
 
 #### Scenario: Subsequent tmux navigation records new previous session normally
 - **WHEN** the user enters Session B from the TUI with source Session A
-- **AND** the user then navigates Session B -> Session C via Ctrl+b n
+- **AND** the user then navigates Session B -> Session C via `Ctrl+.`
 - **THEN** pressing Ctrl+b b SHALL switch to Session B (newly recorded previous session)
 
 ### Requirement: TUI entry sets from-title from source context

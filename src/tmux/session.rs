@@ -135,63 +135,18 @@ impl Session {
     }
 
     pub fn attach(&self, profile: &str) -> Result<()> {
-        self.attach_with_client(profile, None)
-    }
-
-    pub fn attach_with_client(&self, profile: &str, caller_client: Option<&str>) -> Result<()> {
         if !self.exists() {
             bail!("Session does not exist: {}", self.name);
         }
 
         super::utils::setup_session_cycle_bindings(profile);
 
-        if std::env::var("TMUX").is_ok() {
-            let return_session = super::get_current_session_name();
-            let client_name = caller_client
-                .map(str::to_owned)
-                .or_else(super::get_current_client_name);
-            let mut switch_args = vec!["switch-client".to_string()];
-            if let Some(cn) = &client_name {
-                switch_args.extend(["-c".to_string(), cn.clone()]);
-            }
-            switch_args.extend(["-t".to_string(), self.name.clone()]);
-            let status = Command::new("tmux").args(&switch_args).status()?;
+        let status = Command::new("tmux")
+            .args(["attach-session", "-t", &self.name])
+            .status()?;
 
-            if status.success() {
-                super::utils::setup_nested_detach_binding(
-                    profile,
-                    return_session.as_deref(),
-                    client_name.as_deref(),
-                );
-            } else {
-                // Fall back to attach-session if switch-client fails.
-                // This handles cases where TMUX env var is inherited but we're
-                // not actually inside a tmux client (e.g., terminal spawned
-                // from within tmux via `open -a Terminal`).
-                let status = Command::new("tmux")
-                    .args(["attach-session", "-t", &self.name])
-                    .status()?;
-
-                if !status.success() {
-                    bail!("Failed to attach to tmux session");
-                }
-            }
-        } else {
-            // Restore d to detach-client before attaching. A previous nested
-            // AoE instance may have overridden it with the custom return
-            // command, which would prevent detach in non-nested mode.
-            Command::new("tmux")
-                .args(["bind-key", "d", "detach-client"])
-                .output()
-                .ok();
-
-            let status = Command::new("tmux")
-                .args(["attach-session", "-t", &self.name])
-                .status()?;
-
-            if !status.success() {
-                bail!("Failed to attach to tmux session");
-            }
+        if !status.success() {
+            bail!("Failed to attach to tmux session");
         }
 
         Ok(())

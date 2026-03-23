@@ -110,7 +110,7 @@ pub struct App {
     update_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<UpdateInfo>>>,
     launch_dir: PathBuf,
     session_before_tui: Option<String>,
-    pending_nested_detach_client: Option<String>,
+    last_attach_client: Option<String>,
     /// Last time a redraw was triggered by a tick event (to throttle animations)
     last_tick_redraw: std::time::Instant,
 }
@@ -172,7 +172,7 @@ impl App {
             update_rx: None,
             launch_dir,
             session_before_tui: None,
-            pending_nested_detach_client: None,
+            last_attach_client: None,
             last_tick_redraw: std::time::Instant::now(),
         })
     }
@@ -270,7 +270,7 @@ impl App {
                 refresh_needed = true;
             }
 
-            if self.restore_selection_after_nested_detach() {
+            if self.try_restore_selection_from_client_context() {
                 refresh_needed = true;
             }
 
@@ -628,17 +628,13 @@ impl App {
             self.home.take_pending_right_pane_tool();
         }
 
-        let attach_client_name = std::env::var("TMUX")
-            .ok()
-            .and_then(|_| crate::tmux::get_current_client_name())
-            .or_else(crate::tmux::get_tty_name);
+        let attach_client_name = crate::tmux::get_tty_name();
         if let Some(client_name) = &attach_client_name {
             let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
-            // This tracks the last managed session visited so home-screen
-            // selection can follow nested detach. The detach return target is
-            // seeded separately by the attach path in tmux utils.
+            // Track the last managed session visited so home-screen
+            // selection follows the user back after detach.
             crate::tmux::utils::set_last_detached_session_for_client(client_name, &session_name);
-            self.pending_nested_detach_client = Some(client_name.clone());
+            self.last_attach_client = Some(client_name.clone());
         }
 
         instance.refresh_agent_tmux_options();
@@ -667,10 +663,7 @@ impl App {
         );
 
         let profile = self.home.storage.profile().to_string();
-        let client_for_attach = attach_client_name.clone();
-        let attach_result = with_raw_mode_disabled(terminal, || {
-            tmux_session.attach_with_client(&profile, client_for_attach.as_deref())
-        })?;
+        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach(&profile))?;
         reapply_tui_title(terminal, self.home.storage.profile());
 
         self.needs_redraw = true;
@@ -687,12 +680,8 @@ impl App {
         Ok(())
     }
 
-    fn restore_selection_after_nested_detach(&mut self) -> bool {
-        self.try_restore_selection_from_client_context()
-    }
-
     fn try_restore_selection_from_client_context(&mut self) -> bool {
-        let Some(client_name) = self.pending_nested_detach_client.as_deref() else {
+        let Some(client_name) = self.last_attach_client.as_deref() else {
             return false;
         };
 

@@ -318,6 +318,91 @@ last_seen_version = "{}"
         panic!("Timed out waiting for control-mode tmux client to attach");
     }
 
+    pub fn attach_client_to_session(&self, target_session: &str) -> Child {
+        assert!(self.spawned, "must call spawn_tui() or spawn() first");
+
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("script");
+            command
+                .arg("-q")
+                .arg("/dev/null")
+                .arg("tmux")
+                .arg("-S")
+                .arg(&self.socket_path)
+                .arg("attach-session")
+                .arg("-t")
+                .arg(target_session);
+            command
+        } else {
+            let mut command = Command::new("script");
+            command
+                .arg("-q")
+                .arg("-c")
+                .arg(format!(
+                    "tmux -S '{}' attach-session -t '{}'",
+                    self.socket_path.display(),
+                    target_session
+                ))
+                .arg("/dev/null");
+            command
+        };
+
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to attach tmux client")
+    }
+
+    pub fn spawn_cli_attach_process(&self, identifier: &str, tmux_env: Option<&str>) -> Child {
+        self.ensure_tmux_server();
+
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("script");
+            command
+                .arg("-q")
+                .arg("/dev/null")
+                .arg(&self.binary_path)
+                .arg("session")
+                .arg("attach")
+                .arg(identifier);
+            command
+        } else {
+            let mut command = Command::new("script");
+            command
+                .arg("-q")
+                .arg("-c")
+                .arg(format!(
+                    "'{}' session attach '{}'",
+                    self.binary_path.display(),
+                    identifier
+                ))
+                .arg("/dev/null");
+            command
+        };
+
+        command
+            .env("HOME", self.home_dir.path())
+            .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
+            .env("PATH", self.env_path())
+            .env("TERM", "xterm-256color")
+            .env("AGENT_OF_EMPIRES_PROFILE", "default");
+
+        if let Some(tmux_env) = tmux_env {
+            command.env("TMUX", tmux_env);
+        } else {
+            command.env_remove("TMUX");
+        }
+
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn aoe session attach process")
+    }
+
     /// Send one or more tmux key names (e.g. "Enter", "Escape", "q", "C-c").
     pub fn send_keys(&self, keys: &str) {
         assert!(self.spawned, "must call spawn_tui() or spawn() first");
@@ -448,9 +533,31 @@ last_seen_version = "{}"
             .expect("failed to run aoe CLI inside tmux")
     }
 
+    pub fn run_cli_with_tmux_env(&self, tmux_env: &str, args: &[&str]) -> Output {
+        self.ensure_tmux_server();
+
+        Command::new(&self.binary_path)
+            .args(args)
+            .env("HOME", self.home_dir.path())
+            .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
+            .env("PATH", self.env_path())
+            .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX", tmux_env)
+            .output()
+            .expect("failed to run aoe CLI with custom TMUX env")
+    }
+
     /// Path to the isolated home directory for custom test setup.
     pub fn home_path(&self) -> &Path {
         self.home_dir.path()
+    }
+
+    pub fn binary_path(&self) -> &Path {
+        &self.binary_path
+    }
+
+    pub fn tmux_socket_path(&self) -> &Path {
+        &self.socket_path
     }
 
     /// Create and return a test project directory inside the temp home.
@@ -500,6 +607,17 @@ last_seen_version = "{}"
     }
 
     pub fn tmux_single_client_name(&self) -> String {
+        let clients = self.tmux_client_names();
+        assert_eq!(
+            clients.len(),
+            1,
+            "expected exactly one tmux client, got {:?}",
+            clients
+        );
+        clients[0].clone()
+    }
+
+    pub fn tmux_client_names(&self) -> Vec<String> {
         let output = self
             .tmux_command(&["list-clients", "-F", "#{client_name}"])
             .expect("failed to list tmux clients");
@@ -509,17 +627,27 @@ last_seen_version = "{}"
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let clients: Vec<_> = stdout
+        stdout
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .collect();
-        assert_eq!(
-            clients.len(),
-            1,
-            "expected exactly one tmux client, got {:?}",
-            clients
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn wait_for_client_count(&self, expected_count: usize) {
+        let start = Instant::now();
+        while start.elapsed() <= Duration::from_secs(10) {
+            if self.tmux_client_names().len() == expected_count {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!(
+            "Timed out waiting for {} tmux client(s); found {:?}",
+            expected_count,
+            self.tmux_client_names()
         );
-        clients[0].to_string()
     }
 
     pub fn tmux_client_session(&self, client_name: &str) -> String {
@@ -620,6 +748,18 @@ last_seen_version = "{}"
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    pub fn send_keys_to_client(&self, client_name: &str, keys: &str) {
+        let output = self
+            .tmux_command(&["send-keys", "-K", "-c", client_name, keys])
+            .expect("failed to send keys to client");
+        assert!(
+            output.status.success(),
+            "send-keys client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     pub fn type_text_to_target(&self, target: &str, text: &str) {
         let output = self
             .tmux_command(&["send-keys", "-t", target, "-l", text])
@@ -641,6 +781,23 @@ last_seen_version = "{}"
             "kill-session target failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    pub fn create_detached_shell_session(&self, session_name: &str) {
+        self.ensure_tmux_server();
+        let output = self
+            .tmux_command(&["new-session", "-d", "-s", session_name])
+            .expect("failed to create detached tmux session");
+        assert!(
+            output.status.success(),
+            "new-session failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    pub fn tmux_list_key(&self, table: &str, key: &str) -> Output {
+        self.tmux_command(&["list-keys", "-T", table, key])
+            .expect("failed to list tmux key binding")
     }
 
     /// Check whether the tmux session is still alive.

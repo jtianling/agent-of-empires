@@ -14,8 +14,6 @@ pub enum TmuxCommands {
     CodexTitleMonitor(CodexTitleMonitorArgs),
     #[command(hide = true, name = "switch-session")]
     SwitchSession(SwitchSessionArgs),
-    #[command(hide = true, name = "refresh-bindings")]
-    RefreshBindings(RefreshBindingsArgs),
 }
 
 #[derive(Args)]
@@ -35,20 +33,12 @@ pub struct CodexTitleMonitorArgs {
 pub struct SwitchSessionArgs {
     #[arg(long, required_unless_present_any = ["index", "back"])]
     direction: Option<String>,
-    #[arg(long, conflicts_with_all = ["direction", "back", "global"])]
+    #[arg(long, conflicts_with_all = ["direction", "back"])]
     index: Option<usize>,
-    #[arg(long, conflicts_with_all = ["index", "back"])]
-    global: bool,
-    #[arg(long, conflicts_with_all = ["direction", "index", "global"])]
+    #[arg(long, conflicts_with_all = ["direction", "index"])]
     back: bool,
     #[arg(long, default_value = "default")]
     profile: String,
-    #[arg(long)]
-    client_name: Option<String>,
-}
-
-#[derive(Args)]
-pub struct RefreshBindingsArgs {
     #[arg(long)]
     client_name: Option<String>,
 }
@@ -94,10 +84,6 @@ pub fn run_codex_title_monitor(args: CodexTitleMonitorArgs) -> Result<()> {
     crate::tmux::status_bar::run_codex_title_monitor(&args.session)
 }
 
-pub fn run_refresh_bindings(args: RefreshBindingsArgs) -> Result<()> {
-    crate::tmux::utils::refresh_bindings(args.client_name.as_deref())
-}
-
 pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
     if args.back {
         crate::tmux::utils::switch_aoe_session_back(&args.profile, args.client_name.as_deref())
@@ -110,7 +96,6 @@ pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
     } else {
         crate::tmux::utils::switch_aoe_session(
             args.direction.as_deref().unwrap_or("next"),
-            args.global,
             &args.profile,
             args.client_name.as_deref(),
         )

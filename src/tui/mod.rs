@@ -95,14 +95,6 @@ pub async fn run(profile: &str) -> Result<()> {
         }
     }
 
-    // If running inside tmux, temporarily enable mouse so crossterm receives
-    // proper mouse events instead of tmux converting scroll to arrow keys.
-    let saved_tmux_mouse = if std::env::var("TMUX").is_ok() {
-        enable_tmux_mouse()
-    } else {
-        None
-    };
-
     // Install panic hook that restores the terminal and the pre-launch title.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -130,15 +122,7 @@ pub async fn run(profile: &str) -> Result<()> {
     let _ = tab_title::set_tui_title(&mut io::stdout(), profile);
     let result = app.run(&mut terminal).await;
 
-    // Clean up the nested-detach tmux hook if we set one up during this run.
-    if std::env::var("TMUX").is_ok() {
-        crate::tmux::utils::cleanup_nested_detach_binding();
-    }
-
-    // Restore tmux mouse setting
-    if let Some(original) = saved_tmux_mouse {
-        restore_tmux_mouse(&original);
-    }
+    crate::tmux::utils::cleanup_session_cycle_bindings();
 
     // Restore terminal
     disable_raw_mode()?;
@@ -151,40 +135,4 @@ pub async fn run(profile: &str) -> Result<()> {
     let _ = tab_title::pop_terminal_title(&mut io::stdout());
 
     result
-}
-
-/// Enable tmux mouse mode for the current session, returning the previous value
-/// so it can be restored on exit.
-fn enable_tmux_mouse() -> Option<String> {
-    use std::process::Command;
-
-    // Query current mouse setting
-    let original = Command::new("tmux")
-        .args(["show-option", "-gv", "mouse"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-
-    // Enable mouse
-    let _ = Command::new("tmux")
-        .args(["set-option", "-g", "mouse", "on"])
-        .output();
-
-    Some(original)
-}
-
-/// Restore the original tmux mouse setting.
-fn restore_tmux_mouse(original: &str) {
-    use std::process::Command;
-
-    if original == "on" {
-        // Already was on, nothing to restore
-        return;
-    }
-
-    let _ = Command::new("tmux")
-        .args(["set-option", "-g", "mouse", original])
-        .output();
 }
