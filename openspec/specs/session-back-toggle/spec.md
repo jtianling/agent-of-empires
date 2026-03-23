@@ -24,9 +24,21 @@ When attached to an AoE-managed tmux session, pressing `Ctrl+b b` SHALL switch t
 - **THEN** the system SHALL switch to session #7
 
 #### Scenario: No previous session exists
-- **WHEN** the user has just entered a session from the TUI for the first time (no prior switch)
+- **WHEN** the user has just entered a session from the TUI for the first time with no prior session context (e.g., first launch or TUI opened directly)
 - **AND** the user presses `Ctrl+b b`
 - **THEN** no session switch SHALL occur
+
+#### Scenario: TUI passthrough preserves back toggle
+- **WHEN** the user is in Session A and detaches back to the AoE TUI via Ctrl+q
+- **AND** the user selects Session B from the TUI home screen
+- **AND** the user presses `Ctrl+b b`
+- **THEN** the system SHALL switch to Session A
+
+#### Scenario: TUI passthrough with same session re-entry
+- **WHEN** the user is in Session A and detaches back to the AoE TUI via Ctrl+q
+- **AND** the user selects Session A again from the TUI home screen
+- **AND** the user presses `Ctrl+b b`
+- **THEN** no session switch SHALL occur (source equals target)
 
 #### Scenario: Previous session no longer exists
 - **WHEN** the previous session has been deleted
@@ -124,3 +136,58 @@ The status bar SHALL use the following layout:
 #### Scenario: Window list hidden
 - **WHEN** status bar is applied to a session
 - **THEN** the tmux window-status-format and window-status-current-format SHALL be empty strings
+
+### Requirement: TUI entry sets previous session from source context
+When the user enters a session from the AoE TUI (via the home screen), the system SHALL set the `@aoe_prev_session_{client}` global option to the session the user was in before returning to the TUI, if such a source session exists and differs from the target session. If no source session exists or the source equals the target, the system SHALL unset the option (same as previous clear behavior).
+
+#### Scenario: Previous session set from TUI source
+- **WHEN** the user detaches from Session A back to the AoE TUI
+- **AND** the user selects Session B from the TUI home screen
+- **THEN** the @aoe_prev_session_{client} global option SHALL be set to Session A's tmux session name
+
+#### Scenario: No source session available
+- **WHEN** the user opens the AoE TUI directly (not by detaching from a managed session)
+- **AND** the user selects Session B from the TUI home screen
+- **THEN** the @aoe_prev_session_{client} global option SHALL be unset
+- **AND** pressing Ctrl+b b SHALL NOT switch sessions
+
+#### Scenario: Source equals target clears previous
+- **WHEN** the user detaches from Session A back to the AoE TUI
+- **AND** the user selects Session A again from the TUI home screen
+- **THEN** the @aoe_prev_session_{client} global option SHALL be unset
+
+#### Scenario: Subsequent tmux navigation records new previous session normally
+- **WHEN** the user enters Session B from the TUI with source Session A
+- **AND** the user then navigates Session B -> Session C via Ctrl+b n
+- **THEN** pressing Ctrl+b b SHALL switch to Session B (newly recorded previous session)
+
+### Requirement: TUI entry sets from-title from source context
+When the user enters a session from the AoE TUI (via the home screen), the system SHALL set the `@aoe_from_title` session option on the target session to the source session's title, if such a source session exists and differs from the target. If no source session exists or the source equals the target, the system SHALL unset `@aoe_from_title`.
+
+#### Scenario: From-title set from TUI source
+- **WHEN** the user detaches from "Work Agent" (Session A) back to the AoE TUI
+- **AND** the user selects "Helper Agent" (Session B) from the TUI home screen
+- **THEN** the status bar in Session B SHALL show "from: Work Agent"
+
+#### Scenario: No from-title when no source
+- **WHEN** the user opens the AoE TUI directly (not by detaching from a managed session)
+- **AND** the user selects a session from the TUI home screen
+- **THEN** the status bar SHALL NOT display a "from:" section
+
+#### Scenario: No from-title when re-entering same session
+- **WHEN** the user detaches from Session A back to the AoE TUI
+- **AND** the user selects Session A again from the TUI home screen
+- **THEN** the status bar SHALL NOT display a "from:" section
+
+### Requirement: Public helper functions for clearing session context
+The tmux utilities module SHALL expose two public functions for clearing session navigation context:
+- `clear_from_title(session_name: &str)`: unsets the `@aoe_from_title` session option on the given session.
+- `clear_previous_session_for_client(client_name: &str)`: unsets the `@aoe_prev_session_{client}` global option for the given client.
+
+#### Scenario: clear_from_title removes the option
+- **WHEN** `clear_from_title("aoe_my_session")` is called
+- **THEN** the tmux session option `@aoe_from_title` on session `aoe_my_session` SHALL be unset
+
+#### Scenario: clear_previous_session_for_client removes the option
+- **WHEN** `clear_previous_session_for_client("/dev/ttys003")` is called
+- **THEN** the tmux global option `@aoe_prev_session_/dev/ttys003` (sanitized) SHALL be unset

@@ -58,3 +58,4 @@ sdd-*/
 debug.log
 website/.next/
 test/
+.e2e-test/

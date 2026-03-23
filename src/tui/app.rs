@@ -109,6 +109,7 @@ pub struct App {
     update_info: Option<UpdateInfo>,
     update_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<UpdateInfo>>>,
     launch_dir: PathBuf,
+    session_before_tui: Option<String>,
     pending_nested_detach_client: Option<String>,
     /// Last time a redraw was triggered by a tick event (to throttle animations)
     last_tick_redraw: std::time::Instant,
@@ -170,6 +171,7 @@ impl App {
             update_info: None,
             update_rx: None,
             launch_dir,
+            session_before_tui: None,
             pending_nested_detach_client: None,
             last_tick_redraw: std::time::Instant::now(),
         })
@@ -642,6 +644,21 @@ impl App {
         instance.refresh_agent_tmux_options();
 
         let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+        let source_session = self
+            .session_before_tui
+            .take()
+            .filter(|source| source != &session_name);
+        if let Some(source_session) = source_session.as_deref() {
+            crate::tmux::utils::set_target_from_title(source_session, &session_name);
+            if let Some(client_name) = &attach_client_name {
+                crate::tmux::utils::set_previous_session_for_client(client_name, source_session);
+            }
+        } else {
+            crate::tmux::utils::clear_from_title(&session_name);
+            if let Some(client_name) = &attach_client_name {
+                crate::tmux::utils::clear_previous_session_for_client(client_name);
+            }
+        }
         crate::tmux::utils::update_session_index(
             &self.home.instances,
             &self.home.groups,
@@ -684,6 +701,8 @@ impl App {
         else {
             return false;
         };
+
+        self.session_before_tui = Some(tmux_session_name.clone());
 
         self.home
             .select_session_by_managed_tmux_name(&tmux_session_name)
