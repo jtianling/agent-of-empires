@@ -14,6 +14,10 @@ const AOE_PROFILE_OPTION: &str = "@aoe_profile";
 const AOE_ORIGIN_PROFILE_OPTION_PREFIX: &str = "@aoe_origin_profile_";
 const AOE_RETURN_SESSION_OPTION_PREFIX: &str = "@aoe_return_session_";
 const AOE_LAST_DETACHED_SESSION_OPTION_PREFIX: &str = "@aoe_last_detached_session_";
+const AOE_PREV_SESSION_OPTION_PREFIX: &str = "@aoe_prev_session_";
+const AOE_INDEX_OPTION: &str = "@aoe_index";
+const AOE_TITLE_OPTION: &str = "@aoe_title";
+const AOE_FROM_TITLE_OPTION: &str = "@aoe_from_title";
 
 /// Sets up a tmux hook that dynamically rebinds `Ctrl+b d` based on the
 /// current session:
@@ -31,7 +35,7 @@ pub fn setup_nested_detach_binding(
 
     let aoe_bin = shell_escape(&aoe_bin_path());
     let hook_cmd = format!(
-        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key n ; unbind-key p ; unbind-key N ; unbind-key P ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l ; unbind-key 1 ; unbind-key 2 ; unbind-key 3 ; unbind-key 4 ; unbind-key 5 ; unbind-key 6 ; unbind-key 7 ; unbind-key 8 ; unbind-key 9""##,
+        r##"if-shell -F "#{{m:aoe_*,#{{session_name}}}}" "run-shell '{aoe_bin} tmux refresh-bindings --client-name #{{client_name}}'" "bind-key d detach-client ; unbind-key b ; unbind-key n ; unbind-key p ; unbind-key N ; unbind-key P ; unbind-key h ; unbind-key j ; unbind-key k ; unbind-key l ; unbind-key 1 ; unbind-key 2 ; unbind-key 3 ; unbind-key 4 ; unbind-key 5 ; unbind-key 6 ; unbind-key 7 ; unbind-key 8 ; unbind-key 9""##,
     );
     Command::new("tmux")
         .args(["set-hook", "-g", NESTED_DETACH_HOOK, &hook_cmd])
@@ -151,14 +155,42 @@ fn cycle_run_shell_cmd(direction: &str, global: bool) -> String {
     )
 }
 
+fn back_toggle_run_shell_cmd(profile: &str) -> String {
+    let aoe_bin = shell_escape(&aoe_bin_path());
+    let escaped_profile = shell_escape(profile);
+    format!(
+        "client_name=\"#{{client_name}}\"; {aoe_bin} tmux switch-session --back --profile {escaped_profile} --client-name \"$client_name\""
+    )
+}
+
+fn back_toggle_run_shell_cmd_from_option() -> String {
+    let aoe_bin = shell_escape(&aoe_bin_path());
+    format!(
+        concat!(
+            "client_name=\"#{{client_name}}\"; ",
+            "client_key=$(printf '%s' \"$client_name\" | tr -c '[:alnum:]' '_'); ",
+            "profile=$(tmux show-option -gv \"{}${{client_key}}\" 2>/dev/null); ",
+            "if [ -n \"$profile\" ]; then ",
+            "{} tmux switch-session --back --profile \"$profile\" --client-name \"$client_name\"; ",
+            "fi"
+        ),
+        AOE_ORIGIN_PROFILE_OPTION_PREFIX, aoe_bin
+    )
+}
+
 fn apply_managed_session_bindings(client_name: Option<&str>) {
     let detach_cmd = detach_run_shell_cmd();
+    let back_cmd = back_toggle_run_shell_cmd_from_option();
     let next_cmd = cycle_run_shell_cmd("next", false);
     let prev_cmd = cycle_run_shell_cmd("prev", false);
     let global_next_cmd = cycle_run_shell_cmd("next", true);
     let global_prev_cmd = cycle_run_shell_cmd("prev", true);
     Command::new("tmux")
         .args(["bind-key", "d", "run-shell", &detach_cmd])
+        .output()
+        .ok();
+    Command::new("tmux")
+        .args(["bind-key", "b", "run-shell", &back_cmd])
         .output()
         .ok();
     Command::new("tmux")
@@ -360,13 +392,173 @@ fn sanitize_tmux_option_suffix(value: &str) -> String {
         .collect()
 }
 
+fn resolve_client_name(client_name: Option<&str>) -> Option<String> {
+    client_name
+        .map(str::to_owned)
+        .or_else(crate::tmux::get_current_client_name)
+}
+
+fn set_global_option(option_key: &str, value: &str) {
+    Command::new("tmux")
+        .args(["set-option", "-gq"])
+        .arg(option_key)
+        .arg(value)
+        .output()
+        .ok();
+}
+
+fn get_global_option(option_key: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["show-option", "-gv"])
+        .arg(option_key)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn set_tmux_session_option(session_name: &str, option: &str, value: &str) {
+    Command::new("tmux")
+        .args(["set-option", "-t", session_name, option, value])
+        .output()
+        .ok();
+}
+
+fn unset_tmux_session_option(session_name: &str, option: &str) {
+    Command::new("tmux")
+        .args(["set-option", "-t", session_name, "-u", option])
+        .output()
+        .ok();
+}
+
+fn get_tmux_session_option(session_name: &str, option: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["show-options", "-t", session_name, "-v", option])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn set_previous_session_for_client(client_name: &str, session_name: &str) {
+    let option_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, client_name);
+    set_global_option(&option_key, session_name);
+}
+
+fn get_previous_session_for_client(client_name: &str) -> Option<String> {
+    let option_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, client_name);
+    get_global_option(&option_key)
+}
+
+fn set_target_from_title(source_session: &str, target_session: &str) {
+    if let Some(source_title) = get_tmux_session_option(source_session, AOE_TITLE_OPTION) {
+        set_tmux_session_option(target_session, AOE_FROM_TITLE_OPTION, &source_title);
+    } else {
+        unset_tmux_session_option(target_session, AOE_FROM_TITLE_OPTION);
+    }
+}
+
+fn session_index_in_order(
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+    target_session: &str,
+) -> Option<usize> {
+    ordered_profile_session_names(instances, groups, sort_order)
+        .into_iter()
+        .filter(|session| tmux_session_exists(session))
+        .position(|session| session == target_session)
+        .map(|index| index + 1)
+}
+
+fn set_target_session_index(
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+    target_session: &str,
+) {
+    if let Some(index) = session_index_in_order(instances, groups, sort_order, target_session) {
+        set_tmux_session_option(target_session, AOE_INDEX_OPTION, &index.to_string());
+    } else {
+        unset_tmux_session_option(target_session, AOE_INDEX_OPTION);
+    }
+}
+
+/// Set `@aoe_index` on a session so the status bar shows its number immediately.
+/// Called from the TUI attach path so the index is visible on first entry,
+/// not only after a Ctrl+b N/P cycle.
+pub fn update_session_index(
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+    target_session: &str,
+) {
+    set_target_session_index(instances, groups, sort_order, target_session);
+}
+
+fn track_session_switch(
+    current_session: &str,
+    target_session: &str,
+    client_name: Option<&str>,
+    instances: &[Instance],
+    groups: &[Group],
+    sort_order: SortOrder,
+) {
+    if let Some(client_name) = resolve_client_name(client_name).as_deref() {
+        set_previous_session_for_client(client_name, current_session);
+    }
+
+    set_target_from_title(current_session, target_session);
+    set_target_session_index(instances, groups, sort_order, target_session);
+}
+
+fn switch_to_previous_session<FExists, FSwitch>(
+    current_session: Option<&str>,
+    previous_session: Option<&str>,
+    session_exists: FExists,
+    switch_client: FSwitch,
+) -> anyhow::Result<Option<String>>
+where
+    FExists: Fn(&str) -> bool,
+    FSwitch: FnOnce(&str) -> anyhow::Result<()>,
+{
+    let Some(current_session) = current_session else {
+        return Ok(None);
+    };
+    let Some(previous_session) = previous_session.filter(|session| !session.is_empty()) else {
+        return Ok(None);
+    };
+
+    if previous_session == current_session || !session_exists(previous_session) {
+        return Ok(None);
+    }
+
+    switch_client(previous_session)?;
+    Ok(Some(previous_session.to_string()))
+}
+
 /// Binds `Ctrl+b n` / `Ctrl+b p` to cycle through aoe agent sessions
 /// belonging to the given profile. Works in both nested and non-nested tmux modes.
 pub fn setup_session_cycle_bindings(profile: &str) {
     tag_sessions_with_profile(profile);
 
+    let switch_back = back_toggle_run_shell_cmd(profile);
     let (switch_next, switch_prev) = session_cycle_run_shell_cmds(profile);
     let (switch_global_next, switch_global_prev) = session_cycle_global_run_shell_cmds(profile);
+    Command::new("tmux")
+        .args(["bind-key", "b", "run-shell", &switch_back])
+        .output()
+        .ok();
     Command::new("tmux")
         .args(["bind-key", "n", "run-shell", &switch_next])
         .output()
@@ -474,7 +666,7 @@ fn tag_sessions_with_profile(profile: &str) {
 }
 
 pub fn cleanup_session_cycle_bindings() {
-    for key in ["n", "p", "N", "P", "h", "j", "k", "l"] {
+    for key in ["b", "n", "p", "N", "P", "h", "j", "k", "l"] {
         Command::new("tmux").args(["unbind-key", key]).output().ok();
     }
     Command::new("tmux")
@@ -521,13 +713,15 @@ pub fn switch_aoe_session(
 ) -> anyhow::Result<()> {
     let storage = crate::session::Storage::new(profile)?;
     let (instances, groups) = storage.load_with_groups()?;
-    let Some(current) = current_tmux_session_name(client_name)? else {
+    let resolved_client_name = resolve_client_name(client_name);
+    let Some(current) = current_tmux_session_name(resolved_client_name.as_deref())? else {
         return Ok(());
     };
+    let sort_order = current_home_sort_order();
     let sessions = if global {
-        ordered_global_profile_sessions_for_cycle(&instances, &groups, current_home_sort_order())
+        ordered_global_profile_sessions_for_cycle(&instances, &groups, sort_order)
     } else {
-        ordered_profile_sessions_for_cycle(&instances, &groups, current_home_sort_order(), &current)
+        ordered_profile_sessions_for_cycle(&instances, &groups, sort_order, &current)
     };
 
     if sessions.len() <= 1 {
@@ -538,13 +732,21 @@ pub fn switch_aoe_session(
         return Ok(());
     };
 
-    if let Some(client_name) = client_name {
+    if let Some(client_name) = resolved_client_name.as_deref() {
         // Remember the actual managed session the user cycled to so TUI re-entry
         // can restore selection there without rewriting the AoE return target.
         set_last_detached_session_for_client(client_name, &target_session);
     }
 
-    switch_client_to_session(&target_session, client_name)?;
+    switch_client_to_session(&target_session, resolved_client_name.as_deref())?;
+    track_session_switch(
+        &current,
+        &target_session,
+        resolved_client_name.as_deref(),
+        &instances,
+        &groups,
+        sort_order,
+    );
 
     Ok(())
 }
@@ -718,7 +920,10 @@ pub fn switch_aoe_session_by_index(
 
     let storage = crate::session::Storage::new(profile)?;
     let (instances, groups) = storage.load_with_groups()?;
-    let sessions = ordered_profile_session_names(&instances, &groups, current_home_sort_order());
+    let resolved_client_name = resolve_client_name(client_name);
+    let current = current_tmux_session_name(resolved_client_name.as_deref())?;
+    let sort_order = current_home_sort_order();
+    let sessions = ordered_profile_session_names(&instances, &groups, sort_order);
 
     let existing: Vec<String> = sessions
         .into_iter()
@@ -729,11 +934,62 @@ pub fn switch_aoe_session_by_index(
         return Ok(());
     };
 
-    if let Some(client_name) = client_name {
+    if current.as_deref() == Some(target_session.as_str()) {
+        return Ok(());
+    }
+
+    if let Some(client_name) = resolved_client_name.as_deref() {
         set_last_detached_session_for_client(client_name, target_session);
     }
 
-    switch_client_to_session(target_session, client_name)?;
+    switch_client_to_session(target_session, resolved_client_name.as_deref())?;
+    if let Some(current_session) = current.as_deref() {
+        track_session_switch(
+            current_session,
+            target_session,
+            resolved_client_name.as_deref(),
+            &instances,
+            &groups,
+            sort_order,
+        );
+    }
+    Ok(())
+}
+
+pub fn switch_aoe_session_back(profile: &str, client_name: Option<&str>) -> anyhow::Result<()> {
+    let resolved_client_name = resolve_client_name(client_name);
+    let current = current_tmux_session_name(resolved_client_name.as_deref())?;
+    let previous = resolved_client_name
+        .as_deref()
+        .and_then(get_previous_session_for_client);
+
+    let Some(target_session) = switch_to_previous_session(
+        current.as_deref(),
+        previous.as_deref(),
+        tmux_session_exists,
+        |target_session| switch_client_to_session(target_session, resolved_client_name.as_deref()),
+    )?
+    else {
+        return Ok(());
+    };
+
+    if let Some(client_name) = resolved_client_name.as_deref() {
+        set_last_detached_session_for_client(client_name, &target_session);
+    }
+
+    let storage = crate::session::Storage::new(profile)?;
+    let (instances, groups) = storage.load_with_groups()?;
+    if let Some(current_session) = current.as_deref() {
+        track_session_switch(
+            current_session,
+            &target_session,
+            resolved_client_name.as_deref(),
+            &instances,
+            &groups,
+            current_home_sort_order(),
+        );
+    }
+
     Ok(())
 }
 
@@ -889,12 +1145,43 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use serial_test::serial;
+    use std::cell::{Cell, RefCell};
     use tempfile::TempDir;
 
     fn setup_test_home(temp: &TempDir) {
         std::env::set_var("HOME", temp.path());
         #[cfg(target_os = "linux")]
         std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+    }
+
+    fn tmux_available() -> bool {
+        Command::new("tmux").arg("-V").output().is_ok()
+    }
+
+    fn create_tmux_session(session_name: &str) {
+        let output = Command::new("tmux")
+            .args(["new-session", "-d", "-s", session_name, "sh"])
+            .output()
+            .expect("tmux new-session");
+        assert!(
+            output.status.success(),
+            "failed to create tmux session {}: {}",
+            session_name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn kill_tmux_session(session_name: &str) {
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", session_name])
+            .output();
+    }
+
+    fn clear_global_option(option_key: &str) {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-gu"])
+            .arg(option_key)
+            .output();
     }
 
     fn instance_with_created_at(
@@ -1109,7 +1396,7 @@ mod tests {
 
     #[test]
     fn test_resolve_cycle_target_requires_current_session_in_scope() {
-        let sessions = vec!["aoe_a".to_string(), "aoe_b".to_string()];
+        let sessions = ["aoe_a".to_string(), "aoe_b".to_string()];
         assert_eq!(resolve_cycle_target(&sessions, "aoe_other", "next"), None);
     }
 
@@ -1327,7 +1614,7 @@ mod tests {
 
     #[test]
     fn test_index_resolution_zero_is_invalid() {
-        let sessions = vec!["aoe_a".to_string(), "aoe_b".to_string()];
+        let sessions = ["aoe_a".to_string(), "aoe_b".to_string()];
         // Index 0 should not match any session (1-based indexing)
         assert_eq!(sessions.get(0_usize.wrapping_sub(1)), None);
     }
@@ -1377,6 +1664,118 @@ mod tests {
         let cmd = index_jump_run_shell_cmd_from_option(13);
         assert!(cmd.contains("--index 13"));
         assert!(cmd.contains("@aoe_origin_profile_"));
+    }
+
+    #[test]
+    fn test_back_toggle_run_shell_cmd_contains_back_flag() {
+        let cmd = back_toggle_run_shell_cmd("default");
+        assert!(cmd.contains("--back"));
+        assert!(cmd.contains("--profile"));
+    }
+
+    #[test]
+    fn test_back_toggle_run_shell_cmd_from_option_contains_back_flag() {
+        let cmd = back_toggle_run_shell_cmd_from_option();
+        assert!(cmd.contains("--back"));
+        assert!(cmd.contains("@aoe_origin_profile_"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_track_session_switch_sets_correct_prev_from_title_and_index() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        setup_test_home(&temp);
+
+        let mut config = crate::session::config::Config::default();
+        config.app_state.sort_order = Some(SortOrder::AZ);
+        crate::session::config::save_config(&config).unwrap();
+
+        let alpha = Instance::new("Alpha", "/tmp/alpha");
+        let beta = Instance::new("Beta", "/tmp/beta");
+        let instances = vec![alpha.clone(), beta.clone()];
+        crate::session::Storage::new("default")
+            .unwrap()
+            .save(&instances)
+            .unwrap();
+
+        let alpha_session = crate::tmux::Session::generate_name(&alpha.id, &alpha.title);
+        let beta_session = crate::tmux::Session::generate_name(&beta.id, &beta.title);
+        let client_name = format!("/tmp/track_client_{}", std::process::id());
+        let prev_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, &client_name);
+
+        create_tmux_session(&alpha_session);
+        create_tmux_session(&beta_session);
+        set_tmux_session_option(&alpha_session, AOE_TITLE_OPTION, &alpha.title);
+        set_tmux_session_option(&beta_session, AOE_TITLE_OPTION, &beta.title);
+
+        track_session_switch(
+            &alpha_session,
+            &beta_session,
+            Some(&client_name),
+            &instances,
+            &[],
+            SortOrder::AZ,
+        );
+
+        assert_eq!(
+            get_previous_session_for_client(&client_name),
+            Some(alpha_session.clone())
+        );
+        assert_eq!(
+            get_tmux_session_option(&beta_session, AOE_FROM_TITLE_OPTION),
+            Some(alpha.title.clone())
+        );
+        assert_eq!(
+            get_tmux_session_option(&beta_session, AOE_INDEX_OPTION),
+            Some("2".to_string())
+        );
+
+        kill_tmux_session(&alpha_session);
+        kill_tmux_session(&beta_session);
+        clear_global_option(&prev_key);
+    }
+
+    #[test]
+    fn test_switch_to_previous_session_calls_switch_with_previous_session() {
+        let switched_to = RefCell::new(None::<String>);
+
+        let target = switch_to_previous_session(
+            Some("aoe_current"),
+            Some("aoe_previous"),
+            |_| true,
+            |session| {
+                *switched_to.borrow_mut() = Some(session.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(target, Some("aoe_previous".to_string()));
+        assert_eq!(switched_to.into_inner(), Some("aoe_previous".to_string()));
+    }
+
+    #[test]
+    fn test_switch_to_previous_session_is_no_op_without_previous_session() {
+        let switched = Cell::new(false);
+
+        let target = switch_to_previous_session(
+            Some("aoe_current"),
+            None,
+            |_| true,
+            |_| {
+                switched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(target, None);
+        assert!(!switched.get());
     }
 
     #[test]

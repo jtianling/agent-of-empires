@@ -12,8 +12,12 @@ const CODEX_TITLE_MONITOR_PID_OPTION: &str = "@aoe_codex_title_monitor_pid";
 const CODEX_TITLE_MONITOR_TITLE_OPTION: &str = "@aoe_codex_title_monitor_title";
 const CODEX_TITLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_WAITING_TITLE_PREFIX: &str = "\u{270b} ";
-const STATUS_LEFT_FORMAT: &str =
-    " #[fg=colour46,bold]#S#[fg=colour252,nobold] │ #[fg=colour245]Ctrl+q#[fg=colour240]/#[fg=colour245]Ctrl+b d#[fg=colour240] detach #[fg=colour245]Ctrl+b 1-9 space#[fg=colour240] jump ";
+const STATUS_LEFT_FORMAT: &str = concat!(
+    " #[fg=colour46,bold]#{@aoe_index}",
+    "#[fg=colour252,nobold] #{@aoe_title}",
+    "#{?#{@aoe_from_title},  #[fg=colour245]from: #{@aoe_from_title}#[fg=colour252],}",
+    "  #[fg=colour245]Ctrl+b d detach "
+);
 
 /// Information about a sandboxed session for status bar display.
 pub struct SandboxDisplay {
@@ -51,20 +55,10 @@ pub fn apply_status_bar(
         set_session_option(session_name, "@aoe_sandbox", &sandbox_info.container_name)?;
     }
 
-    // Configure the status bar format using aoe's phosphor green theme
-    // colour46 = bright green (matches aoe accent), colour48 = cyan (matches running)
-    // colour235 = dark background
-    //
-    // Format: "aoe: Title | branch | [container] | 14:30"
-    // - #{@aoe_title}: session title
-    // - #{?#{@aoe_branch}, | #{@aoe_branch},}: conditional branch display
-    // - #{?#{@aoe_sandbox}, [#{@aoe_sandbox}],}: conditional sandbox container display
     let status_format = concat!(
-        " #[fg=colour46,bold]aoe#[fg=colour252,nobold]: ",
-        "#{@aoe_title}",
-        "#{?#{@aoe_branch}, #[fg=colour48]| #{@aoe_branch}#[fg=colour252],}",
-        "#{?#{@aoe_sandbox}, #[fg=colour214]⬡ #{@aoe_sandbox}#[fg=colour252],}",
-        " | %H:%M "
+        "#{?#{@aoe_branch}, #[fg=colour48]#{@aoe_branch}#[fg=colour252],}",
+        "#{?#{@aoe_sandbox},#{?#{@aoe_branch}, #[fg=colour252]|,} #[fg=colour214]#{@aoe_sandbox}#[fg=colour252],}",
+        "#{?#{@aoe_branch}, #[fg=colour252]| %H:%M ,#{?#{@aoe_sandbox}, #[fg=colour252]| %H:%M , %H:%M }}"
     );
 
     set_session_option(session_name, "status-right", status_format)?;
@@ -74,6 +68,8 @@ pub fn apply_status_bar(
     set_session_option(session_name, "status-style", "bg=colour235,fg=colour252")?;
     set_session_option(session_name, "status-left", STATUS_LEFT_FORMAT)?;
     set_session_option(session_name, "status-left-length", "80")?;
+    set_window_option(session_name, "window-status-format", "")?;
+    set_window_option(session_name, "window-status-current-format", "")?;
 
     Ok(())
 }
@@ -407,7 +403,10 @@ mod tests {
 
     #[test]
     fn test_status_left_format_matches_documented_key_hints() {
-        assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b 1-9 space"));
-        assert!(!STATUS_LEFT_FORMAT.contains("Ctrl+b n/p"));
+        assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_index}"));
+        assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_title}"));
+        assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_from_title}"));
+        assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b d detach"));
+        assert!(!STATUS_LEFT_FORMAT.contains("Ctrl+b 1-9"));
     }
 }

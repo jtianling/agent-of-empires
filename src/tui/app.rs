@@ -640,6 +640,15 @@ impl App {
         }
 
         instance.refresh_agent_tmux_options();
+
+        let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+        crate::tmux::utils::update_session_index(
+            &self.home.instances,
+            &self.home.groups,
+            self.home.sort_order,
+            &session_name,
+        );
+
         let profile = self.home.storage.profile().to_string();
         let client_for_attach = attach_client_name.clone();
         let attach_result = with_raw_mode_disabled(terminal, || {
