@@ -29,6 +29,7 @@ pub struct AgentDef {
     pub container_env: &'static [(&'static str, &'static str)],  // always-injected env vars
     pub hook_config: Option<HookConfig>,  // optional hook configuration
     pub sets_own_title: bool,  // agent sets terminal/pane title via OSC 0
+    pub resume: Option<ResumeConfig>,  // optional resume configuration for graceful restart
 }
 ```
 
@@ -48,15 +49,15 @@ EnvVar(key, value)   -- prepend env var to command (e.g. "OPENCODE_PERMISSION=..
 
 ## Registered Agents
 
-| Name | Binary | YOLO | Instruction Flag | Host Launch | Own Title | Notes |
-|------|--------|------|-----------------|-------------|-----------|-------|
-| `claude` | `claude` | `--dangerously-skip-permissions` | `--append-system-prompt {}` | Yes | Yes | Default agent |
-| `opencode` | `opencode` | `OPENCODE_PERMISSION={"*":"allow"}` | None | No | No | Container-only |
-| `vibe` | `vibe` | `--agent auto-approve` | None | Yes | No | Detection: `vibe --version` |
-| `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--config developer_instructions={}` | Yes | No | |
-| `gemini` | `gemini` | `--approval-mode yolo` | None | Yes | Yes | |
-| `shell` | `shell` | None | None | Yes | No | Plain shell, no status detection. Alias: `terminal` |
-| `cursor` | `agent` | `--yolo` | None | Yes | No | Binary is `agent`, aliases: `["agent"]` |
+| Name | Binary | YOLO | Instruction Flag | Host Launch | Own Title | Resume | Notes |
+|------|--------|------|-----------------|-------------|-----------|--------|-------|
+| `claude` | `claude` | `--dangerously-skip-permissions` | `--append-system-prompt {}` | Yes | Yes | Yes | Default agent |
+| `opencode` | `opencode` | `OPENCODE_PERMISSION={"*":"allow"}` | None | No | No | No | Container-only |
+| `vibe` | `vibe` | `--agent auto-approve` | None | Yes | No | No | Detection: `vibe --version` |
+| `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--config developer_instructions={}` | Yes | No | Yes | |
+| `gemini` | `gemini` | `--approval-mode yolo` | None | Yes | Yes | No | |
+| `shell` | `shell` | None | None | Yes | No | No | Plain shell, no status detection. Alias: `terminal` |
+| `cursor` | `agent` | `--yolo` | None | Yes | No | No | Binary is `agent`, aliases: `["agent"]` |
 
 ## Name Resolution
 
@@ -114,6 +115,37 @@ The agent registry SHALL include a `shell` entry with `name: "shell"`, positione
 #### Scenario: Settings index accounts for shell
 - **WHEN** converting "shell" to a settings index
 - **THEN** the result is `6` (gemini=5, shell=6, cursor=7)
+
+### Requirement: AgentDef supports optional resume configuration
+`AgentDef` SHALL include a `resume: Option<ResumeConfig>` field. Agents that support session resumption declare their exit sequence, output pattern, and resume CLI flag via this field. Agents that do not support resume set this to `None`.
+
+#### Scenario: Claude declares resume support
+- **WHEN** the Claude agent definition is loaded
+- **THEN** it SHALL have a `ResumeConfig` with:
+  - exit sequence: two Ctrl+C key groups (one per tick)
+  - resume pattern matching `claude --resume` followed by a UUID
+  - resume flag template `--resume {}`
+  - timeout of 10 seconds
+
+#### Scenario: Codex declares resume support
+- **WHEN** the Codex agent definition is loaded
+- **THEN** it SHALL have a `ResumeConfig` with:
+  - exit sequence: two Ctrl+C key groups (one per tick)
+  - resume pattern matching `codex resume` followed by a UUID
+  - resume flag template `resume {}`
+  - timeout of 10 seconds
+
+#### Scenario: Agents without resume support
+- **WHEN** agent definitions for opencode, vibe, gemini, shell, or cursor are loaded
+- **THEN** their `resume` field SHALL be `None`
+
+### Requirement: ResumeConfig structure
+`ResumeConfig` SHALL contain: an exit key sequence (array of key groups sent one group per tick), a regex pattern for capturing the resume token (first capture group), a flag template with `{}` placeholder for the token, and a timeout in seconds.
+
+#### Scenario: ResumeConfig fields are complete
+- **WHEN** a `ResumeConfig` is defined for an agent
+- **THEN** it SHALL have all four fields: `exit_sequence`, `resume_pattern`, `resume_flag`, `timeout_secs`
+- **AND** `resume_pattern` SHALL contain exactly one capture group for the token
 
 ## Settings Index Convention
 

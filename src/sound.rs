@@ -381,7 +381,7 @@ pub fn play_for_transition(old: Status, new: Status, config: &SoundConfig) {
     }
 
     let override_name = match new {
-        Status::Starting => config.on_start.as_deref(),
+        Status::Starting | Status::Restarting => config.on_start.as_deref(),
         Status::Running => config.on_running.as_deref(),
         Status::Waiting => config.on_waiting.as_deref(),
         Status::Idle => config.on_idle.as_deref(),

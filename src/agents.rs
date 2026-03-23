@@ -29,6 +29,19 @@ pub struct AgentHookConfig {
     pub settings_rel_path: &'static str,
 }
 
+/// Agent-specific configuration for graceful exit and resume-aware restarts.
+#[derive(Debug, Clone, Copy)]
+pub struct ResumeConfig {
+    /// Exit key groups sent one group per tick during graceful restart.
+    pub exit_sequence: &'static [&'static [&'static str]],
+    /// Regex pattern with a single capture group for the resume token.
+    pub resume_pattern: &'static str,
+    /// CLI flag or subcommand template with `{}` placeholder for the token.
+    pub resume_flag: &'static str,
+    /// Graceful exit timeout before falling back to a fresh restart.
+    pub timeout_secs: u64,
+}
+
 /// Everything we know about a single agent CLI.
 pub struct AgentDef {
     /// Canonical name: `"claude"`, `"opencode"`, etc.
@@ -56,6 +69,8 @@ pub struct AgentDef {
     /// hooks into the agent's settings file so status is written to a file instead
     /// of being parsed from tmux pane content.
     pub hook_config: Option<AgentHookConfig>,
+    /// Graceful-exit resume support for restart flows.
+    pub resume: Option<ResumeConfig>,
     /// Whether this agent sets its own terminal/pane title via OSC 0.
     /// When false, AoE manages the pane title based on detected status.
     pub sets_own_title: bool,
@@ -76,6 +91,12 @@ pub const AGENTS: &[AgentDef] = &[
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".claude/settings.json",
         }),
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: r"claude --resume\s+([0-9a-f-]+)",
+            resume_flag: "--resume {}",
+            timeout_secs: 10,
+        }),
         sets_own_title: true,
     },
     AgentDef {
@@ -90,6 +111,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_opencode_status,
         container_env: &[],
         hook_config: None,
+        resume: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -104,6 +126,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_vibe_status,
         container_env: &[],
         hook_config: None,
+        resume: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -120,6 +143,12 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_codex_status,
         container_env: &[],
         hook_config: None,
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: r"codex resume\s+([0-9a-f-]+)",
+            resume_flag: "resume {}",
+            timeout_secs: 10,
+        }),
         sets_own_title: false,
     },
     AgentDef {
@@ -134,6 +163,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_gemini_status,
         container_env: &[],
         hook_config: None,
+        resume: None,
         sets_own_title: true,
     },
     AgentDef {
@@ -148,6 +178,7 @@ pub const AGENTS: &[AgentDef] = &[
         detect_status: status_detection::detect_terminal_status,
         container_env: &[],
         hook_config: None,
+        resume: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -164,6 +195,7 @@ pub const AGENTS: &[AgentDef] = &[
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".cursor/settings.json",
         }),
+        resume: None,
         sets_own_title: false,
     },
 ];

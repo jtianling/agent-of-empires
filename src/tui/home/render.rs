@@ -13,6 +13,8 @@ use crate::tui::components::{HelpOverlay, Preview};
 use crate::tui::styles::Theme;
 use crate::update::UpdateInfo;
 
+const STATUS_BAR_SPINNER_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+
 impl HomeView {
     pub fn render(
         &mut self,
@@ -259,6 +261,7 @@ impl HomeView {
                             Status::Stopped => ICON_STOPPED,
                             Status::Error => ICON_ERROR,
                             Status::Starting => ICON_STARTING,
+                            Status::Restarting => ICON_STARTING,
                             Status::Deleting => ICON_DELETING,
                         };
                         let color = match inst.status {
@@ -269,6 +272,7 @@ impl HomeView {
                             Status::Stopped => theme.dimmed,
                             Status::Error => theme.error,
                             Status::Starting => theme.dimmed,
+                            Status::Restarting => theme.dimmed,
                             Status::Deleting => theme.waiting,
                         };
                         let style = Style::default().fg(color);
@@ -449,6 +453,26 @@ impl HomeView {
                     Style::default().fg(theme.waiting).bold(),
                 ),
             ]);
+        }
+
+        if let Some(selected_id) = &self.selected_session {
+            if let Some(inst) = self.get_instance(selected_id) {
+                if inst.status == Status::Restarting {
+                    let frame = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_millis() / 150)
+                        .unwrap_or(0) as usize)
+                        % STATUS_BAR_SPINNER_FRAMES.len();
+                    spans.extend([
+                        Span::styled("│", sep_style),
+                        Span::styled(
+                            format!(" {} ", STATUS_BAR_SPINNER_FRAMES[frame]),
+                            Style::default().fg(theme.waiting).bold(),
+                        ),
+                        Span::styled(" Restarting... ", desc_style),
+                    ]);
+                }
+            }
         }
 
         let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.selection));

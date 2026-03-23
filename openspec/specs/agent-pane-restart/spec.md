@@ -24,6 +24,15 @@ The system SHALL support restarting only the AoE-managed agent pane within a tmu
 #### Scenario: Force-restart running agent pane
 - **WHEN** the agent pane is alive (process running)
 - **AND** the user triggers agent pane restart via `R` keybinding
+- **AND** the agent has a `ResumeConfig`
+- **AND** the instance does not use a custom command
+- **THEN** the system SHALL initiate the graceful resume restart flow
+- **AND** set the instance status to `Restarting`
+
+#### Scenario: Force-restart without resume support
+- **WHEN** the agent pane is alive (process running)
+- **AND** the user triggers agent pane restart via `R` keybinding
+- **AND** the agent has no `ResumeConfig` OR the instance uses a custom command
 - **THEN** the system SHALL kill the agent pane's process tree
 - **AND** respawn the pane with the original agent command
 - **AND** all user-created panes SHALL be preserved

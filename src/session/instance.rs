@@ -1,9 +1,11 @@
 //! Session instance definition and operations
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -28,7 +30,22 @@ pub enum Status {
     Stopped,
     Error,
     Starting,
+    Restarting,
     Deleting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartPhase {
+    SendingExitKeys { next_group_index: usize },
+    WaitingForExit,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingResume {
+    pub phase: RestartPhase,
+    pub config: &'static crate::agents::ResumeConfig,
+    pub started_at: Instant,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +114,8 @@ pub struct Instance {
     pub last_start_time: Option<std::time::Instant>,
     #[serde(skip)]
     pub last_error: Option<String>,
+    #[serde(skip)]
+    pub pending_resume: Option<PendingResume>,
 }
 
 impl Instance {
@@ -119,6 +138,7 @@ impl Instance {
             last_error_check: None,
             last_start_time: None,
             last_error: None,
+            pending_resume: None,
         }
     }
 
@@ -138,12 +158,23 @@ impl Instance {
         if !self.extra_args.is_empty() {
             return true;
         }
+        self.has_command_override()
+    }
+
+    fn has_command_override(&self) -> bool {
         if self.command.is_empty() {
             return false;
         }
         crate::agents::get_agent(&self.tool)
             .map(|a| self.command != a.binary)
             .unwrap_or(true)
+    }
+
+    pub fn can_gracefully_restart(&self) -> bool {
+        !self.is_sandboxed()
+            && !self.has_command_override()
+            && self.pending_resume.is_none()
+            && crate::agents::get_agent(&self.tool).is_some_and(|agent| agent.resume.is_some())
     }
 
     pub fn expects_shell(&self) -> bool {
@@ -243,7 +274,7 @@ impl Instance {
             self.execute_on_launch_hooks(hook_cmds);
         }
 
-        let cmd = self.build_agent_command();
+        let cmd = self.build_agent_command(None);
         tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
 
@@ -251,25 +282,22 @@ impl Instance {
         self.apply_tmux_options();
 
         self.status = Status::Starting;
-        self.last_start_time = Some(std::time::Instant::now());
+        self.last_start_time = Some(Instant::now());
+        self.pending_resume = None;
 
         Ok(())
     }
 
     /// Build the agent launch command string. Pure command construction with no
     /// side effects (no hooks, no container lifecycle management).
-    pub fn build_agent_command(&self) -> Option<String> {
+    pub fn build_agent_command(&self, resume_token: Option<&str>) -> Option<String> {
         let agent = crate::agents::get_agent(&self.tool);
 
         if self.is_sandboxed() {
             let sandbox = self.sandbox_info.as_ref()?;
             let container = DockerContainer::from_session_id(&self.id);
 
-            let base_cmd = if self.extra_args.is_empty() {
-                self.get_tool_command().to_string()
-            } else {
-                format!("{} {}", self.get_tool_command(), self.extra_args)
-            };
+            let base_cmd = self.build_base_tool_command(agent, resume_token);
             let mut tool_cmd = if self.is_yolo_mode() {
                 if let Some(yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
@@ -304,36 +332,28 @@ impl Instance {
             let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
 
             if self.command.is_empty() {
-                crate::agents::get_agent(&self.tool)
-                    .filter(|a| a.supports_host_launch)
-                    .map(|a| {
-                        let mut cmd = a.binary.to_string();
-                        if !self.extra_args.is_empty() {
-                            cmd = format!("{} {}", cmd, self.extra_args);
-                        }
-                        let mut env_vars: Vec<(&str, &str)> = Vec::new();
-                        if needs_instance_id {
-                            env_vars.push(("AOE_INSTANCE_ID", &self.id));
-                        }
-                        if self.is_yolo_mode() {
-                            if let Some(ref yolo) = a.yolo {
-                                match yolo {
-                                    crate::agents::YoloMode::CliFlag(flag) => {
-                                        cmd = format!("{} {}", cmd, flag);
-                                    }
-                                    crate::agents::YoloMode::EnvVar(key, value) => {
-                                        env_vars.push((key, value));
-                                    }
+                agent.filter(|a| a.supports_host_launch).map(|a| {
+                    let mut cmd = self.build_base_tool_command(Some(a), resume_token);
+                    let mut env_vars: Vec<(&str, &str)> = Vec::new();
+                    if needs_instance_id {
+                        env_vars.push(("AOE_INSTANCE_ID", &self.id));
+                    }
+                    if self.is_yolo_mode() {
+                        if let Some(ref yolo) = a.yolo {
+                            match yolo {
+                                crate::agents::YoloMode::CliFlag(flag) => {
+                                    cmd = format!("{} {}", cmd, flag);
+                                }
+                                crate::agents::YoloMode::EnvVar(key, value) => {
+                                    env_vars.push((key, value));
                                 }
                             }
                         }
-                        wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
-                    })
+                    }
+                    wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
+                })
             } else {
-                let mut cmd = self.command.clone();
-                if !self.extra_args.is_empty() {
-                    cmd = format!("{} {}", cmd, self.extra_args);
-                }
+                let mut cmd = self.build_base_tool_command(agent, resume_token);
                 let agent = crate::agents::get_agent(&self.tool);
                 let mut env_vars: Vec<(&str, &str)> = Vec::new();
                 if needs_instance_id {
@@ -354,6 +374,27 @@ impl Instance {
                 Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
             }
         }
+    }
+
+    fn build_base_tool_command(
+        &self,
+        agent: Option<&crate::agents::AgentDef>,
+        resume_token: Option<&str>,
+    ) -> String {
+        let mut cmd = self.get_tool_command().to_string();
+        if let Some(token) = resume_token {
+            if let Some(resume) = agent
+                .and_then(|a| a.resume.as_ref())
+                .filter(|_| !self.has_command_override())
+            {
+                let resume_flag = resume.resume_flag.replace("{}", token);
+                cmd = format!("{} {}", cmd, resume_flag);
+            }
+        }
+        if !self.extra_args.is_empty() {
+            cmd = format!("{} {}", cmd, self.extra_args);
+        }
+        cmd
     }
 
     fn resolve_on_launch_hooks(&self) -> Option<Vec<String>> {
@@ -400,6 +441,10 @@ impl Instance {
     /// Respawn only the agent pane, preserving the tmux session layout.
     /// Runs on-launch hooks, rebuilds the agent command, and respawns the pane.
     pub fn respawn_agent_pane(&mut self) -> Result<()> {
+        self.respawn_agent_pane_with_resume(None)
+    }
+
+    fn respawn_agent_pane_with_resume(&mut self, resume_token: Option<&str>) -> Result<()> {
         let session = self.tmux_session()?;
         if !session.exists() {
             anyhow::bail!("Session does not exist");
@@ -410,7 +455,7 @@ impl Instance {
         }
 
         let cmd = self
-            .build_agent_command()
+            .build_agent_command(resume_token)
             .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
 
         session.kill_agent_pane_process_tree();
@@ -419,9 +464,137 @@ impl Instance {
         self.apply_tmux_options();
 
         self.status = Status::Starting;
-        self.last_start_time = Some(std::time::Instant::now());
+        self.last_start_time = Some(Instant::now());
+        self.pending_resume = None;
 
         Ok(())
+    }
+
+    pub fn initiate_graceful_restart(&mut self) -> Result<bool> {
+        if !self.can_gracefully_restart() {
+            return Ok(false);
+        }
+
+        let Some(config) =
+            crate::agents::get_agent(&self.tool).and_then(|agent| agent.resume.as_ref())
+        else {
+            return Ok(false);
+        };
+
+        let Some(first_group) = config.exit_sequence.first() else {
+            return Ok(false);
+        };
+
+        let session = self.tmux_session()?;
+        if !session.exists() {
+            return Ok(false);
+        }
+
+        session.send_keys_to_agent_pane(first_group)?;
+        self.status = Status::Restarting;
+        self.last_error = None;
+        self.pending_resume = Some(PendingResume {
+            phase: if config.exit_sequence.len() > 1 {
+                RestartPhase::SendingExitKeys {
+                    next_group_index: 1,
+                }
+            } else {
+                RestartPhase::WaitingForExit
+            },
+            config,
+            started_at: Instant::now(),
+            timeout: Duration::from_secs(config.timeout_secs),
+        });
+
+        Ok(true)
+    }
+
+    pub fn tick_pending_resume(&mut self) -> Option<crate::tui::Action> {
+        let pending = self.pending_resume.clone()?;
+
+        match pending.phase {
+            RestartPhase::SendingExitKeys { next_group_index } => {
+                let session = self.tmux_session().ok()?;
+                let Some(keys) = pending.config.exit_sequence.get(next_group_index) else {
+                    self.mutate_pending_resume_phase(RestartPhase::WaitingForExit);
+                    return None;
+                };
+
+                if let Err(err) = session.send_keys_to_agent_pane(keys) {
+                    tracing::warn!("Failed to send graceful restart keys: {}", err);
+                    return self.fallback_to_fresh_restart();
+                }
+
+                let next_phase = if next_group_index + 1 < pending.config.exit_sequence.len() {
+                    RestartPhase::SendingExitKeys {
+                        next_group_index: next_group_index + 1,
+                    }
+                } else {
+                    RestartPhase::WaitingForExit
+                };
+                self.mutate_pending_resume_phase(next_phase);
+                None
+            }
+            RestartPhase::WaitingForExit => {
+                let Ok(session) = self.tmux_session() else {
+                    return self.fallback_to_fresh_restart();
+                };
+
+                if session.is_pane_dead() {
+                    let output = session.capture_pane(100).unwrap_or_default();
+                    let resume_token =
+                        match extract_resume_token(&output, pending.config.resume_pattern) {
+                            Some(token) if !is_valid_resume_token(&token) => {
+                                tracing::warn!(
+                                    "Ignoring invalid resume token extracted for '{}': {:?}",
+                                    self.title,
+                                    token
+                                );
+                                return self.fallback_to_fresh_restart();
+                            }
+                            token => token,
+                        };
+                    let action = crate::tui::Action::AttachSession(self.id.clone());
+                    if let Err(err) = self.respawn_agent_pane_with_resume(resume_token.as_deref()) {
+                        tracing::warn!("Failed to respawn agent pane after graceful exit: {}", err);
+                        self.last_error = Some(err.to_string());
+                        self.status = Status::Error;
+                        self.pending_resume = None;
+                        return None;
+                    }
+                    return Some(action);
+                }
+
+                if pending.started_at.elapsed() >= pending.timeout {
+                    tracing::warn!(
+                        "Graceful restart timed out for '{}' after {:?}",
+                        self.title,
+                        pending.timeout
+                    );
+                    return self.fallback_to_fresh_restart();
+                }
+
+                None
+            }
+        }
+    }
+
+    fn mutate_pending_resume_phase(&mut self, phase: RestartPhase) {
+        if let Some(pending) = &mut self.pending_resume {
+            pending.phase = phase;
+        }
+    }
+
+    fn fallback_to_fresh_restart(&mut self) -> Option<crate::tui::Action> {
+        let action = crate::tui::Action::AttachSession(self.id.clone());
+        if let Err(err) = self.respawn_agent_pane_with_resume(None) {
+            tracing::warn!("Failed to fall back to fresh restart: {}", err);
+            self.last_error = Some(err.to_string());
+            self.status = Status::Error;
+            self.pending_resume = None;
+            return None;
+        }
+        Some(action)
     }
 
     fn apply_tmux_options(&self) {
@@ -534,7 +707,7 @@ impl Instance {
     }
 
     pub fn update_status(&mut self) {
-        if self.status == Status::Stopped {
+        if matches!(self.status, Status::Stopped | Status::Restarting) {
             return;
         }
 
@@ -661,6 +834,18 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
         })
         .collect::<String>();
     format!("{}bash -c 'stty susp undef; exec {}'", env_prefix, escaped)
+}
+
+fn extract_resume_token(output: &str, pattern: &str) -> Option<String> {
+    Regex::new(pattern)
+        .ok()?
+        .captures(output)?
+        .get(1)
+        .map(|m| m.as_str().to_string())
+}
+
+fn is_valid_resume_token(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 #[cfg(test)]
@@ -835,6 +1020,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_build_agent_command_inserts_claude_resume_flag_after_binary() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.extra_args = "--model sonnet".to_string();
+        inst.yolo_mode = true;
+
+        let cmd = inst
+            .build_agent_command(Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"))
+            .unwrap();
+
+        assert!(
+            cmd.starts_with("AOE_INSTANCE_ID='"),
+            "expected hook env prefix, got {cmd}"
+        );
+        assert!(
+            cmd.contains(
+                "bash -c 'stty susp undef; exec claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11 --model sonnet --dangerously-skip-permissions'"
+            ),
+            "unexpected claude resume command: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_agent_command_inserts_codex_resume_flag_after_binary() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.extra_args = "--model gpt-5".to_string();
+        inst.yolo_mode = true;
+
+        let cmd = inst
+            .build_agent_command(Some("019d1af9-a899-7df1-8f7d-a244126e5ded"))
+            .unwrap();
+
+        assert_eq!(
+            cmd,
+            "bash -c 'stty susp undef; exec codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'"
+        );
+    }
+
+    #[test]
+    fn test_resume_config_patterns_match_expected_agent_output() {
+        let claude_resume = crate::agents::get_agent("claude")
+            .and_then(|agent| agent.resume.as_ref())
+            .unwrap();
+        let codex_resume = crate::agents::get_agent("codex")
+            .and_then(|agent| agent.resume.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            extract_resume_token(
+                "Run claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11 to continue.",
+                claude_resume.resume_pattern,
+            )
+            .as_deref(),
+            Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11")
+        );
+        assert_eq!(
+            extract_resume_token(
+                "Resume with: codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded",
+                codex_resume.resume_pattern,
+            )
+            .as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
+        );
+    }
+
+    #[test]
+    fn test_graceful_restart_skipped_for_custom_commands_and_agents_without_resume() {
+        let mut custom = Instance::new("custom", "/tmp/test");
+        custom.tool = "claude".to_string();
+        custom.command = "wrapper".to_string();
+        assert!(!custom.initiate_graceful_restart().unwrap());
+        assert!(custom.pending_resume.is_none());
+
+        let mut no_resume = Instance::new("no-resume", "/tmp/test");
+        no_resume.tool = "opencode".to_string();
+        assert!(!no_resume.initiate_graceful_restart().unwrap());
+        assert!(no_resume.pending_resume.is_none());
+    }
+
     // Tests for Status enum
     #[test]
     fn test_status_default() {
@@ -852,6 +1118,7 @@ mod tests {
             Status::Stopped,
             Status::Error,
             Status::Starting,
+            Status::Restarting,
             Status::Deleting,
         ];
 
@@ -1003,6 +1270,14 @@ mod tests {
     }
 
     #[test]
+    fn test_has_custom_command_treats_extra_args_as_custom() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.extra_args = "--model sonnet".to_string();
+        assert!(inst.has_custom_command());
+    }
+
+    #[test]
     fn test_has_custom_command_same_as_agent_binary() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
@@ -1024,6 +1299,32 @@ mod tests {
         inst.tool = "unknown_agent".to_string();
         inst.command = "some-binary".to_string();
         assert!(inst.has_custom_command());
+    }
+
+    #[test]
+    fn test_can_gracefully_restart_allows_extra_args_without_command_override() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.extra_args = "--model sonnet".to_string();
+        assert!(inst.can_gracefully_restart());
+    }
+
+    #[test]
+    fn test_is_valid_resume_token_accepts_hex_and_hyphen() {
+        assert!(is_valid_resume_token(
+            "019d1af9-a899-7df1-8f7d-a244126e5ded"
+        ));
+        assert!(is_valid_resume_token(
+            "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_resume_token_rejects_invalid_characters() {
+        assert!(!is_valid_resume_token(""));
+        assert!(!is_valid_resume_token("abc def"));
+        assert!(!is_valid_resume_token("abc$def"));
+        assert!(!is_valid_resume_token("resume-token"));
     }
 
     #[test]
@@ -1050,5 +1351,22 @@ mod tests {
         assert_eq!(json, "\"unknown\"");
         let deserialized: Status = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, Status::Unknown);
+    }
+
+    #[test]
+    fn test_pending_resume_is_runtime_only() {
+        let mut inst = Instance::new("Test", "/tmp/test");
+        let resume = crate::agents::get_agent("claude")
+            .and_then(|agent| agent.resume.as_ref())
+            .unwrap();
+        inst.pending_resume = Some(PendingResume {
+            phase: RestartPhase::WaitingForExit,
+            config: resume,
+            started_at: Instant::now(),
+            timeout: Duration::from_secs(10),
+        });
+
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(!json.contains("pending_resume"));
     }
 }

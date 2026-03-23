@@ -71,7 +71,10 @@ impl StatusPoller {
                     if inst.is_sandboxed()
                         && !matches!(
                             inst.status,
-                            Status::Stopped | Status::Deleting | Status::Starting
+                            Status::Stopped
+                                | Status::Deleting
+                                | Status::Starting
+                                | Status::Restarting
                         )
                     {
                         if let Some(sandbox) = &inst.sandbox_info {

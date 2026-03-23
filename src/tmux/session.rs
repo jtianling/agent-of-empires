@@ -236,6 +236,27 @@ impl Session {
         Ok(())
     }
 
+    pub fn send_keys_to_agent_pane(&self, keys: &[&str]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
+        let output = Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&target)
+            .args(keys)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to send keys to agent pane: {}", stderr);
+        }
+
+        Ok(())
+    }
+
     pub fn kill_agent_pane_process_tree(&self) {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
         if let Some(pid) = process::get_pane_pid(&target) {

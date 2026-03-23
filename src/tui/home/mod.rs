@@ -274,6 +274,7 @@ impl HomeView {
                 inst.last_error = prev.last_error.clone();
                 inst.last_error_check = prev.last_error_check;
                 inst.last_start_time = prev.last_start_time;
+                inst.pending_resume = prev.pending_resume.clone();
             }
         }
 

@@ -245,6 +245,31 @@ impl App {
                 refresh_needed = true;
             }
 
+            let restarting_ids: Vec<String> = self
+                .home
+                .instances
+                .iter()
+                .filter(|inst| inst.status == crate::session::Status::Restarting)
+                .map(|inst| inst.id.clone())
+                .collect();
+            let mut restart_actions = Vec::new();
+            for id in restarting_ids {
+                let mut action = None;
+                self.home.mutate_instance(&id, |inst| {
+                    action = inst.tick_pending_resume();
+                });
+                if let Some(action) = action {
+                    restart_actions.push(action);
+                }
+            }
+            if !restart_actions.is_empty() {
+                refresh_needed = true;
+            }
+            for action in restart_actions {
+                self.execute_action(action, terminal)?;
+                refresh_needed = true;
+            }
+
             // Periodic refreshes (only when no input pending)
 
             // Request status refresh every interval (non-blocking)
@@ -450,9 +475,12 @@ impl App {
                 self.edit_file(&path, terminal)?;
             }
             Action::RespawnAgentPane(id) => {
-                if let Some(inst) = self.home.get_instance(&id) {
-                    let mut inst_clone = inst.clone();
-                    let tmux_session = match inst_clone.tmux_session() {
+                if let Some(inst) = self.home.get_instance(&id).cloned() {
+                    if inst.pending_resume.is_some() {
+                        return Ok(());
+                    }
+
+                    let tmux_session = match inst.tmux_session() {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::error!("Failed to get tmux session: {}", e);
@@ -464,6 +492,29 @@ impl App {
                         return self.attach_session(&id, terminal);
                     }
 
+                    if inst.can_gracefully_restart() {
+                        let mut initiate_result = Ok(false);
+                        self.home.mutate_instance(&id, |inst| {
+                            initiate_result = inst.initiate_graceful_restart();
+                        });
+
+                        match initiate_result {
+                            Ok(true) => {
+                                self.home.set_instance_error(&id, None);
+                                return Ok(());
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::error!("Failed to initiate graceful restart: {}", e);
+                                self.home.set_instance_error(&id, Some(e.to_string()));
+                                self.home
+                                    .set_instance_status(&id, crate::session::Status::Error);
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    let mut inst_clone = inst;
                     self.home
                         .set_instance_status(&id, crate::session::Status::Starting);
                     if let Err(e) = inst_clone.respawn_agent_pane() {
@@ -528,7 +579,10 @@ impl App {
         // Determine whether the agent pane needs to be (re)started.
         // Grace period: skip for freshly started/respawned instances (the brief
         // bash wrapper phase would otherwise trigger is_pane_running_shell).
-        let is_starting = instance.status == crate::session::Status::Starting;
+        let is_starting = matches!(
+            instance.status,
+            crate::session::Status::Starting | crate::session::Status::Restarting
+        );
         let session_exists = tmux_session.exists();
         let multi_pane = session_exists && tmux_session.pane_count() > 1;
 
