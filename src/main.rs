@@ -31,6 +31,9 @@ async fn main() -> Result<()> {
             return match command {
                 TmuxCommands::Status(args) => cli::tmux::run_status(args),
                 TmuxCommands::CodexTitleMonitor(args) => cli::tmux::run_codex_title_monitor(args),
+                TmuxCommands::MonitorNotifications(args) => {
+                    cli::tmux::run_monitor_notifications(args)
+                }
                 TmuxCommands::SwitchSession(args) => cli::tmux::run_switch_session(args),
             };
         }
@@ -41,6 +44,7 @@ async fn main() -> Result<()> {
     }
 
     let profile = session::resolve_profile(cli.profile);
+    std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);
     session::check_migration_hint(&profile);
 
     // TUI mode handles migrations with a spinner; CLI runs them silently

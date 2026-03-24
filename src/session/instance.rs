@@ -172,6 +172,13 @@ impl Instance {
         }
     }
 
+    fn current_profile() -> String {
+        std::env::var("AGENT_OF_EMPIRES_PROFILE")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| super::DEFAULT_PROFILE.to_string())
+    }
+
     pub fn is_sub_session(&self) -> bool {
         self.parent_session_id.is_some()
     }
@@ -238,7 +245,7 @@ impl Instance {
     }
 
     /// Apply all configured tmux options to a session with the given name and title.
-    fn apply_session_tmux_options(&self, session_name: &str, display_title: &str) {
+    fn apply_session_tmux_options(&self, session_name: &str, display_title: &str, profile: &str) {
         let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
         let sandbox = self.sandbox_display();
         crate::tmux::status_bar::apply_all_tmux_options(
@@ -246,6 +253,7 @@ impl Instance {
             display_title,
             branch,
             sandbox.as_ref(),
+            profile,
         );
     }
 
@@ -310,7 +318,7 @@ impl Instance {
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
 
         // Apply all configured tmux options (status bar, mouse, etc.)
-        self.apply_tmux_options();
+        self.apply_tmux_options(&Self::current_profile());
 
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
@@ -493,7 +501,7 @@ impl Instance {
         session.kill_agent_pane_process_tree();
         session.respawn_agent_pane(&cmd, &self.project_path)?;
 
-        self.apply_tmux_options();
+        self.apply_tmux_options(&Self::current_profile());
 
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
@@ -651,9 +659,9 @@ impl Instance {
         Some(action)
     }
 
-    fn apply_tmux_options(&self) {
+    fn apply_tmux_options(&self, profile: &str) {
         let name = tmux::Session::generate_name(&self.id, &self.title);
-        self.apply_session_tmux_options(&name, &self.title);
+        self.apply_session_tmux_options(&name, &self.title, profile);
         if self.tool == "codex" {
             if let Err(e) = tmux::status_bar::ensure_codex_title_monitor(&name, &self.title) {
                 tracing::debug!("Failed to refresh Codex title monitor: {}", e);
@@ -661,8 +669,8 @@ impl Instance {
         }
     }
 
-    pub fn refresh_agent_tmux_options(&self) {
-        self.apply_tmux_options();
+    pub fn refresh_agent_tmux_options(&self, profile: &str) {
+        self.apply_tmux_options(profile);
     }
 
     pub fn get_container_for_instance(&mut self) -> Result<containers::DockerContainer> {

@@ -194,7 +194,7 @@ async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         );
     }
 
-    inst.refresh_agent_tmux_options();
+    inst.refresh_agent_tmux_options(profile);
     tmux_session.attach(profile)?;
     Ok(())
 }

@@ -708,7 +708,7 @@ impl App {
             self.last_attach_client = Some(client_name.clone());
         }
 
-        instance.refresh_agent_tmux_options();
+        instance.refresh_agent_tmux_options(self.home.storage.profile());
 
         let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
         let source_session = self

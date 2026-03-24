@@ -16,7 +16,8 @@ const STATUS_LEFT_FORMAT: &str = concat!(
     " #[fg=colour46,bold]#{@aoe_index}",
     "#[fg=colour252,nobold] #{@aoe_title}",
     "#{?#{@aoe_from_title},  #[fg=colour245]from: #{@aoe_from_title}#[fg=colour252],}",
-    "  #[fg=colour245]Ctrl+b d detach "
+    "  #[fg=colour245]Ctrl+b d detach",
+    "#{?#{@aoe_waiting}, | #[fg=colour220]#{@aoe_waiting}#[fg=colour245],} "
 );
 
 /// Information about a sandboxed session for status bar display.
@@ -42,15 +43,12 @@ pub fn apply_status_bar(
     branch: Option<&str>,
     sandbox: Option<&SandboxDisplay>,
 ) -> Result<()> {
-    // Set the session title as a tmux user option
     set_session_option(session_name, "@aoe_title", title)?;
 
-    // Set branch if provided (for worktree sessions)
     if let Some(branch_name) = branch {
         set_session_option(session_name, "@aoe_branch", branch_name)?;
     }
 
-    // Set sandbox info if running in docker container
     if let Some(sandbox_info) = sandbox {
         set_session_option(session_name, "@aoe_sandbox", &sandbox_info.container_name)?;
     }
@@ -67,29 +65,26 @@ pub fn apply_status_bar(
     // Dark background with light text - matches aoe phosphor theme
     set_session_option(session_name, "status-style", "bg=colour235,fg=colour252")?;
     set_session_option(session_name, "status-left", STATUS_LEFT_FORMAT)?;
-    set_session_option(session_name, "status-left-length", "80")?;
+    set_session_option(session_name, "status-left-length", "160")?;
     set_window_option(session_name, "window-status-format", "")?;
     set_window_option(session_name, "window-status-current-format", "")?;
 
     Ok(())
 }
 
-/// Set a tmux option for a specific session.
-fn set_session_option(session_name: &str, option: &str, value: &str) -> Result<()> {
+pub(super) fn set_session_option(session_name: &str, option: &str, value: &str) -> Result<()> {
     let output = Command::new("tmux")
         .args(["set-option", "-t", session_name, option, value])
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Don't fail on option errors - status bar is non-critical
         tracing::debug!("Failed to set tmux option {}: {}", option, stderr);
     }
 
     Ok(())
 }
 
-/// Set a tmux window option for the active window in a specific session.
 fn set_window_option(session_name: &str, option: &str, value: &str) -> Result<()> {
     let output = Command::new("tmux")
         .args(["set-window-option", "-t", session_name, option, value])
@@ -119,10 +114,6 @@ fn enable_title_passthrough(session_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set the pane title for a tmux session via `select-pane -T`.
-///
-/// This gives agents that don't set their own OSC 0 title (e.g. Codex CLI)
-/// a useful default instead of showing the hostname.
 fn set_initial_pane_title(session_name: &str, title: &str) -> Result<()> {
     set_pane_title(session_name, title)
 }
@@ -140,7 +131,7 @@ fn set_pane_title(target: &str, title: &str) -> Result<()> {
     Ok(())
 }
 
-fn unset_session_option(session_name: &str, option: &str) -> Result<()> {
+pub(super) fn unset_session_option(session_name: &str, option: &str) -> Result<()> {
     let output = Command::new("tmux")
         .args(["set-option", "-t", session_name, "-u", option])
         .output()?;
@@ -151,6 +142,48 @@ fn unset_session_option(session_name: &str, option: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(super) fn set_server_option(option: &str, value: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-option", "-gq", option, value])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("Failed to set tmux server option {}: {}", option, stderr);
+    }
+
+    Ok(())
+}
+
+pub(super) fn unset_server_option(option: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-option", "-gqu", option])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("Failed to unset tmux server option {}: {}", option, stderr);
+    }
+
+    Ok(())
+}
+
+pub(super) fn get_server_option(option: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["show-option", "-gv", option])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    None
 }
 
 fn session_exists(session_name: &str) -> bool {
@@ -180,7 +213,7 @@ fn capture_pane(target: &str, lines: usize) -> Result<String> {
     }
 }
 
-fn pid_is_running(pid: &str) -> bool {
+pub(super) fn pid_is_running(pid: &str) -> bool {
     if pid.trim().is_empty() {
         return false;
     }
@@ -190,6 +223,22 @@ fn pid_is_running(pid: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+pub(super) fn list_aoe_sessions() -> Result<Vec<String>> {
+    let output = Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|name| name.starts_with(crate::tmux::SESSION_PREFIX))
+        .map(str::to_string)
+        .collect())
 }
 
 pub fn ensure_codex_title_monitor(session_name: &str, title: &str) -> Result<()> {
@@ -262,6 +311,7 @@ pub fn apply_all_tmux_options(
     title: &str,
     branch: Option<&str>,
     sandbox: Option<&SandboxDisplay>,
+    profile: &str,
 ) {
     use crate::session::config::{should_apply_tmux_mouse, should_apply_tmux_status_bar};
 
@@ -287,6 +337,10 @@ pub fn apply_all_tmux_options(
     if let Err(e) = set_initial_pane_title(session_name, title) {
         tracing::debug!("Failed to set initial pane title: {}", e);
     }
+
+    if let Err(e) = super::notification_monitor::ensure_notification_monitor(profile) {
+        tracing::debug!("Failed to ensure notification monitor: {}", e);
+    }
 }
 
 /// Session info retrieved from tmux user options.
@@ -301,15 +355,11 @@ pub struct SessionInfo {
 pub fn get_session_info_for_current() -> Option<SessionInfo> {
     let session_name = crate::tmux::get_current_session_name()?;
 
-    // Check if this is an aoe session
     if !session_name.starts_with(crate::tmux::SESSION_PREFIX) {
         return None;
     }
 
-    // Try to get the aoe title from tmux user option
     let title = get_session_option(&session_name, "@aoe_title").unwrap_or_else(|| {
-        // Fallback: extract title from session name
-        // Session names are: aoe_<title>_<id>
         let name_without_prefix = session_name
             .strip_prefix(crate::tmux::SESSION_PREFIX)
             .unwrap_or(&session_name);
@@ -351,7 +401,6 @@ pub fn get_status_for_current_session() -> Option<String> {
     Some(result)
 }
 
-/// Get a tmux option value for a session.
 fn get_session_option(session_name: &str, option: &str) -> Option<String> {
     let output = Command::new("tmux")
         .args(["show-options", "-t", session_name, "-v", option])
@@ -395,9 +444,6 @@ mod tests {
 
     #[test]
     fn test_get_status_returns_none_for_non_tmux() {
-        // When not in tmux, get_current_session_name returns None
-        // so get_status_for_current_session should also return None
-        // This test just verifies the function doesn't panic
         let _ = get_status_for_current_session();
     }
 
@@ -407,6 +453,8 @@ mod tests {
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_title}"));
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_from_title}"));
         assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b d detach"));
+        assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_waiting}"));
+        assert!(STATUS_LEFT_FORMAT.contains("colour220"));
         assert!(!STATUS_LEFT_FORMAT.contains("Ctrl+b 1-9"));
     }
 }

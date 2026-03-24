@@ -123,6 +123,7 @@ pub async fn run(profile: &str) -> Result<()> {
     let result = app.run(&mut terminal).await;
 
     crate::tmux::utils::cleanup_session_cycle_bindings();
+    crate::tmux::notification_monitor::clear_notification_option_for_current_session();
 
     // Restore terminal
     disable_raw_mode()?;
