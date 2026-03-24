@@ -494,13 +494,25 @@ impl App {
 
                     if inst.can_gracefully_restart() {
                         let mut initiate_result = Ok(false);
+                        let mut attach_after_graceful_restart = false;
                         self.home.mutate_instance(&id, |inst| {
                             initiate_result = inst.initiate_graceful_restart();
+                            attach_after_graceful_restart = inst.pending_resume.is_none();
                         });
 
                         match initiate_result {
                             Ok(true) => {
                                 self.home.set_instance_error(&id, None);
+                                if attach_after_graceful_restart {
+                                    if let Err(err) = self.home.save() {
+                                        tracing::error!(
+                                            "Failed to save after graceful restart: {}",
+                                            err
+                                        );
+                                    }
+                                    crate::tmux::refresh_session_cache();
+                                    self.attach_session(&id, terminal)?;
+                                }
                                 return Ok(());
                             }
                             Ok(false) => {}
@@ -527,6 +539,9 @@ impl App {
                         return Ok(());
                     }
                     self.home.set_instance_error(&id, None);
+                    if let Err(err) = self.home.save() {
+                        tracing::error!("Failed to save after respawning agent pane: {}", err);
+                    }
                     crate::tmux::refresh_session_cache();
 
                     // Auto-attach so the user sees the restarted agent immediately

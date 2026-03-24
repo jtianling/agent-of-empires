@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::session::{Instance, Status};
+use crate::session::{extract_resume_token, is_valid_resume_token, Instance, Status};
 
 /// Result of a status check for a single session
 #[derive(Debug)]
@@ -16,6 +16,7 @@ pub struct StatusUpdate {
     pub id: String,
     pub status: Status,
     pub last_error: Option<String>,
+    pub resume_token: Option<String>,
 }
 
 /// Background thread that polls session status without blocking the UI
@@ -49,6 +50,7 @@ impl StatusPoller {
         // Initialize to the past so the first check runs immediately
         let mut last_container_check = Instant::now() - container_check_interval;
         let mut container_states: HashMap<String, bool> = HashMap::new();
+        let mut previous_statuses: HashMap<String, Status> = HashMap::new();
         // Track pane titles we've set for agents that don't manage their own,
         // so we only call tmux select-pane when the title actually changes.
         let mut managed_pane_titles: HashMap<String, String> = HashMap::new();
@@ -63,61 +65,89 @@ impl StatusPoller {
                 last_container_check = Instant::now();
             }
 
-            let updates: Vec<StatusUpdate> = instances
-                .into_iter()
-                .map(|mut inst| {
-                    // For sandboxed sessions, check if the container is dead before
-                    // falling through to tmux-based status detection.
-                    if inst.is_sandboxed()
-                        && !matches!(
-                            inst.status,
-                            Status::Stopped
-                                | Status::Deleting
-                                | Status::Starting
-                                | Status::Restarting
-                        )
-                    {
-                        if let Some(sandbox) = &inst.sandbox_info {
-                            if let Some(&running) = container_states.get(&sandbox.container_name) {
-                                if !running {
-                                    return StatusUpdate {
-                                        id: inst.id,
-                                        status: Status::Error,
-                                        last_error: Some("Container is not running".to_string()),
-                                    };
-                                }
+            let mut updates = Vec::with_capacity(instances.len());
+            let mut next_previous_statuses = HashMap::with_capacity(instances.len());
+
+            for mut inst in instances {
+                let previous_status = previous_statuses.get(&inst.id).copied();
+
+                // For sandboxed sessions, check if the container is dead before
+                // falling through to tmux-based status detection.
+                if inst.is_sandboxed()
+                    && !matches!(
+                        inst.status,
+                        Status::Stopped | Status::Deleting | Status::Starting | Status::Restarting
+                    )
+                {
+                    if let Some(sandbox) = &inst.sandbox_info {
+                        if let Some(&running) = container_states.get(&sandbox.container_name) {
+                            if !running {
+                                next_previous_statuses.insert(inst.id.clone(), Status::Error);
+                                updates.push(StatusUpdate {
+                                    id: inst.id,
+                                    status: Status::Error,
+                                    last_error: Some("Container is not running".to_string()),
+                                    resume_token: None,
+                                });
+                                continue;
                             }
                         }
                     }
+                }
 
-                    inst.update_status();
+                inst.update_status();
 
-                    // For agents that don't set their own title, keep the pane
-                    // title aligned with the session title. Codex is handled by
-                    // its dedicated tmux monitor so the dashboard poller does
-                    // not race the live waiting indicator.
-                    let agent_manages_title =
-                        crate::agents::get_agent(&inst.tool).is_some_and(|a| a.sets_own_title);
-                    if !agent_manages_title && inst.tool != "codex" {
-                        let desired = inst.title.clone();
-                        let last = managed_pane_titles.get(&inst.id);
-                        if last.map_or(true, |prev| *prev != desired) {
-                            let session_name =
-                                crate::tmux::Session::generate_name(&inst.id, &inst.title);
-                            let _ = std::process::Command::new("tmux")
-                                .args(["select-pane", "-t", &session_name, "-T", &desired])
-                                .output();
-                            managed_pane_titles.insert(inst.id.clone(), desired);
-                        }
+                let resume_token =
+                    if previous_status != Some(Status::Error) && inst.status == Status::Error {
+                        crate::agents::get_agent(&inst.tool)
+                            .and_then(|agent| agent.resume.as_ref())
+                            .and_then(|resume| {
+                                let output = inst.tmux_session().ok()?.capture_pane(100).ok()?;
+                                let token = extract_resume_token(&output, resume.resume_pattern)?;
+                                if is_valid_resume_token(&token) {
+                                    Some(token)
+                                } else {
+                                    tracing::warn!(
+                                        "Ignoring invalid stored resume token for '{}': {:?}",
+                                        inst.title,
+                                        token
+                                    );
+                                    None
+                                }
+                            })
+                    } else {
+                        None
+                    };
+
+                // For agents that don't set their own title, keep the pane
+                // title aligned with the session title. Codex is handled by
+                // its dedicated tmux monitor so the dashboard poller does
+                // not race the live waiting indicator.
+                let agent_manages_title =
+                    crate::agents::get_agent(&inst.tool).is_some_and(|a| a.sets_own_title);
+                if !agent_manages_title && inst.tool != "codex" {
+                    let desired = inst.title.clone();
+                    let last = managed_pane_titles.get(&inst.id);
+                    if last.map_or(true, |prev| *prev != desired) {
+                        let session_name =
+                            crate::tmux::Session::generate_name(&inst.id, &inst.title);
+                        let _ = std::process::Command::new("tmux")
+                            .args(["select-pane", "-t", &session_name, "-T", &desired])
+                            .output();
+                        managed_pane_titles.insert(inst.id.clone(), desired);
                     }
+                }
 
-                    StatusUpdate {
-                        id: inst.id,
-                        status: inst.status,
-                        last_error: inst.last_error,
-                    }
-                })
-                .collect();
+                next_previous_statuses.insert(inst.id.clone(), inst.status);
+                updates.push(StatusUpdate {
+                    id: inst.id,
+                    status: inst.status,
+                    last_error: inst.last_error,
+                    resume_token,
+                });
+            }
+
+            previous_statuses = next_previous_statuses;
 
             if result_tx.send(updates).is_err() {
                 break;

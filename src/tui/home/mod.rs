@@ -319,12 +319,15 @@ impl HomeView {
         use crate::session::Status;
 
         if let Some(updates) = self.status_poller.try_recv_updates() {
+            let mut should_save = false;
             for update in updates {
                 let old_status = self.get_instance(&update.id).map(|i| i.status);
+                let resume_token = update.resume_token.clone();
 
                 let should_update = old_status.is_some_and(|s| {
                     s != Status::Deleting
                         && s != Status::Stopped
+                        && s != Status::Restarting
                         && update.status != Status::Stopped
                 });
 
@@ -341,6 +344,19 @@ impl HomeView {
                             crate::sound::play_for_transition(old, new_status, &self.sound_config);
                         }
                     }
+                }
+
+                if let Some(token) = resume_token {
+                    self.mutate_instance(&update.id, |inst| {
+                        inst.resume_token = Some(token);
+                    });
+                    should_save = true;
+                }
+            }
+
+            if should_save {
+                if let Err(err) = self.save() {
+                    tracing::error!("Failed to persist resume token: {}", err);
                 }
             }
             self.pending_status_refresh = false;

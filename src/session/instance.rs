@@ -114,6 +114,8 @@ pub struct Instance {
     pub last_start_time: Option<std::time::Instant>,
     #[serde(skip)]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<String>,
     #[serde(skip)]
     pub pending_resume: Option<PendingResume>,
 }
@@ -138,6 +140,7 @@ impl Instance {
             last_error_check: None,
             last_start_time: None,
             last_error: None,
+            resume_token: None,
             pending_resume: None,
         }
     }
@@ -234,6 +237,7 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
     ) -> Result<()> {
+        self.clear_resume_token();
         let session = self.tmux_session()?;
 
         if session.exists() {
@@ -445,6 +449,7 @@ impl Instance {
     }
 
     fn respawn_agent_pane_with_resume(&mut self, resume_token: Option<&str>) -> Result<()> {
+        let effective_resume_token = self.resolved_resume_token(resume_token);
         let session = self.tmux_session()?;
         if !session.exists() {
             anyhow::bail!("Session does not exist");
@@ -455,7 +460,7 @@ impl Instance {
         }
 
         let cmd = self
-            .build_agent_command(resume_token)
+            .build_agent_command(effective_resume_token.as_deref())
             .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
 
         session.kill_agent_pane_process_tree();
@@ -465,6 +470,7 @@ impl Instance {
 
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
+        self.clear_resume_token();
         self.pending_resume = None;
 
         Ok(())
@@ -491,9 +497,12 @@ impl Instance {
         }
 
         // If the agent pane is already dead, skip graceful restart. The pane
-        // output is stale, so any resume token extracted from it may have
-        // already been consumed by a manually-started agent.
+        // output is stale, so only a previously persisted token is safe to use.
         if session.is_pane_dead() {
+            if let Some(token) = self.resolved_resume_token(None) {
+                self.respawn_agent_pane_with_resume(Some(token.as_str()))?;
+                return Ok(true);
+            }
             return Ok(false);
         }
 
@@ -592,7 +601,18 @@ impl Instance {
         }
     }
 
+    fn clear_resume_token(&mut self) {
+        self.resume_token = None;
+    }
+
+    fn resolved_resume_token(&self, resume_token: Option<&str>) -> Option<String> {
+        resume_token
+            .map(std::string::ToString::to_string)
+            .or_else(|| self.resume_token.clone())
+    }
+
     fn fallback_to_fresh_restart(&mut self) -> Option<crate::tui::Action> {
+        self.resume_token = None;
         let action = crate::tui::Action::AttachSession(self.id.clone());
         if let Err(err) = self.respawn_agent_pane_with_resume(None) {
             tracing::warn!("Failed to fall back to fresh restart: {}", err);
@@ -843,7 +863,7 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
     format!("{}bash -c 'stty susp undef; exec {}'", env_prefix, escaped)
 }
 
-fn extract_resume_token(output: &str, pattern: &str) -> Option<String> {
+pub(crate) fn extract_resume_token(output: &str, pattern: &str) -> Option<String> {
     Regex::new(pattern)
         .ok()?
         .captures(output)?
@@ -851,7 +871,7 @@ fn extract_resume_token(output: &str, pattern: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
-fn is_valid_resume_token(s: &str) -> bool {
+pub(crate) fn is_valid_resume_token(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
@@ -866,6 +886,7 @@ mod tests {
         assert_eq!(inst.project_path, "/tmp/test");
         assert_eq!(inst.status, Status::Idle);
         assert_eq!(inst.id.len(), 16);
+        assert!(inst.resume_token.is_none());
     }
 
     #[test]
@@ -1220,6 +1241,35 @@ mod tests {
     }
 
     #[test]
+    fn test_instance_deserialization_defaults_resume_token_to_none() {
+        let json = r#"{
+            "id":"deadbeefcafebabe",
+            "title":"Test Project",
+            "project_path":"/tmp/test-project",
+            "status":"idle",
+            "created_at":"2024-01-01T00:00:00Z"
+        }"#;
+
+        let deserialized: Instance = serde_json::from_str(json).unwrap();
+
+        assert!(deserialized.resume_token.is_none());
+    }
+
+    #[test]
+    fn test_instance_resume_token_roundtrip() {
+        let mut inst = Instance::new("Test Project", "/home/user/project");
+        inst.resume_token = Some("019d1af9-a899-7df1-8f7d-a244126e5ded".to_string());
+
+        let json = serde_json::to_string(&inst).unwrap();
+        let deserialized: Instance = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            deserialized.resume_token.as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
+        );
+    }
+
+    #[test]
     fn test_instance_serialization_skips_runtime_fields() {
         let mut inst = Instance::new("Test", "/tmp/test");
         inst.last_error_check = Some(std::time::Instant::now());
@@ -1375,5 +1425,53 @@ mod tests {
 
         let json = serde_json::to_string(&inst).unwrap();
         assert!(!json.contains("pending_resume"));
+    }
+
+    #[test]
+    fn test_clear_resume_token_helper_clears_stored_token() {
+        let mut inst = Instance::new("Test", "/tmp/test");
+        inst.resume_token = Some("019d1af9-a899-7df1-8f7d-a244126e5ded".to_string());
+
+        inst.clear_resume_token();
+
+        assert!(inst.resume_token.is_none());
+    }
+
+    #[test]
+    fn test_resolved_resume_token_uses_stored_token_when_explicit_token_missing() {
+        let mut inst = Instance::new("Test", "/tmp/test");
+        inst.resume_token = Some("019d1af9-a899-7df1-8f7d-a244126e5ded".to_string());
+
+        assert_eq!(
+            inst.resolved_resume_token(None).as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
+        );
+    }
+
+    #[test]
+    fn test_resolved_resume_token_prefers_explicit_token() {
+        let mut inst = Instance::new("Test", "/tmp/test");
+        inst.resume_token = Some("stored-token".to_string());
+
+        assert_eq!(
+            inst.resolved_resume_token(Some("019d1af9-a899-7df1-8f7d-a244126e5ded"))
+                .as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
+        );
+    }
+
+    #[test]
+    fn test_dead_pane_restart_would_use_stored_resume_token_when_available() {
+        let mut inst = Instance::new("Test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.resume_token = Some("019d1af9-a899-7df1-8f7d-a244126e5ded".to_string());
+
+        // The tmux-backed dead-pane restart is covered at runtime. This unit
+        // test covers the stored-token selection used by that branch.
+        assert!(inst.can_gracefully_restart());
+        assert_eq!(
+            inst.resolved_resume_token(None).as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
+        );
     }
 }
