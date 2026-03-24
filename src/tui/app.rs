@@ -514,10 +514,12 @@ impl App {
                         }
                     }
 
-                    let mut inst_clone = inst;
-                    self.home
-                        .set_instance_status(&id, crate::session::Status::Starting);
-                    if let Err(e) = inst_clone.respawn_agent_pane() {
+                    let mut respawn_result = Ok(());
+                    self.home.mutate_instance(&id, |inst| {
+                        respawn_result = inst.respawn_agent_pane();
+                    });
+
+                    if let Err(e) = respawn_result {
                         tracing::error!("Failed to respawn agent pane: {}", e);
                         self.home.set_instance_error(&id, Some(e.to_string()));
                         self.home

@@ -490,6 +490,13 @@ impl Instance {
             return Ok(false);
         }
 
+        // If the agent pane is already dead, skip graceful restart. The pane
+        // output is stale, so any resume token extracted from it may have
+        // already been consumed by a manually-started agent.
+        if session.is_pane_dead() {
+            return Ok(false);
+        }
+
         session.send_keys_to_agent_pane(first_group)?;
         self.status = Status::Restarting;
         self.last_error = None;
