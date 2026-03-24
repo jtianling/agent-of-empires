@@ -20,7 +20,7 @@ pub use config::{
 pub use environment::validate_env_entry;
 pub use groups::{flatten_tree, Group, GroupTree, Item};
 pub(crate) use instance::{extract_resume_token, is_valid_resume_token};
-pub use instance::{Instance, SandboxInfo, Status, WorktreeInfo};
+pub use instance::{Instance, SandboxInfo, Status, StatusUpdateOptions, WorktreeInfo};
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,
     validate_check_interval, validate_memory_limit, validate_path_exists, validate_volume_format,

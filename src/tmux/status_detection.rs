@@ -6,6 +6,13 @@ use super::utils::strip_ansi;
 
 const SPINNER_CHARS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+pub fn detect_status_from_title(title: &str) -> Option<Status> {
+    title
+        .chars()
+        .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+        .then_some(Status::Running)
+}
+
 pub fn detect_status_from_content(content: &str, tool: &str, _fg_pid: Option<u32>) -> Status {
     let status = crate::agents::get_agent(tool)
         .map(|a| (a.detect_status)(content))
@@ -317,6 +324,42 @@ pub fn detect_cursor_status(_content: &str) -> Status {
 /// Terminal sessions are plain shells -- no meaningful status to detect.
 pub fn detect_terminal_status(_content: &str) -> Status {
     Status::Idle
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_status_from_title_with_spinner() {
+        assert_eq!(
+            detect_status_from_title("⠙ codex working"),
+            Some(Status::Running)
+        );
+        assert_eq!(
+            detect_status_from_title("agent ⠋ compiling"),
+            Some(Status::Running)
+        );
+    }
+
+    #[test]
+    fn test_detect_status_from_title_without_spinner() {
+        assert_eq!(detect_status_from_title("codex idle"), None);
+        assert_eq!(detect_status_from_title("done ✓"), None);
+    }
+
+    #[test]
+    fn test_detect_status_from_title_golden_fixtures() {
+        let running = include_str!("../../tests/fixtures/title_fast_path/running_title.txt");
+        let non_running =
+            include_str!("../../tests/fixtures/title_fast_path/non_running_title.txt");
+
+        assert_eq!(
+            detect_status_from_title(running.trim()),
+            Some(Status::Running)
+        );
+        assert_eq!(detect_status_from_title(non_running.trim()), None);
+    }
 }
 
 pub fn detect_gemini_status(raw_content: &str) -> Status {

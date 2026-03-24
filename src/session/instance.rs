@@ -48,6 +48,21 @@ pub struct PendingResume {
     pub timeout: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct StatusUpdateOptions {
+    pub allow_capture: bool,
+    pub reused_status: Option<Status>,
+}
+
+impl Default for StatusUpdateOptions {
+    fn default() -> Self {
+        Self {
+            allow_capture: true,
+            reused_status: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub branch: String,
@@ -118,6 +133,14 @@ pub struct Instance {
     pub resume_token: Option<String>,
     #[serde(skip)]
     pub pending_resume: Option<PendingResume>,
+    #[serde(skip)]
+    pub last_spinner_seen: Option<Instant>,
+    #[serde(skip)]
+    pub spike_start: Option<Instant>,
+    #[serde(skip)]
+    pub pre_spike_status: Option<Status>,
+    #[serde(skip)]
+    pub acknowledged: bool,
 }
 
 impl Instance {
@@ -142,6 +165,10 @@ impl Instance {
             last_error: None,
             resume_token: None,
             pending_resume: None,
+            last_spinner_seen: None,
+            spike_start: None,
+            pre_spike_status: None,
+            acknowledged: false,
         }
     }
 
@@ -557,7 +584,7 @@ impl Instance {
                 };
 
                 if session.is_pane_dead() {
-                    let output = session.capture_pane(100).unwrap_or_default();
+                    let output = session.capture_pane_cached(100).unwrap_or_default();
                     let resume_token =
                         match extract_resume_token(&output, pending.config.resume_pattern) {
                             Some(token) if !is_valid_resume_token(&token) => {
@@ -734,7 +761,14 @@ impl Instance {
     }
 
     pub fn update_status(&mut self) {
-        if matches!(self.status, Status::Stopped | Status::Restarting) {
+        self.update_status_with_options(StatusUpdateOptions::default());
+    }
+
+    pub fn update_status_with_options(&mut self, options: StatusUpdateOptions) {
+        if matches!(
+            self.status,
+            Status::Stopped | Status::Restarting | Status::Deleting
+        ) {
             return;
         }
 
@@ -770,30 +804,60 @@ impl Instance {
             return;
         }
 
+        let previous_status = self.status;
+        let now = Instant::now();
+
         // Check hook-based status first (more reliable than tmux pane parsing)
         if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
             tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
+            self.clear_spike_state();
             self.status = if session.is_pane_dead() {
                 Status::Error
             } else {
-                hook_status
+                self.apply_acknowledged_mapping(hook_status)
             };
             self.last_error = None;
             return;
         }
 
-        // Fall back to tmux pane content detection
-        let detected = match session.detect_status(&self.tool) {
-            Ok(status) => status,
-            Err(_) => Status::Idle,
+        let session_name = tmux::Session::generate_name(&self.id, &self.title);
+        if let Some(detected) = tmux::get_cached_pane_info(&session_name)
+            .and_then(|info| tmux::status_detection::detect_status_from_title(&info.pane_title))
+        {
+            self.clear_spike_state();
+            self.last_spinner_seen = Some(now);
+            self.status = detected;
+            self.last_error = None;
+            return;
+        }
+
+        let mut detected = if options.allow_capture {
+            match session.detect_status(&self.tool) {
+                Ok(status) => status,
+                Err(_) => Status::Idle,
+            }
+        } else {
+            options.reused_status.unwrap_or(previous_status)
         };
         tracing::trace!(
-            "status detection '{}' (tool={}, custom_cmd={}): {:?}",
+            "status detection '{}' (tool={}, custom_cmd={}, allow_capture={}): {:?}",
             self.title,
             self.tool,
             self.has_custom_command(),
+            options.allow_capture,
             detected
         );
+
+        if options.allow_capture && detected == Status::Running {
+            self.last_spinner_seen = Some(now);
+        }
+
+        if options.allow_capture {
+            detected = self.apply_spike_detection(detected, previous_status, now);
+            detected = self.apply_spinner_grace_period(detected, previous_status, now);
+        }
+        detected = self.apply_acknowledged_mapping(detected);
+
         // In multi-pane sessions, is_pane_running_shell may target a user-created
         // shell pane (e.g. from Ctrl+B %) rather than the agent pane when
         // @aoe_agent_pane is not set. Only treat a shell as stale for
@@ -815,6 +879,63 @@ impl Instance {
 
         // Clear stale error now that the session is healthy
         self.last_error = None;
+    }
+
+    fn clear_spike_state(&mut self) {
+        self.spike_start = None;
+        self.pre_spike_status = None;
+    }
+
+    fn apply_acknowledged_mapping(&self, status: Status) -> Status {
+        if status == Status::Waiting && self.acknowledged {
+            Status::Idle
+        } else {
+            status
+        }
+    }
+
+    fn apply_spike_detection(
+        &mut self,
+        detected: Status,
+        previous_status: Status,
+        now: Instant,
+    ) -> Status {
+        if detected != Status::Running {
+            self.clear_spike_state();
+            return detected;
+        }
+
+        if previous_status == Status::Running {
+            self.clear_spike_state();
+            return Status::Running;
+        }
+
+        if self.spike_start.is_some() {
+            self.clear_spike_state();
+            return Status::Running;
+        }
+
+        self.spike_start = Some(now);
+        self.pre_spike_status = Some(previous_status);
+        previous_status
+    }
+
+    fn apply_spinner_grace_period(
+        &mut self,
+        detected: Status,
+        previous_status: Status,
+        now: Instant,
+    ) -> Status {
+        if previous_status == Status::Running
+            && detected != Status::Running
+            && self
+                .last_spinner_seen
+                .is_some_and(|seen| now.duration_since(seen) <= Duration::from_millis(500))
+        {
+            Status::Running
+        } else {
+            detected
+        }
     }
 
     pub fn capture_output_with_size(
@@ -887,6 +1008,10 @@ mod tests {
         assert_eq!(inst.status, Status::Idle);
         assert_eq!(inst.id.len(), 16);
         assert!(inst.resume_token.is_none());
+        assert!(inst.last_spinner_seen.is_none());
+        assert!(inst.spike_start.is_none());
+        assert!(inst.pre_spike_status.is_none());
+        assert!(!inst.acknowledged);
     }
 
     #[test]
@@ -1473,5 +1598,88 @@ mod tests {
             inst.resolved_resume_token(None).as_deref(),
             Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
         );
+    }
+
+    #[test]
+    fn test_acknowledged_waiting_maps_to_idle() {
+        let mut inst = Instance::new("test", "/tmp/test");
+
+        assert_eq!(
+            inst.apply_acknowledged_mapping(Status::Waiting),
+            Status::Waiting
+        );
+
+        inst.acknowledged = true;
+        assert_eq!(
+            inst.apply_acknowledged_mapping(Status::Waiting),
+            Status::Idle
+        );
+        assert_eq!(
+            inst.apply_acknowledged_mapping(Status::Running),
+            Status::Running
+        );
+    }
+
+    #[test]
+    fn test_spinner_grace_period_holds_running() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        let now = Instant::now();
+        inst.last_spinner_seen = Some(now);
+
+        assert_eq!(
+            inst.apply_spinner_grace_period(
+                Status::Idle,
+                Status::Running,
+                now + Duration::from_millis(400)
+            ),
+            Status::Running
+        );
+        assert_eq!(
+            inst.apply_spinner_grace_period(
+                Status::Idle,
+                Status::Running,
+                now + Duration::from_millis(600)
+            ),
+            Status::Idle
+        );
+    }
+
+    #[test]
+    fn test_spike_detection_requires_confirmation() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        let now = Instant::now();
+
+        let first = inst.apply_spike_detection(Status::Running, Status::Idle, now);
+        assert_eq!(first, Status::Idle);
+        assert!(inst.spike_start.is_some());
+        assert_eq!(inst.pre_spike_status, Some(Status::Idle));
+
+        let second = inst.apply_spike_detection(
+            Status::Running,
+            Status::Idle,
+            now + Duration::from_millis(500),
+        );
+        assert_eq!(second, Status::Running);
+        assert!(inst.spike_start.is_none());
+        assert!(inst.pre_spike_status.is_none());
+    }
+
+    #[test]
+    fn test_spike_detection_rejects_transient_running() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        let now = Instant::now();
+
+        let first = inst.apply_spike_detection(Status::Running, Status::Waiting, now);
+        assert_eq!(first, Status::Waiting);
+        assert!(inst.spike_start.is_some());
+
+        let second = inst.apply_spike_detection(
+            Status::Idle,
+            Status::Waiting,
+            now + Duration::from_millis(500),
+        );
+        assert_eq!(second, Status::Idle);
+        assert!(inst.spike_start.is_none());
+        assert!(inst.pre_spike_status.is_none());
     }
 }

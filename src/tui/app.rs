@@ -732,6 +732,8 @@ impl App {
             self.home.sort_order,
             &session_name,
         );
+        self.home
+            .mutate_instance(session_id, |inst| inst.acknowledged = true);
 
         let profile = self.home.storage.profile().to_string();
         let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach(&profile))?;

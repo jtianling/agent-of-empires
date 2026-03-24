@@ -275,6 +275,10 @@ impl HomeView {
                 inst.last_error_check = prev.last_error_check;
                 inst.last_start_time = prev.last_start_time;
                 inst.pending_resume = prev.pending_resume.clone();
+                inst.last_spinner_seen = prev.last_spinner_seen;
+                inst.spike_start = prev.spike_start;
+                inst.pre_spike_status = prev.pre_spike_status;
+                inst.acknowledged = prev.acknowledged;
             }
         }
 
@@ -337,6 +341,11 @@ impl HomeView {
                     self.mutate_instance(&update.id, |inst| {
                         inst.status = new_status;
                         inst.last_error = new_error;
+                        inst.last_error_check = update.last_error_check;
+                        inst.last_spinner_seen = update.last_spinner_seen;
+                        inst.spike_start = update.spike_start;
+                        inst.pre_spike_status = update.pre_spike_status;
+                        inst.acknowledged = update.acknowledged;
                     });
 
                     if let Some(old) = old_status {

@@ -8,7 +8,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::session::{extract_resume_token, is_valid_resume_token, Instance, Status};
+use crate::session::{
+    extract_resume_token, is_valid_resume_token, Instance, Status, StatusUpdateOptions,
+};
+
+const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Result of a status check for a single session
 #[derive(Debug)]
@@ -17,6 +21,11 @@ pub struct StatusUpdate {
     pub status: Status,
     pub last_error: Option<String>,
     pub resume_token: Option<String>,
+    pub last_error_check: Option<Instant>,
+    pub last_spinner_seen: Option<Instant>,
+    pub spike_start: Option<Instant>,
+    pub pre_spike_status: Option<Status>,
+    pub acknowledged: bool,
 }
 
 /// Background thread that polls session status without blocking the UI
@@ -51,12 +60,15 @@ impl StatusPoller {
         let mut last_container_check = Instant::now() - container_check_interval;
         let mut container_states: HashMap<String, bool> = HashMap::new();
         let mut previous_statuses: HashMap<String, Status> = HashMap::new();
+        let mut last_activity: HashMap<String, i64> = HashMap::new();
+        let mut last_full_check: HashMap<String, Instant> = HashMap::new();
         // Track pane titles we've set for agents that don't manage their own,
         // so we only call tmux select-pane when the title actually changes.
         let mut managed_pane_titles: HashMap<String, String> = HashMap::new();
 
         while let Ok(instances) = request_rx.recv() {
             crate::tmux::refresh_session_cache();
+            crate::tmux::refresh_pane_info_cache();
 
             // Refresh container health if any sandboxed session exists and interval elapsed
             let has_sandboxed = instances.iter().any(|i| i.is_sandboxed());
@@ -70,6 +82,7 @@ impl StatusPoller {
 
             for mut inst in instances {
                 let previous_status = previous_statuses.get(&inst.id).copied();
+                let now = Instant::now();
 
                 // For sandboxed sessions, check if the container is dead before
                 // falling through to tmux-based status detection.
@@ -88,6 +101,11 @@ impl StatusPoller {
                                     status: Status::Error,
                                     last_error: Some("Container is not running".to_string()),
                                     resume_token: None,
+                                    last_error_check: inst.last_error_check,
+                                    last_spinner_seen: inst.last_spinner_seen,
+                                    spike_start: inst.spike_start,
+                                    pre_spike_status: inst.pre_spike_status,
+                                    acknowledged: inst.acknowledged,
                                 });
                                 continue;
                             }
@@ -95,29 +113,58 @@ impl StatusPoller {
                     }
                 }
 
-                inst.update_status();
+                let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+                let current_activity = crate::tmux::get_cached_window_activity(&session_name);
+                let hook_based = crate::agents::get_agent(&inst.tool)
+                    .is_some_and(|agent| agent.hook_config.is_some());
+                let decision = decide_activity_gate(
+                    hook_based,
+                    current_activity,
+                    last_activity.get(&inst.id).copied(),
+                    last_full_check.get(&inst.id).copied(),
+                    inst.spike_start.is_some(),
+                    now,
+                );
 
-                let resume_token =
-                    if previous_status != Some(Status::Error) && inst.status == Status::Error {
-                        crate::agents::get_agent(&inst.tool)
-                            .and_then(|agent| agent.resume.as_ref())
-                            .and_then(|resume| {
-                                let output = inst.tmux_session().ok()?.capture_pane(100).ok()?;
-                                let token = extract_resume_token(&output, resume.resume_pattern)?;
-                                if is_valid_resume_token(&token) {
-                                    Some(token)
-                                } else {
-                                    tracing::warn!(
-                                        "Ignoring invalid stored resume token for '{}': {:?}",
-                                        inst.title,
-                                        token
-                                    );
-                                    None
-                                }
-                            })
-                    } else {
-                        None
-                    };
+                if decision.activity_changed {
+                    inst.acknowledged = false;
+                }
+                if let Some(activity) = current_activity {
+                    last_activity.insert(inst.id.clone(), activity);
+                }
+                if !hook_based && !decision.skip_capture {
+                    last_full_check.insert(inst.id.clone(), now);
+                }
+
+                inst.update_status_with_options(StatusUpdateOptions {
+                    allow_capture: !decision.skip_capture,
+                    reused_status: decision
+                        .skip_capture
+                        .then_some(previous_status.unwrap_or(inst.status)),
+                });
+
+                let resume_token = if previous_status != Some(Status::Error)
+                    && inst.status == Status::Error
+                {
+                    crate::agents::get_agent(&inst.tool)
+                        .and_then(|agent| agent.resume.as_ref())
+                        .and_then(|resume| {
+                            let output = inst.tmux_session().ok()?.capture_pane_cached(100).ok()?;
+                            let token = extract_resume_token(&output, resume.resume_pattern)?;
+                            if is_valid_resume_token(&token) {
+                                Some(token)
+                            } else {
+                                tracing::warn!(
+                                    "Ignoring invalid stored resume token for '{}': {:?}",
+                                    inst.title,
+                                    token
+                                );
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
 
                 // For agents that don't set their own title, keep the pane
                 // title aligned with the session title. Codex is handled by
@@ -144,6 +191,11 @@ impl StatusPoller {
                     status: inst.status,
                     last_error: inst.last_error,
                     resume_token,
+                    last_error_check: inst.last_error_check,
+                    last_spinner_seen: inst.last_spinner_seen,
+                    spike_start: inst.spike_start,
+                    pre_spike_status: inst.pre_spike_status,
+                    acknowledged: inst.acknowledged,
                 });
             }
 
@@ -167,8 +219,98 @@ impl StatusPoller {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActivityGateDecision {
+    activity_changed: bool,
+    skip_capture: bool,
+}
+
+fn decide_activity_gate(
+    hook_based: bool,
+    current_activity: Option<i64>,
+    last_activity: Option<i64>,
+    last_full_check: Option<Instant>,
+    spike_pending: bool,
+    now: Instant,
+) -> ActivityGateDecision {
+    let activity_changed = match (current_activity, last_activity) {
+        (Some(current), Some(previous)) => current != previous,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    let full_check_due = last_full_check
+        .map(|last_check| now.duration_since(last_check) >= FULL_CHECK_INTERVAL)
+        .unwrap_or(true);
+
+    ActivityGateDecision {
+        activity_changed,
+        skip_capture: !hook_based
+            && current_activity.is_some()
+            && !activity_changed
+            && !full_check_due
+            && !spike_pending,
+    }
+}
+
 impl Default for StatusPoller {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_activity_gate_skips_when_activity_unchanged_and_recent() {
+        let now = Instant::now();
+
+        let decision = decide_activity_gate(false, Some(42), Some(42), Some(now), false, now);
+
+        assert_eq!(
+            decision,
+            ActivityGateDecision {
+                activity_changed: false,
+                skip_capture: true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_activity_gate_forces_periodic_full_check() {
+        let now = Instant::now();
+
+        let decision = decide_activity_gate(
+            false,
+            Some(42),
+            Some(42),
+            Some(now - FULL_CHECK_INTERVAL),
+            false,
+            now,
+        );
+
+        assert_eq!(
+            decision,
+            ActivityGateDecision {
+                activity_changed: false,
+                skip_capture: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_activity_gate_bypasses_hook_agents() {
+        let now = Instant::now();
+
+        let decision = decide_activity_gate(true, Some(42), Some(42), Some(now), false, now);
+
+        assert_eq!(
+            decision,
+            ActivityGateDecision {
+                activity_changed: false,
+                skip_capture: false,
+            }
+        );
     }
 }

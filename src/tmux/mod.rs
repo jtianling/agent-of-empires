@@ -20,10 +20,33 @@ static SESSION_CACHE: RwLock<SessionCache> = RwLock::new(SessionCache {
     data: None,
     time: None,
 });
+static PANE_INFO_CACHE: RwLock<PaneInfoCache> = RwLock::new(PaneInfoCache {
+    data: None,
+    time: None,
+});
 
 struct SessionCache {
-    data: Option<HashMap<String, i64>>,
+    data: Option<HashMap<String, SessionActivity>>,
     time: Option<Instant>,
+}
+
+struct PaneInfoCache {
+    data: Option<HashMap<String, PaneInfo>>,
+    time: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionActivity {
+    pub session_activity: i64,
+    pub window_activity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneInfo {
+    pub pane_title: String,
+    pub current_command: String,
+    pub is_dead: bool,
+    pub pane_pid: Option<u32>,
 }
 
 pub fn refresh_session_cache() {
@@ -31,26 +54,37 @@ pub fn refresh_session_cache() {
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}\t#{session_activity}",
+            "#{session_name}\t#{session_activity}\t#{window_activity}",
         ])
         .output();
 
     let new_data = match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let mut map = HashMap::new();
-            for line in stdout.lines() {
-                if let Some((name, activity)) = line.split_once('\t') {
-                    let activity: i64 = activity.parse().unwrap_or(0);
-                    map.insert(name.to_string(), activity);
-                }
-            }
-            Some(map)
-        }
+        Ok(out) if out.status.success() => Some(parse_session_cache_output(&out.stdout)),
         _ => None,
     };
 
     if let Ok(mut cache) = SESSION_CACHE.write() {
+        cache.data = new_data;
+        cache.time = Some(Instant::now());
+    }
+}
+
+pub fn refresh_pane_info_cache() {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_index}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}",
+        ])
+        .output();
+
+    let new_data = match output {
+        Ok(out) if out.status.success() => Some(parse_pane_info_cache_output(&out.stdout)),
+        _ => None,
+    };
+
+    if let Ok(mut cache) = PANE_INFO_CACHE.write() {
         cache.data = new_data;
         cache.time = Some(Instant::now());
     }
@@ -69,6 +103,28 @@ pub fn session_exists_from_cache(name: &str) -> Option<bool> {
     }
 
     cache.data.as_ref().map(|m| m.contains_key(name))
+}
+
+pub fn get_cached_window_activity(name: &str) -> Option<i64> {
+    let cache = SESSION_CACHE.read().ok()?;
+    if is_cache_stale(cache.time) {
+        return None;
+    }
+
+    cache
+        .data
+        .as_ref()
+        .and_then(|m| m.get(name))
+        .map(|activity| activity.window_activity)
+}
+
+pub fn get_cached_pane_info(name: &str) -> Option<PaneInfo> {
+    let cache = PANE_INFO_CACHE.read().ok()?;
+    if is_cache_stale(cache.time) {
+        return None;
+    }
+
+    cache.data.as_ref().and_then(|m| m.get(name)).cloned()
 }
 
 pub fn get_current_session_name() -> Option<String> {
@@ -131,6 +187,90 @@ fn is_agent_available(agent: &crate::agents::AgentDef) -> bool {
     }
 }
 
+fn is_cache_stale(time: Option<Instant>) -> bool {
+    time.map(|t| t.elapsed() > Duration::from_secs(2))
+        .unwrap_or(true)
+}
+
+fn parse_session_cache_output(output: &[u8]) -> HashMap<String, SessionActivity> {
+    let stdout = String::from_utf8_lossy(output);
+    let mut map = HashMap::new();
+
+    for line in stdout.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let Some(session_activity) = parts.next() else {
+            continue;
+        };
+        let Some(window_activity) = parts.next() else {
+            continue;
+        };
+
+        map.insert(
+            name.to_string(),
+            SessionActivity {
+                session_activity: session_activity.parse().unwrap_or(0),
+                window_activity: window_activity.parse().unwrap_or(0),
+            },
+        );
+    }
+
+    map
+}
+
+fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, PaneInfo> {
+    let stdout = String::from_utf8_lossy(output);
+    let mut panes_by_session: HashMap<String, (u32, PaneInfo)> = HashMap::new();
+
+    for line in stdout.lines() {
+        let mut parts = line.splitn(6, '\t');
+        let Some(session_name) = parts.next() else {
+            continue;
+        };
+        if !session_name.starts_with(SESSION_PREFIX) {
+            continue;
+        }
+
+        let Some(pane_index) = parts.next() else {
+            continue;
+        };
+        let Some(pane_title) = parts.next() else {
+            continue;
+        };
+        let Some(current_command) = parts.next() else {
+            continue;
+        };
+        let Some(is_dead) = parts.next() else {
+            continue;
+        };
+        let Some(pane_pid) = parts.next() else {
+            continue;
+        };
+
+        let pane_index = pane_index.parse().unwrap_or(u32::MAX);
+        let info = PaneInfo {
+            pane_title: pane_title.to_string(),
+            current_command: current_command.to_string(),
+            is_dead: is_dead.trim() == "1",
+            pane_pid: pane_pid.trim().parse().ok(),
+        };
+
+        match panes_by_session.get(session_name) {
+            Some((existing_index, _)) if *existing_index <= pane_index => {}
+            _ => {
+                panes_by_session.insert(session_name.to_string(), (pane_index, info));
+            }
+        }
+    }
+
+    panes_by_session
+        .into_iter()
+        .map(|(session_name, (_, info))| (session_name, info))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct AvailableTools {
     available: Vec<&'static str>,
@@ -159,5 +299,73 @@ impl AvailableTools {
         Self {
             available: tools.to_vec(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_session_cache_output_includes_window_activity() {
+        let parsed =
+            parse_session_cache_output(b"aoe_one\t11\t21\naoe_two\t12\t22\nother\t13\t23\n");
+
+        assert_eq!(
+            parsed.get("aoe_one"),
+            Some(&SessionActivity {
+                session_activity: 11,
+                window_activity: 21
+            })
+        );
+        assert_eq!(
+            parsed.get("aoe_two"),
+            Some(&SessionActivity {
+                session_activity: 12,
+                window_activity: 22
+            })
+        );
+        assert_eq!(
+            parsed.get("other"),
+            Some(&SessionActivity {
+                session_activity: 13,
+                window_activity: 23
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_pane_info_cache_output_filters_non_aoe_sessions() {
+        let parsed = parse_pane_info_cache_output(
+            b"aoe_alpha\t0\talpha title\tcodex\t0\t101\nother\t0\tother title\tbash\t1\t202\n",
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed.get("aoe_alpha"),
+            Some(&PaneInfo {
+                pane_title: "alpha title".to_string(),
+                current_command: "codex".to_string(),
+                is_dead: false,
+                pane_pid: Some(101),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_pane_info_cache_output_prefers_lowest_pane_index() {
+        let parsed = parse_pane_info_cache_output(
+            b"aoe_alpha\t2\tright pane\tbash\t0\t300\naoe_alpha\t0\tagent pane\tcodex\t0\t200\n",
+        );
+
+        assert_eq!(
+            parsed.get("aoe_alpha"),
+            Some(&PaneInfo {
+                pane_title: "agent pane".to_string(),
+                current_command: "codex".to_string(),
+                is_dead: false,
+                pane_pid: Some(200),
+            })
+        );
     }
 }

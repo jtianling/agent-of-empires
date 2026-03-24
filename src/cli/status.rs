@@ -60,6 +60,7 @@ pub async fn run(profile: &str, args: StatusArgs) -> Result<()> {
 
     // Refresh tmux session cache
     crate::tmux::refresh_session_cache();
+    crate::tmux::refresh_pane_info_cache();
 
     // Update status for all instances
     for inst in &mut instances {

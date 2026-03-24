@@ -1,10 +1,13 @@
 //! tmux session management
 
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 use std::process::Command;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use super::{
-    refresh_session_cache, session_exists_from_cache,
+    get_cached_pane_info, refresh_session_cache, session_exists_from_cache,
     utils::{
         append_remain_on_exit_args, append_store_pane_id_args, get_agent_pane_id, is_pane_dead,
         is_pane_running_shell,
@@ -14,6 +17,21 @@ use super::{
 use crate::cli::truncate_id;
 use crate::process;
 use crate::session::Status;
+
+static CAPTURE_CACHE: RwLock<CaptureCache> = RwLock::new(CaptureCache { data: None });
+
+const CAPTURE_CACHE_TTL: Duration = Duration::from_millis(500);
+
+struct CaptureCache {
+    data: Option<HashMap<String, CaptureCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct CaptureCacheEntry {
+    content: String,
+    timestamp: Instant,
+    line_count: usize,
+}
 
 pub struct Session {
     name: String,
@@ -78,11 +96,15 @@ impl Session {
     }
 
     pub fn is_pane_dead(&self) -> bool {
-        is_pane_dead(&self.name)
+        get_cached_pane_info(&self.name)
+            .map(|info| info.is_dead)
+            .unwrap_or_else(|| is_pane_dead(&self.name))
     }
 
     pub fn is_pane_running_shell(&self) -> bool {
-        is_pane_running_shell(&self.name)
+        get_cached_pane_info(&self.name)
+            .map(|info| super::utils::is_shell_command(&info.current_command))
+            .unwrap_or_else(|| is_pane_running_shell(&self.name))
     }
 
     pub fn kill(&self) -> Result<()> {
@@ -154,6 +176,16 @@ impl Session {
 
     pub fn capture_pane(&self, lines: usize) -> Result<String> {
         self.capture_pane_with_size(lines, None, None)
+    }
+
+    pub fn capture_pane_cached(&self, lines: usize) -> Result<String> {
+        if let Some(content) = get_cached_capture(&self.name, lines, Instant::now()) {
+            return Ok(content);
+        }
+
+        let content = self.capture_pane(lines)?;
+        store_cached_capture(&self.name, content.clone(), lines, Instant::now());
+        Ok(content)
     }
 
     pub fn capture_pane_with_size(
@@ -265,6 +297,10 @@ impl Session {
     }
 
     pub fn get_pane_pid(&self) -> Option<u32> {
+        if let Some(pid) = get_cached_pane_info(&self.name).and_then(|info| info.pane_pid) {
+            return Some(pid);
+        }
+
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
         process::get_pane_pid(&target)
     }
@@ -275,11 +311,43 @@ impl Session {
     }
 
     pub fn detect_status(&self, tool: &str) -> Result<Status> {
-        let content = self.capture_pane(50)?;
+        let content = self.capture_pane_cached(50)?;
         let fg_pid = self.get_foreground_pid();
         Ok(super::status_detection::detect_status_from_content(
             &content, tool, fg_pid,
         ))
+    }
+}
+
+fn get_cached_capture(session_name: &str, lines: usize, now: Instant) -> Option<String> {
+    let cache = CAPTURE_CACHE.read().ok()?;
+    let entry = cache.data.as_ref()?.get(session_name)?;
+    if now.duration_since(entry.timestamp) > CAPTURE_CACHE_TTL || entry.line_count < lines {
+        return None;
+    }
+
+    Some(entry.content.clone())
+}
+
+fn store_cached_capture(session_name: &str, content: String, lines: usize, now: Instant) {
+    if let Ok(mut cache) = CAPTURE_CACHE.write() {
+        cache.data.get_or_insert_with(HashMap::new).insert(
+            session_name.to_string(),
+            CaptureCacheEntry {
+                content,
+                timestamp: now,
+                line_count: lines,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+fn clear_cached_capture(session_name: &str) {
+    if let Ok(mut cache) = CAPTURE_CACHE.write() {
+        if let Some(entries) = &mut cache.data {
+            entries.remove(session_name);
+        }
     }
 }
 
@@ -623,5 +691,44 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &session_name])
             .output();
+    }
+
+    #[test]
+    fn test_capture_cache_reuses_fresh_entry() {
+        let session_name = "aoe_test_capture_cache_reuse";
+        clear_cached_capture(session_name);
+        let now = Instant::now();
+        store_cached_capture(session_name, "cached output".to_string(), 50, now);
+
+        let cached = get_cached_capture(session_name, 20, now + Duration::from_millis(200));
+
+        assert_eq!(cached.as_deref(), Some("cached output"));
+        clear_cached_capture(session_name);
+    }
+
+    #[test]
+    fn test_capture_cache_expires_after_ttl() {
+        let session_name = "aoe_test_capture_cache_expired";
+        clear_cached_capture(session_name);
+        let now = Instant::now();
+        store_cached_capture(session_name, "cached output".to_string(), 50, now);
+
+        let cached = get_cached_capture(session_name, 20, now + Duration::from_millis(501));
+
+        assert!(cached.is_none());
+        clear_cached_capture(session_name);
+    }
+
+    #[test]
+    fn test_capture_cache_requires_line_count_upgrade() {
+        let session_name = "aoe_test_capture_cache_lines";
+        clear_cached_capture(session_name);
+        let now = Instant::now();
+        store_cached_capture(session_name, "cached output".to_string(), 50, now);
+
+        let cached = get_cached_capture(session_name, 100, now + Duration::from_millis(200));
+
+        assert!(cached.is_none());
+        clear_cached_capture(session_name);
     }
 }
