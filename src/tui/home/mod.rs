@@ -333,6 +333,7 @@ impl HomeView {
                         && s != Status::Stopped
                         && s != Status::Restarting
                         && update.status != Status::Stopped
+                        && update.status != Status::Restarting
                 });
 
                 if should_update {
