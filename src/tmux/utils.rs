@@ -53,7 +53,7 @@ fn back_toggle_run_shell_cmd(profile: &str) -> String {
 }
 
 fn root_ctrl_q_run_shell_cmd() -> String {
-    "session=\"#{{session_name}}\"; case \"$session\" in aoe_*) tmux detach-client ;; *) tmux send-keys C-q ;; esac"
+    "session=\"#{session_name}\"; case \"$session\" in aoe_*) tmux detach-client ;; *) tmux send-keys C-q ;; esac"
         .to_string()
 }
 
@@ -1032,6 +1032,10 @@ mod tests {
     #[test]
     fn test_root_ctrl_q_cmd_guards_on_session_name() {
         let cmd = root_ctrl_q_run_shell_cmd();
+        assert!(
+            cmd.contains("#{session_name}"),
+            "must use single-brace tmux format, not double-brace"
+        );
         assert!(cmd.contains("case \"$session\" in aoe_*)"));
         assert!(cmd.contains("send-keys C-q"));
         assert!(cmd.contains("tmux detach-client"));
