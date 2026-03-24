@@ -25,7 +25,16 @@ const NOTIFICATION_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(2);
 struct NotificationEntry {
     session_name: String,
     title: String,
+    status: Status,
     index: usize,
+}
+
+fn status_icon(status: Status) -> &'static str {
+    match status {
+        Status::Waiting => "\u{25d0}",
+        Status::Idle => "\u{25cb}",
+        _ => "",
+    }
 }
 
 fn current_home_sort_order() -> SortOrder {
@@ -78,6 +87,7 @@ fn ordered_existing_notification_entries(
         .map(|(index, (session_name, instance))| NotificationEntry {
             session_name,
             title: instance.title.clone(),
+            status: instance.status,
             index: index + 1,
         })
         .collect()
@@ -150,7 +160,14 @@ fn format_notification_text(entries: &[NotificationEntry], current_session: &str
     entries
         .iter()
         .filter(|entry| entry.session_name != current_session)
-        .map(|entry| format!("[{}] {}", entry.index, entry.title))
+        .map(|entry| {
+            format!(
+                "[{}] {} {}",
+                entry.index,
+                status_icon(entry.status),
+                entry.title
+            )
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -256,23 +273,26 @@ mod tests {
             NotificationEntry {
                 session_name: "aoe_alpha_1".to_string(),
                 title: "alpha".to_string(),
+                status: Status::Waiting,
                 index: 1,
             },
             NotificationEntry {
                 session_name: "aoe_beta_2".to_string(),
                 title: "beta".to_string(),
+                status: Status::Idle,
                 index: 2,
             },
             NotificationEntry {
                 session_name: "aoe_gamma_3".to_string(),
                 title: "gamma".to_string(),
+                status: Status::Waiting,
                 index: 3,
             },
         ];
 
         assert_eq!(
             format_notification_text(&entries, "aoe_missing"),
-            "[1] alpha [2] beta [3] gamma"
+            "[1] \u{25d0} alpha [2] \u{25cb} beta [3] \u{25d0} gamma"
         );
     }
 
@@ -282,18 +302,20 @@ mod tests {
             NotificationEntry {
                 session_name: "aoe_alpha_1".to_string(),
                 title: "alpha".to_string(),
+                status: Status::Waiting,
                 index: 1,
             },
             NotificationEntry {
                 session_name: "aoe_beta_2".to_string(),
                 title: "beta".to_string(),
+                status: Status::Idle,
                 index: 2,
             },
         ];
 
         assert_eq!(
             format_notification_text(&entries, "aoe_alpha_1"),
-            "[2] beta"
+            "[2] \u{25cb} beta"
         );
     }
 
