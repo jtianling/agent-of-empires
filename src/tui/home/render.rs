@@ -94,6 +94,10 @@ impl HomeView {
             dialog.render(frame, area, theme);
         }
 
+        if let Some(dialog) = &self.group_rename_dialog {
+            dialog.render(frame, area, theme);
+        }
+
         if let Some(dialog) = &self.rename_dialog {
             dialog.render(frame, area, theme);
         }

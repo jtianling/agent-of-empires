@@ -21,9 +21,9 @@ use crate::tmux::AvailableTools;
 use super::creation_poller::{CreationPoller, CreationRequest};
 use super::deletion_poller::DeletionPoller;
 use super::dialogs::{
-    ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, HookTrustDialog, InfoDialog,
-    NewSessionData, NewSessionDialog, ProfilePickerDialog, RenameDialog, UnifiedDeleteDialog,
-    WelcomeDialog,
+    ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, GroupRenameDialog, HookTrustDialog,
+    InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerDialog, RenameDialog,
+    UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -100,6 +100,7 @@ pub struct HomeView {
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
+    pub(super) group_rename_dialog: Option<GroupRenameDialog>,
     pub(super) rename_dialog: Option<RenameDialog>,
     pub(super) hook_trust_dialog: Option<HookTrustDialog>,
     /// Session data pending hook trust approval
@@ -112,6 +113,8 @@ pub struct HomeView {
     pub(super) pending_attach_after_warning: Option<String>,
     /// Session to stop after the confirmation dialog is accepted
     pub(super) pending_stop_session: Option<String>,
+    /// Source and destination paths for a rename waiting on merge confirmation
+    pub(super) pending_group_rename: Option<(String, String)>,
     /// Right pane tool to launch after next session attach (one-shot, consumed on use)
     pub(super) pending_right_pane_tool: Option<String>,
 
@@ -227,6 +230,7 @@ impl HomeView {
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
+            group_rename_dialog: None,
             rename_dialog: None,
             hook_trust_dialog: None,
             pending_hook_trust_data: None,
@@ -236,6 +240,7 @@ impl HomeView {
             profile_picker_dialog: None,
             pending_attach_after_warning: None,
             pending_stop_session: None,
+            pending_group_rename: None,
             pending_right_pane_tool: None,
             pending_jump: None,
             search_active: false,
@@ -573,6 +578,7 @@ impl HomeView {
             || self.confirm_dialog.is_some()
             || self.unified_delete_dialog.is_some()
             || self.group_delete_options_dialog.is_some()
+            || self.group_rename_dialog.is_some()
             || self.rename_dialog.is_some()
             || self.hook_trust_dialog.is_some()
             || self.welcome_dialog.is_some()

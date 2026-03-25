@@ -1,9 +1,10 @@
 //! Group tree management
 
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::config::SortOrder;
 use super::Instance;
@@ -144,6 +145,79 @@ impl GroupTree {
     pub fn create_group(&mut self, path: &str) {
         self.ensure_group_exists(path);
         self.rebuild_tree();
+    }
+
+    pub fn rename_group(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        validate_group_path(new_path)?;
+
+        if old_path == new_path {
+            return Ok(());
+        }
+
+        if !self.group_exists(old_path) {
+            bail!("Group '{old_path}' does not exist");
+        }
+
+        if new_path.starts_with(&format!("{old_path}/")) {
+            bail!("Cannot move a group into its own subtree");
+        }
+
+        if let Some(parent) = parent_group_path(new_path) {
+            self.ensure_group_exists(parent);
+        }
+
+        let target_exists = self.group_exists(new_path);
+        let source_prefix = format!("{old_path}/");
+        let existing_groups = self.groups_by_path.clone();
+        let existing_order = self.insertion_order.clone();
+        let source_paths: HashSet<String> = existing_order
+            .iter()
+            .filter(|path| **path == old_path || path.starts_with(&source_prefix))
+            .cloned()
+            .collect();
+
+        let mut groups_by_path = HashMap::new();
+        let mut insertion_order = Vec::new();
+
+        for path in existing_order {
+            let Some(existing_group) = existing_groups.get(&path) else {
+                continue;
+            };
+
+            let Some(mapped_path) = remap_group_path(&path, old_path, new_path) else {
+                groups_by_path.insert(path.clone(), existing_group.clone());
+                insertion_order.push(path);
+                continue;
+            };
+
+            if path == old_path && target_exists {
+                continue;
+            }
+
+            if existing_groups.contains_key(&mapped_path) && !source_paths.contains(&mapped_path) {
+                continue;
+            }
+
+            if groups_by_path.contains_key(&mapped_path) {
+                continue;
+            }
+
+            let mut renamed_group = existing_group.clone();
+            renamed_group.path = mapped_path.clone();
+            renamed_group.name = group_name(&mapped_path).to_string();
+            renamed_group.children.clear();
+            groups_by_path.insert(mapped_path.clone(), renamed_group);
+            insertion_order.push(mapped_path);
+        }
+
+        self.groups_by_path = groups_by_path;
+        self.insertion_order = normalize_insertion_order(insertion_order, &self.groups_by_path);
+
+        // Any source paths skipped due to merge must be removed from the final ordering.
+        self.insertion_order
+            .retain(|path| !source_paths.contains(path) || self.groups_by_path.contains_key(path));
+        self.rebuild_tree();
+        Ok(())
     }
 
     pub fn delete_group(&mut self, path: &str) {
@@ -289,8 +363,64 @@ impl GroupTree {
     }
 }
 
+pub fn validate_group_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("Group path cannot be empty");
+    }
+    if path.starts_with('/') || path.ends_with('/') {
+        bail!("Group path cannot start or end with '/'");
+    }
+    if path.contains("//") {
+        bail!("Group path cannot contain consecutive '/' characters");
+    }
+    Ok(())
+}
+
 fn parent_group_path(path: &str) -> Option<&str> {
     path.rsplit_once('/').map(|(parent, _)| parent)
+}
+
+fn group_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn remap_group_path(path: &str, old_path: &str, new_path: &str) -> Option<String> {
+    if path == old_path {
+        return Some(new_path.to_string());
+    }
+
+    path.strip_prefix(&format!("{old_path}/"))
+        .map(|suffix| format!("{new_path}/{suffix}"))
+}
+
+fn normalize_insertion_order(
+    candidates: Vec<String>,
+    groups_by_path: &HashMap<String, Group>,
+) -> Vec<String> {
+    fn push_path(
+        path: &str,
+        groups_by_path: &HashMap<String, Group>,
+        seen: &mut HashSet<String>,
+        ordered: &mut Vec<String>,
+    ) {
+        if seen.contains(path) || !groups_by_path.contains_key(path) {
+            return;
+        }
+
+        if let Some(parent) = parent_group_path(path) {
+            push_path(parent, groups_by_path, seen, ordered);
+        }
+
+        seen.insert(path.to_string());
+        ordered.push(path.to_string());
+    }
+
+    let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
+    for path in candidates {
+        push_path(&path, groups_by_path, &mut seen, &mut ordered);
+    }
+    ordered
 }
 
 /// Item represents either a group or an instance in the flattened tree view
@@ -694,6 +824,92 @@ mod tests {
         assert!(tree.group_exists("a"));
         assert!(tree.group_exists("a/b"));
         assert!(tree.group_exists("a/b/c"));
+    }
+
+    #[test]
+    fn test_validate_group_path_rejects_invalid_values() {
+        assert!(validate_group_path("").is_err());
+        assert!(validate_group_path("/work").is_err());
+        assert!(validate_group_path("work/").is_err());
+        assert!(validate_group_path("work//frontend").is_err());
+        assert!(validate_group_path("work/frontend").is_ok());
+    }
+
+    #[test]
+    fn test_rename_group_updates_path_and_metadata() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+        tree.toggle_collapsed("work");
+        tree.set_default_directory("work", "/tmp/work");
+
+        tree.rename_group("work", "projects").unwrap();
+
+        assert!(!tree.group_exists("work"));
+        assert!(tree.group_exists("projects"));
+
+        let renamed = tree.groups_by_path.get("projects").unwrap();
+        assert_eq!(renamed.name, "projects");
+        assert!(renamed.collapsed);
+        assert_eq!(renamed.default_directory.as_deref(), Some("/tmp/work"));
+    }
+
+    #[test]
+    fn test_rename_group_cascades_to_children() {
+        let mut parent = Instance::new("parent", "/tmp/p");
+        parent.group_path = "work".to_string();
+        let mut child = Instance::new("child", "/tmp/c");
+        child.group_path = "work/frontend".to_string();
+        let mut grandchild = Instance::new("grandchild", "/tmp/g");
+        grandchild.group_path = "work/frontend/react".to_string();
+        let instances = vec![parent, child, grandchild];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "projects").unwrap();
+
+        assert!(tree.group_exists("projects"));
+        assert!(tree.group_exists("projects/frontend"));
+        assert!(tree.group_exists("projects/frontend/react"));
+        assert!(!tree.group_exists("work"));
+        assert!(!tree.group_exists("work/frontend"));
+    }
+
+    #[test]
+    fn test_rename_group_merges_into_existing_target() {
+        let instances: Vec<Instance> = vec![];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+        tree.create_group("temp/api");
+        tree.create_group("temp/api/v2");
+        tree.create_group("work/api");
+        tree.create_group("work/api/v1");
+        tree.toggle_collapsed("temp/api");
+        tree.set_default_directory("temp/api", "/tmp/source");
+        tree.set_default_directory("work/api", "/tmp/target");
+
+        tree.rename_group("temp/api", "work/api").unwrap();
+
+        assert!(!tree.group_exists("temp/api"));
+        assert!(tree.group_exists("work/api"));
+        assert!(tree.group_exists("work/api/v1"));
+        assert!(tree.group_exists("work/api/v2"));
+
+        let merged = tree.groups_by_path.get("work/api").unwrap();
+        assert!(!merged.collapsed);
+        assert_eq!(merged.default_directory.as_deref(), Some("/tmp/target"));
+    }
+
+    #[test]
+    fn test_rename_group_creates_intermediate_groups() {
+        let instances: Vec<Instance> = vec![];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+        tree.create_group("misc");
+
+        tree.rename_group("misc", "work/tools/misc").unwrap();
+
+        assert!(tree.group_exists("work"));
+        assert!(tree.group_exists("work/tools"));
+        assert!(tree.group_exists("work/tools/misc"));
     }
 
     #[test]

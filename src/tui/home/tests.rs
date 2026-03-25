@@ -77,6 +77,35 @@ fn create_test_env_with_groups() -> TestEnv {
     TestEnv { _temp: temp, view }
 }
 
+fn create_test_env_with_group_rename_conflict() -> TestEnv {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let storage = Storage::new("test").unwrap();
+    let mut instances = Vec::new();
+
+    let mut src = Instance::new("source", "/tmp/source");
+    src.group_path = "temp/api".to_string();
+    instances.push(src);
+
+    let mut src_child = Instance::new("source-child", "/tmp/source-child");
+    src_child.group_path = "temp/api/v2".to_string();
+    instances.push(src_child);
+
+    let mut target = Instance::new("target", "/tmp/target");
+    target.group_path = "work/api".to_string();
+    instances.push(target);
+
+    let mut target_child = Instance::new("target-child", "/tmp/target-child");
+    target_child.group_path = "work/api/v1".to_string();
+    instances.push(target_child);
+
+    storage.save(&instances).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
+    TestEnv { _temp: temp, view }
+}
+
 fn create_test_env_with_mixed_sessions() -> TestEnv {
     use crate::session::GroupTree;
 
@@ -720,14 +749,24 @@ fn test_r_opens_rename_dialog() {
 
 #[test]
 #[serial]
-fn test_rename_dialog_not_opened_on_group() {
+fn test_r_opens_group_rename_dialog_on_group() {
     let mut env = create_test_env_with_groups();
     env.view.cursor = 1;
     env.view.update_selected();
-    assert!(env.view.selected_group.is_some());
+    let selected_group = env.view.selected_group.clone();
+    assert!(selected_group.is_some());
+    assert!(env.view.group_rename_dialog.is_none());
     assert!(env.view.rename_dialog.is_none());
     env.view.handle_key(key(KeyCode::Char('r')));
     assert!(env.view.rename_dialog.is_none());
+    assert!(env.view.group_rename_dialog.is_some());
+    assert_eq!(
+        env.view
+            .group_rename_dialog
+            .as_ref()
+            .map(|dialog| dialog.path_value()),
+        selected_group.as_deref()
+    );
 }
 
 #[test]
@@ -738,6 +777,142 @@ fn test_has_dialog_returns_true_for_rename_dialog() {
     assert!(!env.view.has_dialog());
     env.view.handle_key(key(KeyCode::Char('r')));
     assert!(env.view.has_dialog());
+}
+
+#[test]
+#[serial]
+fn test_group_rename_conflict_opens_merge_confirmation() {
+    let mut env = create_test_env_with_group_rename_conflict();
+    env.view.select_group_by_path("temp/api");
+
+    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view
+        .group_rename_dialog
+        .as_mut()
+        .unwrap()
+        .set_path_value("work/api");
+    env.view.handle_key(key(KeyCode::Enter));
+
+    assert!(env.view.group_rename_dialog.is_none());
+    assert!(env.view.confirm_dialog.is_some());
+    assert_eq!(
+        env.view.pending_group_rename,
+        Some(("temp/api".to_string(), "work/api".to_string()))
+    );
+}
+
+#[test]
+#[serial]
+fn test_accepting_group_merge_applies_rename() {
+    let mut env = create_test_env_with_group_rename_conflict();
+    env.view.select_group_by_path("temp/api");
+
+    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view
+        .group_rename_dialog
+        .as_mut()
+        .unwrap()
+        .set_path_value("work/api");
+    env.view.handle_key(key(KeyCode::Enter));
+    env.view.handle_key(key(KeyCode::Char('y')));
+
+    assert!(env.view.pending_group_rename.is_none());
+    assert!(env.view.confirm_dialog.is_none());
+    assert!(!env.view.group_tree.group_exists("temp/api"));
+    assert!(env.view.group_tree.group_exists("work/api"));
+    assert!(env.view.group_tree.group_exists("work/api/v1"));
+    assert!(env.view.group_tree.group_exists("work/api/v2"));
+    assert_eq!(env.view.selected_group.as_deref(), Some("work/api"));
+
+    let session_paths: Vec<_> = env
+        .view
+        .instances
+        .iter()
+        .map(|instance| instance.group_path.as_str())
+        .collect();
+    assert!(session_paths.contains(&"work/api"));
+    assert!(session_paths.contains(&"work/api/v2"));
+}
+
+#[test]
+#[serial]
+fn test_declining_group_merge_has_no_side_effects() {
+    let mut env = create_test_env_with_group_rename_conflict();
+    let before_paths: Vec<_> = env
+        .view
+        .instances
+        .iter()
+        .map(|instance| instance.group_path.clone())
+        .collect();
+    let before_groups: Vec<_> = env
+        .view
+        .group_tree
+        .get_all_groups()
+        .iter()
+        .map(|group| group.path.clone())
+        .collect();
+
+    env.view.select_group_by_path("temp/api");
+    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view
+        .group_rename_dialog
+        .as_mut()
+        .unwrap()
+        .set_path_value("work/api");
+    env.view.handle_key(key(KeyCode::Enter));
+    env.view.handle_key(key(KeyCode::Enter));
+
+    let after_paths: Vec<_> = env
+        .view
+        .instances
+        .iter()
+        .map(|instance| instance.group_path.clone())
+        .collect();
+    let after_groups: Vec<_> = env
+        .view
+        .group_tree
+        .get_all_groups()
+        .iter()
+        .map(|group| group.path.clone())
+        .collect();
+
+    assert!(env.view.confirm_dialog.is_none());
+    assert!(env.view.pending_group_rename.is_none());
+    assert_eq!(before_paths, after_paths);
+    assert_eq!(before_groups, after_groups);
+}
+
+#[test]
+#[serial]
+fn test_group_rename_updates_sessions_and_creates_intermediate_groups() {
+    let mut env = create_test_env_with_groups();
+    env.view.select_group_by_path("personal");
+
+    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view
+        .group_rename_dialog
+        .as_mut()
+        .unwrap()
+        .set_path_value("work/tools/personal");
+    env.view.handle_key(key(KeyCode::Enter));
+
+    assert!(env.view.group_tree.group_exists("work"));
+    assert!(env.view.group_tree.group_exists("work/tools"));
+    assert!(env.view.group_tree.group_exists("work/tools/personal"));
+    assert_eq!(
+        env.view.selected_group.as_deref(),
+        Some("work/tools/personal")
+    );
+    assert!(env
+        .view
+        .instances
+        .iter()
+        .any(|instance| instance.group_path == "work/tools/personal"));
+
+    let (_, groups) = env.view.storage.load_with_groups().unwrap();
+    assert!(groups
+        .iter()
+        .any(|group| group.path == "work/tools/personal"));
 }
 
 #[test]

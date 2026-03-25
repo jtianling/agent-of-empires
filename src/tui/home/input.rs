@@ -9,9 +9,9 @@ use crate::session::config::{load_config, save_config, SortOrder};
 use crate::session::{flatten_tree, list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
-    ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HookTrustAction,
-    InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction, RenameDialog,
-    UnifiedDeleteDialog,
+    ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, GroupRenameDialog,
+    HookTrustAction, InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction,
+    RenameDialog, UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
@@ -232,14 +232,17 @@ impl HomeView {
         }
 
         if let Some(dialog) = &mut self.confirm_dialog {
+            let action = dialog.action().to_string();
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
                 DialogResult::Cancel => {
                     self.confirm_dialog = None;
                     self.pending_stop_session = None;
+                    if action == "merge_group_rename" {
+                        self.pending_group_rename = None;
+                    }
                 }
                 DialogResult::Submit(_) => {
-                    let action = dialog.action().to_string();
                     self.confirm_dialog = None;
                     if action == "delete_group" {
                         if let Err(e) = self.delete_selected_group() {
@@ -248,6 +251,12 @@ impl HomeView {
                     } else if action == "stop_session" {
                         if let Some(session_id) = self.pending_stop_session.take() {
                             return Some(Action::StopSession(session_id));
+                        }
+                    } else if action == "merge_group_rename" {
+                        if let Err(e) = self.confirm_pending_group_rename() {
+                            tracing::error!("Failed to rename group: {}", e);
+                            self.info_dialog =
+                                Some(InfoDialog::new("Rename Group", &e.to_string()));
                         }
                     }
                 }
@@ -285,6 +294,31 @@ impl HomeView {
                         }
                     } else if let Err(e) = self.delete_selected_group() {
                         tracing::error!("Failed to delete group: {}", e);
+                    }
+                }
+            }
+            return None;
+        }
+
+        let group_rename_result = self
+            .group_rename_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key));
+
+        if let Some(result) = group_rename_result {
+            match result {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.group_rename_dialog = None;
+                }
+                DialogResult::Submit(path) => {
+                    if let Err(e) = self.rename_selected_group(&path) {
+                        tracing::error!("Failed to rename group: {}", e);
+                        if let Some(dialog) = &mut self.group_rename_dialog {
+                            dialog.set_error(e.to_string());
+                        }
+                    } else {
+                        self.group_rename_dialog = None;
                     }
                 }
             }
@@ -604,6 +638,8 @@ impl HomeView {
                             existing_groups,
                         ));
                     }
+                } else if let Some(group_path) = &self.selected_group {
+                    self.group_rename_dialog = Some(GroupRenameDialog::new(group_path));
                 }
             }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
