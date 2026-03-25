@@ -172,10 +172,63 @@ fn format_notification_text(entries: &[NotificationEntry], current_session: &str
         .join(" ")
 }
 
+fn detect_live_status(instance: &Instance, session_name: &str) -> Status {
+    if let Some(hook_status) = crate::hooks::read_hook_status(&instance.id) {
+        return hook_status;
+    }
+
+    if let Some(pane_title) = get_pane_title(session_name) {
+        if let Some(status) = super::status_detection::detect_status_from_title(&pane_title) {
+            return status;
+        }
+    }
+
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-t", session_name, "-p", "-S", "-50"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let content = String::from_utf8_lossy(&out.stdout);
+            super::status_detection::detect_status_from_content(&content, &instance.tool, None)
+        }
+        _ => instance.status,
+    }
+}
+
+fn get_pane_title(session_name: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_title}",
+            "-f",
+            "#{==:#{pane_index},0}",
+        ])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !title.is_empty() {
+            return Some(title);
+        }
+    }
+    None
+}
+
 fn update_notification_options(profile: &str, session_names: &[String]) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (instances, groups) = storage.load_with_groups()?;
+    let (mut instances, groups) = storage.load_with_groups()?;
     let existing_sessions: HashSet<String> = session_names.iter().cloned().collect();
+
+    for instance in &mut instances {
+        let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+        if existing_sessions.contains(&session_name) {
+            instance.status = detect_live_status(instance, &session_name);
+        }
+    }
+
     let sort_order = current_home_sort_order();
     let entries = build_notification_entries(&instances, &groups, sort_order, &existing_sessions);
 
