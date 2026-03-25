@@ -148,18 +148,7 @@ impl HomeView {
             return;
         }
 
-        // Build session index map: flat_items index -> 1-based session number
-        let mut session_index_map: std::collections::HashMap<usize, usize> =
-            std::collections::HashMap::new();
-        let mut session_number = 1usize;
-        for (idx, item) in self.flat_items.iter().enumerate() {
-            if let Item::Session { .. } = item {
-                if session_number <= 99 {
-                    session_index_map.insert(idx, session_number);
-                    session_number += 1;
-                }
-            }
-        }
+        let stable_session_indices = self.stable_session_indices();
 
         let list_items: Vec<ListItem> = self
             .flat_items
@@ -169,7 +158,13 @@ impl HomeView {
                 let is_selected = idx == self.cursor;
                 let is_match =
                     !self.search_matches.is_empty() && self.search_matches.contains(&idx);
-                let session_num = session_index_map.get(&idx).copied();
+                let session_num = match item {
+                    Item::Session { id, .. } => stable_session_indices
+                        .get(id)
+                        .copied()
+                        .filter(|index| *index <= 99),
+                    Item::Group { .. } => None,
+                };
                 self.render_item(item, is_selected, is_match, session_num, theme)
             })
             .collect();

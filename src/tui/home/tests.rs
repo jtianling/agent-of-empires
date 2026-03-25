@@ -1509,6 +1509,69 @@ fn test_group_collapsed_state_saved_to_storage() {
 
 #[test]
 #[serial]
+fn test_number_jump_uses_stable_index_for_hidden_session_in_collapsed_group() {
+    let mut env = create_test_env_with_group_sessions();
+    let target_id = env
+        .view
+        .instances
+        .iter()
+        .find(|inst| inst.title == "work-session-1")
+        .map(|inst| inst.id.clone())
+        .expect("target session should exist");
+    let stable_index = env
+        .view
+        .stable_session_ids()
+        .iter()
+        .position(|id| id == &target_id)
+        .map(|idx| idx + 1)
+        .expect("target session should have a stable index");
+
+    assert_eq!(stable_index, 3);
+
+    env.view.select_group_by_path("work");
+    env.view.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        !env.view
+            .flat_items
+            .iter()
+            .any(|item| matches!(item, Item::Session { id, .. } if id == &target_id)),
+        "target session should be hidden while the group is collapsed"
+    );
+
+    assert_eq!(env.view.handle_key(key(KeyCode::Char('3'))), None);
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char(' '))),
+        Some(Action::AttachSession(target_id))
+    );
+}
+
+#[test]
+#[serial]
+fn test_stable_session_cache_refreshes_when_sort_order_changes() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.sort_order = SortOrder::AZ;
+    env.view.rebuild_flat_items();
+
+    let first_az = env
+        .view
+        .stable_session_id_at_index(2)
+        .and_then(|id| env.view.get_instance(&id).map(|inst| inst.title.clone()));
+    assert_eq!(first_az.as_deref(), Some("Apple"));
+
+    env.view.handle_key(key(KeyCode::Char('o')));
+
+    let first_za = env
+        .view
+        .stable_session_id_at_index(2)
+        .and_then(|id| env.view.get_instance(&id).map(|inst| inst.title.clone()));
+    assert_eq!(first_za.as_deref(), Some("Zebra"));
+}
+
+#[test]
+#[serial]
 fn test_list_width_default() {
     let env = create_test_env_empty();
     assert_eq!(env.view.list_width, 35);
@@ -1655,11 +1718,7 @@ fn test_manual_sort_shift_j_moves_session_within_group_and_persists() {
 
     let mut env = create_test_env_with_group_sessions();
     env.view.sort_order = SortOrder::Manual;
-    env.view.flat_items = crate::session::flatten_tree(
-        &env.view.group_tree,
-        &env.view.instances,
-        env.view.sort_order,
-    );
+    env.view.rebuild_flat_items();
 
     let session_id = env
         .view
@@ -1707,11 +1766,7 @@ fn test_manual_sort_shift_k_moves_group_within_siblings_and_persists() {
 
     let mut env = create_test_env_with_groups();
     env.view.sort_order = SortOrder::Manual;
-    env.view.flat_items = crate::session::flatten_tree(
-        &env.view.group_tree,
-        &env.view.instances,
-        env.view.sort_order,
-    );
+    env.view.rebuild_flat_items();
 
     env.view.select_group_by_path("personal");
     env.view.handle_key(key(KeyCode::Char('K')));

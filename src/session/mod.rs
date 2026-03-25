@@ -18,7 +18,7 @@ pub use config::{
     TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
 };
 pub use environment::validate_env_entry;
-pub use groups::{flatten_tree, validate_group_path, Group, GroupTree, Item};
+pub use groups::{expanded_groups, flatten_tree, validate_group_path, Group, GroupTree, Item};
 pub(crate) use instance::{extract_resume_token, is_valid_resume_token};
 pub use instance::{Instance, SandboxInfo, Status, StatusUpdateOptions, WorktreeInfo};
 pub use profile_config::{

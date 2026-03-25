@@ -33,6 +33,18 @@ impl Group {
     }
 }
 
+pub fn expanded_groups(groups: &[Group]) -> Vec<Group> {
+    groups
+        .iter()
+        .cloned()
+        .map(|mut group| {
+            group.collapsed = false;
+            group.children.clear();
+            group
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct GroupTree {
     roots: Vec<Group>,

@@ -12,7 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session::config::{load_config, SortOrder};
-use crate::session::{flatten_tree, Group, GroupTree, Instance, Item, Status, Storage};
+use crate::session::{
+    expanded_groups, flatten_tree, Group, GroupTree, Instance, Item, Status, Storage,
+};
 
 use super::status_bar::{
     get_server_option, list_aoe_sessions, pid_is_running, set_server_option, set_session_option,
@@ -24,6 +26,7 @@ use super::{
 };
 
 const NOTIFICATION_MONITOR_PID_OPTION_PREFIX: &str = "@aoe_notification_monitor_pid";
+const NOTIFICATION_MONITOR_MTIME_OPTION_PREFIX: &str = "@aoe_notification_monitor_mtime";
 const NOTIFICATION_OPTION: &str = "@aoe_waiting";
 
 fn monitor_pid_option(profile: &str) -> String {
@@ -32,6 +35,22 @@ fn monitor_pid_option(profile: &str) -> String {
     } else {
         format!("{NOTIFICATION_MONITOR_PID_OPTION_PREFIX}_{profile}")
     }
+}
+
+fn monitor_mtime_option(profile: &str) -> String {
+    if profile == "default" {
+        NOTIFICATION_MONITOR_MTIME_OPTION_PREFIX.to_string()
+    } else {
+        format!("{NOTIFICATION_MONITOR_MTIME_OPTION_PREFIX}_{profile}")
+    }
+}
+
+fn current_exe_mtime() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let metadata = fs::metadata(exe).ok()?;
+    let mtime = metadata.modified().ok()?;
+    let duration = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(duration.as_secs().to_string())
 }
 const ACK_SIGNAL_FILE_NAME: &str = "ack-signal";
 const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -106,6 +125,7 @@ struct NotificationEntry {
     session_name: String,
     title: String,
     status: Status,
+    real_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,19 +158,6 @@ fn current_home_sort_order() -> SortOrder {
         .unwrap_or_default()
 }
 
-fn expanded_groups(groups: &[Group]) -> Vec<Group> {
-    groups
-        .iter()
-        .map(|group| Group {
-            name: group.name.clone(),
-            path: group.path.clone(),
-            collapsed: false,
-            default_directory: group.default_directory.clone(),
-            children: Vec::new(),
-        })
-        .collect()
-}
-
 fn ordered_existing_notification_entries(
     instances: &[Instance],
     groups: &[Group],
@@ -167,19 +174,22 @@ fn ordered_existing_notification_entries(
     flatten_tree(&group_tree, instances, sort_order)
         .into_iter()
         .filter_map(|item| match item {
-            Item::Session { id, .. } => instances_by_id.get(id.as_str()).copied(),
+            Item::Session { id, .. } => Some(id),
             Item::Group { .. } => None,
         })
-        .filter_map(|instance| {
+        .enumerate()
+        .filter_map(|(index, id)| {
+            let instance = instances_by_id.get(id.as_str()).copied()?;
             let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
             existing_sessions
                 .contains(&session_name)
-                .then_some((session_name, instance))
+                .then_some((index + 1, session_name, instance))
         })
-        .map(|(session_name, instance)| NotificationEntry {
+        .map(|(real_index, session_name, instance)| NotificationEntry {
             session_name,
             title: instance.title.clone(),
             status: instance.status,
+            real_index,
         })
         .collect()
 }
@@ -266,11 +276,10 @@ fn visible_notification_entries<'a>(
 fn format_notification_text(entries: &[NotificationEntry], current_session: &str) -> String {
     visible_notification_entries(entries, current_session)
         .into_iter()
-        .enumerate()
-        .map(|(index, entry)| {
+        .map(|entry| {
             format!(
                 "[{}] {} {}",
-                index + 1,
+                entry.real_index,
                 status_icon(entry.status),
                 entry.title
             )
@@ -359,45 +368,99 @@ fn detect_live_status(
     now: Instant,
 ) -> Status {
     let previous_status = state.last_status;
+    let mut primary_status: Option<Status> = None;
 
     if let Some(hook_status) = crate::hooks::read_hook_status(&instance.id) {
         state.clear_spike_state();
-        let status = state.apply_acknowledged_mapping(hook_status);
-        state.last_status = status;
-        return status;
+        primary_status = Some(hook_status);
     }
 
     let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
-    if let Some(status) = get_cached_pane_info(&session_name)
-        .and_then(|info| super::status_detection::detect_status_from_title(&info.pane_title))
-    {
-        state.clear_spike_state();
-        state.last_status = status;
-        return status;
+
+    if primary_status.is_none() {
+        if let Some(status) = get_cached_pane_info(&session_name)
+            .and_then(|info| super::status_detection::detect_status_from_title(&info.pane_title))
+        {
+            state.clear_spike_state();
+            primary_status = Some(status);
+        }
     }
 
-    let mut detected = if allow_capture {
-        match instance.tmux_session() {
-            Ok(session) => match session.capture_pane_cached(50) {
-                Ok(content) => super::status_detection::detect_status_from_content(
-                    &content,
-                    &instance.tool,
-                    None,
-                ),
+    if primary_status.is_none() {
+        let mut detected = if allow_capture {
+            match instance.tmux_session() {
+                Ok(session) => match session.capture_pane_cached(50) {
+                    Ok(content) => super::status_detection::detect_status_from_content(
+                        &content,
+                        &instance.tool,
+                        None,
+                    ),
+                    Err(_) => previous_status,
+                },
                 Err(_) => previous_status,
-            },
-            Err(_) => previous_status,
+            }
+        } else {
+            previous_status
+        };
+
+        if allow_capture {
+            detected = state.apply_spike_detection(detected, previous_status, now);
         }
+
+        primary_status = Some(detected);
+    }
+
+    let primary_status = primary_status.unwrap_or(Status::Idle);
+
+    // Detect status for extra (user-split) panes and aggregate
+    let extra_statuses = detect_extra_pane_statuses_for_monitor(&session_name, allow_capture);
+    let aggregated = if extra_statuses.is_empty() {
+        primary_status
     } else {
-        previous_status
+        let mut all = vec![primary_status];
+        all.extend(extra_statuses);
+        super::status_detection::aggregate_pane_statuses(&all)
     };
 
-    if allow_capture {
-        detected = state.apply_spike_detection(detected, previous_status, now);
+    let result = state.apply_acknowledged_mapping(aggregated);
+    state.last_status = result;
+    result
+}
+
+fn detect_extra_pane_statuses_for_monitor(session_name: &str, allow_capture: bool) -> Vec<Status> {
+    let all_panes = match super::get_all_cached_pane_infos(session_name) {
+        Some(panes) if panes.len() > 1 => panes,
+        _ => return Vec::new(),
+    };
+
+    let mut statuses = Vec::new();
+
+    for pane_info in all_panes.iter().skip(1) {
+        let agent_type = match super::status_detection::detect_agent_type_from_pane(pane_info) {
+            Some("shell") | None => continue,
+            Some(agent) => agent,
+        };
+
+        if let Some(status) =
+            super::status_detection::detect_status_from_title(&pane_info.pane_title)
+        {
+            statuses.push(status);
+            continue;
+        }
+
+        if allow_capture {
+            if let Ok(content) = crate::tmux::Session::capture_pane_by_id(&pane_info.pane_id, 50) {
+                let status =
+                    super::status_detection::detect_status_from_content(&content, agent_type, None);
+                statuses.push(status);
+                continue;
+            }
+        }
+
+        statuses.push(Status::Idle);
     }
-    detected = state.apply_acknowledged_mapping(detected);
-    state.last_status = detected;
-    detected
+
+    statuses
 }
 
 fn decide_activity_gate(
@@ -532,15 +595,25 @@ fn clear_notification_options(session_names: &[String]) {
 
 pub fn ensure_notification_monitor(profile: &str) -> Result<()> {
     let pid_option = monitor_pid_option(profile);
-    if get_server_option(&pid_option)
-        .as_deref()
-        .is_some_and(pid_is_running)
-    {
-        return Ok(());
+    let mtime_option = monitor_mtime_option(profile);
+
+    if let Some(existing_pid) = get_server_option(&pid_option) {
+        if pid_is_running(&existing_pid) {
+            let stored_mtime = get_server_option(&mtime_option);
+            let current_mtime = current_exe_mtime();
+            if stored_mtime == current_mtime {
+                return Ok(());
+            }
+            tracing::debug!(
+                "Binary mtime changed for profile {}, restarting notification monitor",
+                profile
+            );
+            kill_process(&existing_pid);
+        }
     }
 
     let current_exe = std::env::current_exe()?;
-    let mut child = Command::new(current_exe);
+    let mut child = Command::new(&current_exe);
     child
         .args(["tmux", "monitor-notifications", "--profile", profile])
         .stdin(Stdio::null())
@@ -549,7 +622,19 @@ pub fn ensure_notification_monitor(profile: &str) -> Result<()> {
 
     let monitor = child.spawn()?;
     set_server_option(&pid_option, &monitor.id().to_string())?;
+    if let Some(mtime) = current_exe_mtime() {
+        set_server_option(&mtime_option, &mtime)?;
+    }
     Ok(())
+}
+
+fn kill_process(pid_str: &str) {
+    if let Ok(pid) = pid_str.parse::<i32>() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+    }
 }
 
 pub fn run_notification_monitor(profile: &str) -> Result<()> {
@@ -641,43 +726,48 @@ mod tests {
                 session_name: "aoe_alpha_1".to_string(),
                 title: "alpha".to_string(),
                 status: Status::Waiting,
+                real_index: 1,
             },
             NotificationEntry {
                 session_name: "aoe_beta_2".to_string(),
                 title: "beta".to_string(),
                 status: Status::Idle,
+                real_index: 2,
             },
             NotificationEntry {
                 session_name: "aoe_gamma_3".to_string(),
                 title: "gamma".to_string(),
                 status: Status::Waiting,
+                real_index: 5,
             },
         ];
 
         assert_eq!(
             format_notification_text(&entries, "aoe_missing"),
-            "[1] \u{25d0} alpha [2] \u{25cb} beta [3] \u{25d0} gamma"
+            "[1] \u{25d0} alpha [2] \u{25cb} beta [5] \u{25d0} gamma"
         );
     }
 
     #[test]
-    fn test_format_notification_text_excludes_self_and_renumbers() {
+    fn test_format_notification_text_excludes_self_and_keeps_real_indices() {
         let entries = vec![
             NotificationEntry {
                 session_name: "aoe_alpha_1".to_string(),
                 title: "alpha".to_string(),
                 status: Status::Waiting,
+                real_index: 2,
             },
             NotificationEntry {
                 session_name: "aoe_beta_2".to_string(),
                 title: "beta".to_string(),
                 status: Status::Idle,
+                real_index: 5,
             },
         ];
 
         assert_eq!(
             format_notification_text(&entries, "aoe_alpha_1"),
-            "[1] \u{25cb} beta"
+            "[5] \u{25cb} beta"
         );
     }
 
@@ -727,13 +817,20 @@ mod tests {
         let entries =
             build_notification_entries(&instances, &groups, SortOrder::AZ, &existing_sessions);
         let session_names: Vec<_> = entries
-            .into_iter()
-            .map(|entry| entry.session_name)
+            .iter()
+            .map(|entry| entry.session_name.clone())
             .collect();
 
         assert!(session_names.contains(&waiting_name));
         assert!(session_names.contains(&idle_visible_name));
         assert!(!session_names.contains(&idle_hidden_name));
+
+        let entries_by_session: HashMap<_, _> = entries
+            .into_iter()
+            .map(|entry| (entry.session_name.clone(), entry))
+            .collect();
+        assert_eq!(entries_by_session[&waiting_name].real_index, 1);
+        assert_eq!(entries_by_session[&idle_visible_name].real_index, 2);
     }
 
     #[test]
@@ -776,6 +873,59 @@ mod tests {
 
         assert!(session_names.contains(&waiting_name));
         assert!(!session_names.contains(&idle_name));
+    }
+
+    #[test]
+    fn test_ordered_existing_notification_entries_use_expanded_tree_indices() {
+        let alpha = Instance::new("alpha", "/tmp/alpha");
+
+        let mut beta = Instance::new("beta", "/tmp/beta");
+        beta.group_path = "work".to_string();
+
+        let mut gamma = Instance::new("gamma", "/tmp/gamma");
+        gamma.group_path = "personal".to_string();
+
+        let alpha_name = crate::tmux::Session::generate_name(&alpha.id, &alpha.title);
+        let beta_name = crate::tmux::Session::generate_name(&beta.id, &beta.title);
+        let gamma_name = crate::tmux::Session::generate_name(&gamma.id, &gamma.title);
+
+        let groups = vec![
+            Group {
+                name: "work".to_string(),
+                path: "work".to_string(),
+                collapsed: true,
+                default_directory: None,
+                children: Vec::new(),
+            },
+            Group {
+                name: "personal".to_string(),
+                path: "personal".to_string(),
+                collapsed: false,
+                default_directory: None,
+                children: Vec::new(),
+            },
+        ];
+        let existing_sessions =
+            HashSet::from([alpha_name.clone(), beta_name.clone(), gamma_name.clone()]);
+
+        let entries = ordered_existing_notification_entries(
+            &[alpha.clone(), beta.clone(), gamma.clone()],
+            &groups,
+            SortOrder::AZ,
+            &existing_sessions,
+        );
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.session_name.as_str(), entry.real_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (alpha_name.as_str(), 1),
+                (gamma_name.as_str(), 2),
+                (beta_name.as_str(), 3),
+            ]
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use tui_input::Input;
 
 use super::HomeView;
 use crate::session::config::{load_config, save_config, SortOrder};
-use crate::session::{flatten_tree, list_profiles, repo_config, resolve_config, Item, Status};
+use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, GroupRenameDialog,
@@ -729,21 +729,17 @@ impl HomeView {
     }
 
     fn execute_jump(&mut self, index: usize) -> Option<Action> {
-        let mut session_number = 0usize;
-        let mut found: Option<(usize, String)> = None;
-        for (idx, item) in self.flat_items.iter().enumerate() {
-            if let Item::Session { id, .. } = item {
-                session_number += 1;
-                if session_number == index {
-                    found = Some((idx, id.clone()));
-                    break;
-                }
-            }
-        }
+        let session_id = self.stable_session_id_at_index(index)?;
 
-        let (cursor_idx, session_id) = found?;
-        self.cursor = cursor_idx;
-        self.update_selected();
+        if let Some(cursor_idx) = self.flat_items.iter().position(|item| {
+            matches!(
+                item,
+                Item::Session { id, .. } if id == &session_id
+            )
+        }) {
+            self.cursor = cursor_idx;
+            self.update_selected();
+        }
         if let Some(inst) = self.get_instance(&session_id) {
             if inst.status != Status::Deleting {
                 return Some(Action::AttachSession(session_id));
@@ -784,7 +780,7 @@ impl HomeView {
 
     fn apply_sort_order(&mut self, new_order: SortOrder) {
         self.sort_order = new_order;
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.rebuild_flat_items();
         if self.search_active && !self.search_query.value().is_empty() {
             self.update_search();
         } else {
@@ -801,7 +797,7 @@ impl HomeView {
 
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.group_tree.toggle_collapsed(path);
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.rebuild_flat_items();
         if let Err(e) = self.save() {
             tracing::error!("Failed to save group state: {}", e);
         }

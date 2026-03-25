@@ -163,6 +163,10 @@ impl App {
             save_config(&config)?;
         }
 
+        if let Err(e) = crate::tmux::notification_monitor::ensure_notification_monitor(profile) {
+            tracing::debug!("Failed to ensure notification monitor on startup: {}", e);
+        }
+
         Ok(Self {
             home,
             should_quit: false,

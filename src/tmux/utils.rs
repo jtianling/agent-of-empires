@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::session::{
     config::{load_config, SortOrder},
-    flatten_tree, Group, GroupTree, Instance, Item,
+    expanded_groups, flatten_tree, Group, GroupTree, Instance, Item,
 };
 
 const AOE_PROFILE_OPTION: &str = "@aoe_profile";
@@ -215,7 +215,6 @@ fn session_index_in_order(
 ) -> Option<usize> {
     ordered_profile_session_names(instances, groups, sort_order)
         .into_iter()
-        .filter(|session| tmux_session_exists(session))
         .position(|session| session == target_session)
         .map(|index| index + 1)
 }
@@ -546,22 +545,9 @@ fn ordered_global_profile_sessions_for_cycle(
     groups: &[Group],
     sort_order: SortOrder,
 ) -> Vec<String> {
-    let expanded_groups = expanded_groups(groups);
-    ordered_profile_session_names(instances, &expanded_groups, sort_order)
+    ordered_profile_session_names(instances, groups, sort_order)
         .into_iter()
         .filter(|name| tmux_session_exists(name))
-        .collect()
-}
-
-fn expanded_groups(groups: &[Group]) -> Vec<Group> {
-    groups
-        .iter()
-        .cloned()
-        .map(|mut group| {
-            group.collapsed = false;
-            group.children.clear();
-            group
-        })
         .collect()
 }
 
@@ -570,7 +556,7 @@ fn ordered_profile_session_names(
     groups: &[Group],
     sort_order: SortOrder,
 ) -> Vec<String> {
-    let group_tree = GroupTree::new_with_groups(instances, groups);
+    let group_tree = GroupTree::new_with_groups(instances, &expanded_groups(groups));
     flatten_tree(&group_tree, instances, sort_order)
         .into_iter()
         .filter_map(|item| match item {
@@ -648,6 +634,19 @@ fn resolve_cycle_target(sessions: &[String], current: &str, direction: &str) -> 
     sessions.get(target_idx).cloned()
 }
 
+fn resolve_existing_session_by_index<FExists>(
+    sessions: &[String],
+    index: usize,
+    session_exists: FExists,
+) -> Option<String>
+where
+    FExists: Fn(&str) -> bool,
+{
+    let target_idx = index.checked_sub(1)?;
+    let target_session = sessions.get(target_idx)?;
+    session_exists(target_session).then(|| target_session.clone())
+}
+
 pub fn switch_aoe_session_by_index(
     index: usize,
     profile: &str,
@@ -664,12 +663,9 @@ pub fn switch_aoe_session_by_index(
     let sort_order = current_home_sort_order();
     let sessions = ordered_profile_session_names(&instances, &groups, sort_order);
 
-    let existing: Vec<String> = sessions
-        .into_iter()
-        .filter(|name| tmux_session_exists(name))
-        .collect();
-
-    let Some(target_session) = existing.get(index - 1) else {
+    let Some(target_session) =
+        resolve_existing_session_by_index(&sessions, index, tmux_session_exists)
+    else {
         return Ok(());
     };
 
@@ -678,15 +674,15 @@ pub fn switch_aoe_session_by_index(
     }
 
     if let Some(client_name) = resolved_client_name.as_deref() {
-        set_last_detached_session_for_client(client_name, target_session);
+        set_last_detached_session_for_client(client_name, &target_session);
     }
 
-    switch_client_to_session(target_session, resolved_client_name.as_deref())?;
-    acknowledge_switched_session(target_session, &instances);
+    switch_client_to_session(&target_session, resolved_client_name.as_deref())?;
+    acknowledge_switched_session(&target_session, &instances);
     if let Some(current_session) = current.as_deref() {
         track_session_switch(
             current_session,
-            target_session,
+            &target_session,
             resolved_client_name.as_deref(),
             &instances,
             &groups,
@@ -1152,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_profile_session_names_skips_collapsed_groups() {
+    fn test_ordered_profile_session_names_keeps_sessions_in_collapsed_groups() {
         let now = Utc::now();
         let visible = instance_with_created_at("Visible", "/tmp/v", now);
         let mut hidden = instance_with_created_at("Hidden", "/tmp/h", now + Duration::seconds(1));
@@ -1170,10 +1166,10 @@ mod tests {
 
         assert_eq!(
             sessions,
-            vec![crate::tmux::Session::generate_name(
-                &visible.id,
-                &visible.title
-            )]
+            vec![
+                crate::tmux::Session::generate_name(&visible.id, &visible.title),
+                crate::tmux::Session::generate_name(&hidden.id, &hidden.title),
+            ]
         );
     }
 
@@ -1192,8 +1188,7 @@ mod tests {
             children: Vec::new(),
         }];
 
-        let sessions =
-            ordered_profile_session_names(&instances, &expanded_groups(&groups), SortOrder::Newest);
+        let sessions = ordered_profile_session_names(&instances, &groups, SortOrder::Newest);
 
         assert_eq!(
             sessions,
@@ -1201,6 +1196,89 @@ mod tests {
                 crate::tmux::Session::generate_name(&visible.id, &visible.title),
                 crate::tmux::Session::generate_name(&hidden.id, &hidden.title),
             ]
+        );
+    }
+
+    #[test]
+    fn test_ordered_profile_session_names_are_stable_across_group_collapse_state() {
+        let now = Utc::now();
+        let visible = instance_with_created_at("Visible", "/tmp/v", now);
+        let mut hidden_a =
+            instance_with_created_at("Hidden A", "/tmp/ha", now + Duration::seconds(1));
+        hidden_a.group_path = "work".to_string();
+        let mut hidden_b =
+            instance_with_created_at("Hidden B", "/tmp/hb", now + Duration::seconds(2));
+        hidden_b.group_path = "work".to_string();
+        let instances = vec![visible.clone(), hidden_a.clone(), hidden_b.clone()];
+
+        let expanded_groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: false,
+            default_directory: None,
+            children: Vec::new(),
+        }];
+        let collapsed_groups = vec![Group {
+            collapsed: true,
+            ..expanded_groups[0].clone()
+        }];
+
+        let expanded =
+            ordered_profile_session_names(&instances, &expanded_groups, SortOrder::Newest);
+        let collapsed =
+            ordered_profile_session_names(&instances, &collapsed_groups, SortOrder::Newest);
+
+        assert_eq!(collapsed, expanded);
+    }
+
+    #[test]
+    fn test_resolve_existing_session_by_index_keeps_stable_slots_for_collapsed_groups() {
+        let now = Utc::now();
+        let alpha = instance_with_created_at("Alpha", "/tmp/a", now);
+        let mut beta = instance_with_created_at("Beta", "/tmp/b", now + Duration::seconds(1));
+        beta.group_path = "work".to_string();
+        let mut gamma = instance_with_created_at("Gamma", "/tmp/c", now + Duration::seconds(2));
+        gamma.group_path = "work".to_string();
+        let instances = vec![alpha.clone(), beta.clone(), gamma.clone()];
+        let groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: true,
+            default_directory: None,
+            children: Vec::new(),
+        }];
+
+        let sessions = ordered_profile_session_names(&instances, &groups, SortOrder::AZ);
+        let alpha_session = crate::tmux::Session::generate_name(&alpha.id, &alpha.title);
+        let beta_session = crate::tmux::Session::generate_name(&beta.id, &beta.title);
+
+        let target =
+            resolve_existing_session_by_index(&sessions, 2, |session| session != alpha_session);
+
+        assert_eq!(target, Some(beta_session));
+    }
+
+    #[test]
+    fn test_session_index_in_order_uses_stable_slot_without_filtering_missing_sessions() {
+        let now = Utc::now();
+        let alpha = instance_with_created_at("Alpha", "/tmp/a", now);
+        let mut beta = instance_with_created_at("Beta", "/tmp/b", now + Duration::seconds(1));
+        beta.group_path = "work".to_string();
+        let mut gamma = instance_with_created_at("Gamma", "/tmp/c", now + Duration::seconds(2));
+        gamma.group_path = "work".to_string();
+        let instances = vec![alpha.clone(), beta.clone(), gamma];
+        let groups = vec![Group {
+            name: "work".to_string(),
+            path: "work".to_string(),
+            collapsed: true,
+            default_directory: None,
+            children: Vec::new(),
+        }];
+        let beta_session = crate::tmux::Session::generate_name(&beta.id, &beta.title);
+
+        assert_eq!(
+            session_index_in_order(&instances, &groups, SortOrder::AZ, &beta_session),
+            Some(2)
         );
     }
 

@@ -14,7 +14,7 @@ use tui_input::Input;
 
 use crate::session::{
     config::{load_config, save_config, SortOrder},
-    flatten_tree, resolve_config, Group, GroupTree, Instance, Item, Storage,
+    expanded_groups, flatten_tree, resolve_config, Group, GroupTree, Instance, Item, Storage,
 };
 use crate::tmux::AvailableTools;
 
@@ -80,6 +80,12 @@ pub(super) struct PendingJump {
     pub(super) first_digit: u8,
 }
 
+#[derive(Default)]
+pub(super) struct StableSessionIndexCache {
+    pub(super) session_ids: Vec<String>,
+    pub(super) indices: HashMap<String, usize>,
+}
+
 pub struct HomeView {
     pub(super) storage: Storage,
     pub(super) instances: Vec<Instance>,
@@ -87,6 +93,7 @@ pub struct HomeView {
     pub(super) groups: Vec<Group>,
     pub(super) group_tree: GroupTree,
     pub(super) flat_items: Vec<Item>,
+    pub(super) stable_session_index_cache: StableSessionIndexCache,
 
     // UI state
     pub(super) cursor: usize,
@@ -215,6 +222,8 @@ impl HomeView {
             .unwrap_or_default();
 
         let flat_items = flatten_tree(&group_tree, &instances, sort_order);
+        let stable_session_index_cache =
+            Self::build_stable_session_index_cache(&instances, &groups, sort_order);
 
         let mut view = Self {
             storage,
@@ -223,6 +232,7 @@ impl HomeView {
             groups,
             group_tree,
             flat_items,
+            stable_session_index_cache,
             cursor: 0,
             selected_session: None,
             selected_group: None,
@@ -297,8 +307,7 @@ impl HomeView {
             .map(|i| (i.id.clone(), i.clone()))
             .collect();
         self.groups = groups;
-        self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.rebuild_group_tree_and_flat_items();
 
         if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
             self.cursor = self.flat_items.len() - 1;
@@ -313,6 +322,61 @@ impl HomeView {
 
         self.update_selected();
         Ok(())
+    }
+
+    fn build_stable_session_index_cache(
+        instances: &[Instance],
+        groups: &[Group],
+        sort_order: SortOrder,
+    ) -> StableSessionIndexCache {
+        let expanded = expanded_groups(groups);
+        let expanded_tree = GroupTree::new_with_groups(instances, &expanded);
+        let session_ids: Vec<String> = flatten_tree(&expanded_tree, instances, sort_order)
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Session { id, .. } => Some(id),
+                Item::Group { .. } => None,
+            })
+            .collect();
+        let indices = session_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id.clone(), idx + 1))
+            .collect();
+
+        StableSessionIndexCache {
+            session_ids,
+            indices,
+        }
+    }
+
+    pub(super) fn rebuild_group_tree_and_flat_items(&mut self) {
+        self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+        self.rebuild_flat_items();
+    }
+
+    pub(super) fn rebuild_flat_items(&mut self) {
+        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.stable_session_index_cache =
+            Self::build_stable_session_index_cache(&self.instances, &self.groups, self.sort_order);
+    }
+
+    #[cfg(test)]
+    pub(super) fn stable_session_ids(&self) -> Vec<String> {
+        self.stable_session_index_cache.session_ids.clone()
+    }
+
+    pub(super) fn stable_session_indices(&self) -> &HashMap<String, usize> {
+        &self.stable_session_index_cache.indices
+    }
+
+    pub(super) fn stable_session_id_at_index(&self, index: usize) -> Option<String> {
+        index.checked_sub(1).and_then(|target_idx| {
+            self.stable_session_index_cache
+                .session_ids
+                .get(target_idx)
+                .cloned()
+        })
     }
 
     /// Request a status refresh in the background (non-blocking).
@@ -752,7 +816,7 @@ impl HomeView {
             .map(|i| (i.id.clone(), i.clone()))
             .collect();
         self.groups = self.group_tree.get_all_groups();
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.rebuild_flat_items();
 
         if self.search_active && !self.search_query.value().is_empty() {
             self.update_search();

@@ -53,18 +53,29 @@ Running sessions in the notification bar SHALL use ● (`U+25CF`) as their statu
 - **THEN** it is displayed as `[index] ● title`
 
 ### Requirement: Notification entries sorted by session index
-Notification bar entries SHALL be sorted by session index (ascending), regardless of status.
+Notification bar entries SHALL be sorted by session index (ascending), regardless of status. The index used for sorting SHALL be the stable `@aoe_index` from the fully-expanded group tree. The notification bar SHALL NOT use sequential renumbering.
 
 #### Scenario: Mixed status sessions sorted by index
 - **WHEN** sessions with index 2 (Running), 3 (Waiting), and 5 (Idle) are all visible
 - **THEN** the notification shows `[2] ● run [3] ◐ wait [5] ○ idle` in index order
 
 ### Requirement: Notification format uses index and title
-Each session in the notification bar SHALL be displayed as `[index] title` where index matches the session's `@aoe_index` used by `Ctrl+b <N>` jump keys.
+Each session in the notification bar SHALL be displayed as `[index] icon title` where index is the session's real `@aoe_index` computed from the fully-expanded group tree. The index SHALL match the number used by `Ctrl+b <N>` jump keys. The notification bar SHALL NOT use sequential renumbering.
 
 #### Scenario: Multiple sessions displayed
 - **WHEN** sessions with index 2 ("api") and index 5 ("frontend") are both Waiting
-- **THEN** the notification shows `[2] api [5] frontend`
+- **THEN** the notification shows `[2] ◐ api [5] ◐ frontend`
+
+#### Scenario: Indices have gaps from filtered sessions
+- **WHEN** sessions with indices 1, 2, 3, 4, 5 exist
+- **AND** sessions 1 (Stopped), 3 (current session), and 4 (Idle in collapsed group) are filtered out
+- **THEN** the notification shows `[2] icon title2 [5] icon title5`
+- **AND** the indices 1, 3, 4 SHALL NOT appear (those sessions are not shown)
+
+#### Scenario: Notification index matches Ctrl+b N
+- **WHEN** notification bar shows `[3] ◐ myapp`
+- **AND** the user presses `Ctrl+b 3 Space`
+- **THEN** the system SHALL switch to the "myapp" session
 
 ### Requirement: Notification text uses distinct color
 The notification section SHALL use a visually distinct color (yellow/colour220) to differentiate from the dim hint text (colour245).
