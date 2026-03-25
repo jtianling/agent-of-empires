@@ -456,7 +456,7 @@ fn update_notification_options(
     session_names: &[String],
     states: &mut HashMap<String, MonitorSessionState>,
     acknowledged_instance_id: Option<&str>,
-) -> Result<Duration> {
+) -> Result<(Duration, Vec<String>)> {
     let now = Instant::now();
     let storage = Storage::new(profile)?;
     let (mut instances, groups) = storage.load_with_groups()?;
@@ -504,12 +504,16 @@ fn update_notification_options(
 
     let sort_order = current_home_sort_order();
     let entries = build_notification_entries(&instances, &groups, sort_order, &existing_sessions);
-    let updates = build_notification_session_updates(session_names, &entries);
+    let profile_sessions: Vec<String> = instances
+        .iter()
+        .map(|inst| crate::tmux::Session::generate_name(&inst.id, &inst.title))
+        .filter(|name| existing_sessions.contains(name))
+        .collect();
+    let updates = build_notification_session_updates(&profile_sessions, &entries);
     apply_session_option_updates(&updates)?;
 
-    Ok(poll_interval_for_statuses(
-        instances.iter().map(|instance| instance.status),
-    ))
+    let interval = poll_interval_for_statuses(instances.iter().map(|instance| instance.status));
+    Ok((interval, profile_sessions))
 }
 
 fn clear_notification_options(session_names: &[String]) {
@@ -543,6 +547,7 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
     let pid = std::process::id().to_string();
     let startup_deadline = Instant::now() + Duration::from_secs(2);
     let mut states = HashMap::<String, MonitorSessionState>::new();
+    let mut last_profile_sessions = Vec::new();
 
     loop {
         match get_server_option(NOTIFICATION_MONITOR_PID_OPTION) {
@@ -564,19 +569,21 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
         }
 
         let ack_signal = take_ack_signal();
-        let poll_interval = match update_notification_options(
+        let (poll_interval, profile_sessions) = match update_notification_options(
             profile,
             &session_names,
             &mut states,
             ack_signal.as_deref(),
         ) {
-            Ok(interval) => interval,
+            Ok(result) => result,
             Err(err) => {
                 tracing::debug!("Failed to refresh notification options: {}", err);
-                clear_notification_options(&session_names);
-                POLL_INTERVAL_WAITING
+                (POLL_INTERVAL_WAITING, Vec::new())
             }
         };
+        if !profile_sessions.is_empty() {
+            last_profile_sessions = profile_sessions;
+        }
 
         if get_server_option(NOTIFICATION_MONITOR_PID_OPTION).as_deref() != Some(pid.as_str()) {
             break;
@@ -586,8 +593,7 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
     }
 
     if get_server_option(NOTIFICATION_MONITOR_PID_OPTION).as_deref() == Some(pid.as_str()) {
-        let sessions = list_aoe_sessions().unwrap_or_default();
-        clear_notification_options(&sessions);
+        clear_notification_options(&last_profile_sessions);
         let _ = unset_server_option(NOTIFICATION_MONITOR_PID_OPTION);
     }
 
