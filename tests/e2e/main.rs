@@ -22,4 +22,5 @@ mod errors;
 mod new_session;
 mod profile_picker;
 mod sandbox;
+mod session_rename;
 mod tui_launch;

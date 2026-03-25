@@ -272,26 +272,17 @@ impl HomeView {
                         .find(|i| i.id == id)
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+                    let old_tmux_session = if current_title != effective_title {
+                        Some(crate::tmux::Session::new(&id, &current_title)?)
+                    } else {
+                        None
+                    };
 
                     // Apply title and group changes to the instance
                     instance.title = effective_title.clone();
                     instance.group_path = effective_group.clone();
 
-                    // Handle tmux rename if title changed
-                    if let Some(orig_inst) = self.get_instance(&id) {
-                        if orig_inst.title != effective_title {
-                            let tmux_session = orig_inst.tmux_session()?;
-                            if tmux_session.exists() {
-                                let new_tmux_name =
-                                    crate::tmux::Session::generate_name(&id, &effective_title);
-                                if let Err(e) = tmux_session.rename(&new_tmux_name) {
-                                    tracing::warn!("Failed to rename tmux session: {}", e);
-                                } else {
-                                    crate::tmux::refresh_session_cache();
-                                }
-                            }
-                        }
-                    }
+                    rename_tmux_session(&id, &effective_title, old_tmux_session);
 
                     // Remove from current profile
                     self.instances.retain(|i| i.id != id);
@@ -314,34 +305,24 @@ impl HomeView {
                     self.selected_session = None;
 
                     self.reload()?;
+                    self.invalidate_stale_poll(&id);
                     return Ok(());
                 }
             }
 
             // No profile change - update in place
-            // Read old title before mutation so we can detect renames
-            let old_title = self.get_instance(&id).map(|i| i.title.clone());
+            let old_tmux_session = if current_title != effective_title {
+                Some(crate::tmux::Session::new(&id, &current_title)?)
+            } else {
+                None
+            };
 
             self.mutate_instance(&id, |inst| {
                 inst.title = effective_title.clone();
                 inst.group_path = effective_group.clone();
             });
 
-            // Handle tmux rename if title changed
-            if old_title.is_some_and(|t| t != effective_title) {
-                if let Some(inst) = self.get_instance(&id) {
-                    let tmux_session = inst.tmux_session()?;
-                    if tmux_session.exists() {
-                        let new_tmux_name =
-                            crate::tmux::Session::generate_name(&id, &effective_title);
-                        if let Err(e) = tmux_session.rename(&new_tmux_name) {
-                            tracing::warn!("Failed to rename tmux session: {}", e);
-                        } else {
-                            crate::tmux::refresh_session_cache();
-                        }
-                    }
-                }
-            }
+            rename_tmux_session(&id, &effective_title, old_tmux_session);
 
             // Rebuild group tree and create group if needed
             self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
@@ -351,8 +332,15 @@ impl HomeView {
             self.save()?;
 
             self.reload()?;
+            self.invalidate_stale_poll(&id);
         }
         Ok(())
+    }
+
+    fn invalidate_stale_poll(&mut self, id: &str) {
+        self.skip_stale_errors.insert(id.to_string());
+        let _ = self.status_poller.try_recv_updates();
+        self.pending_status_refresh = false;
     }
 
     fn apply_group_rename(&mut self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
@@ -369,6 +357,25 @@ impl HomeView {
         self.reload()?;
         self.select_group_by_path(new_path);
         Ok(())
+    }
+}
+
+fn rename_tmux_session(
+    id: &str,
+    effective_title: &str,
+    old_tmux_session: Option<crate::tmux::Session>,
+) {
+    let Some(tmux_session) = old_tmux_session else {
+        return;
+    };
+
+    if tmux_session.exists() {
+        let new_tmux_name = crate::tmux::Session::generate_name(id, effective_title);
+        if let Err(e) = tmux_session.rename(&new_tmux_name) {
+            tracing::warn!("Failed to rename tmux session: {}", e);
+        } else {
+            crate::tmux::refresh_session_cache();
+        }
     }
 }
 

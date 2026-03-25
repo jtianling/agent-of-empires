@@ -136,6 +136,8 @@ pub struct HomeView {
     // Performance: background status polling
     pub(super) status_poller: StatusPoller,
     pub(super) pending_status_refresh: bool,
+    /// Session IDs that were just renamed; skip next stale Error from in-flight poll
+    pub(super) skip_stale_errors: HashSet<String>,
 
     // Performance: background deletion
     pub(super) deletion_poller: DeletionPoller,
@@ -251,6 +253,7 @@ impl HomeView {
             launch_dir,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
+            skip_stale_errors: HashSet::new(),
             deletion_poller: DeletionPoller::new(),
             creation_poller: CreationPoller::new(),
             creation_cancelled: false,
@@ -332,6 +335,11 @@ impl HomeView {
             for update in updates {
                 let old_status = self.get_instance(&update.id).map(|i| i.status);
                 let resume_token = update.resume_token.clone();
+
+                // Skip stale Error from in-flight poll that used old tmux session name
+                if update.status == Status::Error && self.skip_stale_errors.remove(&update.id) {
+                    continue;
+                }
 
                 let should_update = old_status.is_some_and(|s| {
                     s != Status::Deleting
