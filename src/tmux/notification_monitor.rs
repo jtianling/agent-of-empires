@@ -23,8 +23,16 @@ use super::{
     refresh_session_cache,
 };
 
-const NOTIFICATION_MONITOR_PID_OPTION: &str = "@aoe_notification_monitor_pid";
+const NOTIFICATION_MONITOR_PID_OPTION_PREFIX: &str = "@aoe_notification_monitor_pid";
 const NOTIFICATION_OPTION: &str = "@aoe_waiting";
+
+fn monitor_pid_option(profile: &str) -> String {
+    if profile == "default" {
+        NOTIFICATION_MONITOR_PID_OPTION_PREFIX.to_string()
+    } else {
+        format!("{NOTIFICATION_MONITOR_PID_OPTION_PREFIX}_{profile}")
+    }
+}
 const ACK_SIGNAL_FILE_NAME: &str = "ack-signal";
 const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const POLL_INTERVAL_RUNNING: Duration = Duration::from_secs(1);
@@ -523,7 +531,8 @@ fn clear_notification_options(session_names: &[String]) {
 }
 
 pub fn ensure_notification_monitor(profile: &str) -> Result<()> {
-    if get_server_option(NOTIFICATION_MONITOR_PID_OPTION)
+    let pid_option = monitor_pid_option(profile);
+    if get_server_option(&pid_option)
         .as_deref()
         .is_some_and(pid_is_running)
     {
@@ -539,18 +548,19 @@ pub fn ensure_notification_monitor(profile: &str) -> Result<()> {
         .stderr(Stdio::null());
 
     let monitor = child.spawn()?;
-    set_server_option(NOTIFICATION_MONITOR_PID_OPTION, &monitor.id().to_string())?;
+    set_server_option(&pid_option, &monitor.id().to_string())?;
     Ok(())
 }
 
 pub fn run_notification_monitor(profile: &str) -> Result<()> {
+    let pid_option = monitor_pid_option(profile);
     let pid = std::process::id().to_string();
     let startup_deadline = Instant::now() + Duration::from_secs(2);
     let mut states = HashMap::<String, MonitorSessionState>::new();
     let mut last_profile_sessions = Vec::new();
 
     loop {
-        match get_server_option(NOTIFICATION_MONITOR_PID_OPTION) {
+        match get_server_option(&pid_option) {
             Some(owner) if owner == pid => {}
             Some(_) => break,
             None if Instant::now() <= startup_deadline => {
@@ -585,16 +595,16 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
             last_profile_sessions = profile_sessions;
         }
 
-        if get_server_option(NOTIFICATION_MONITOR_PID_OPTION).as_deref() != Some(pid.as_str()) {
+        if get_server_option(&pid_option).as_deref() != Some(pid.as_str()) {
             break;
         }
 
         thread::sleep(poll_interval);
     }
 
-    if get_server_option(NOTIFICATION_MONITOR_PID_OPTION).as_deref() == Some(pid.as_str()) {
+    if get_server_option(&pid_option).as_deref() == Some(pid.as_str()) {
         clear_notification_options(&last_profile_sessions);
-        let _ = unset_server_option(NOTIFICATION_MONITOR_PID_OPTION);
+        let _ = unset_server_option(&pid_option);
     }
 
     Ok(())
