@@ -590,15 +590,20 @@ fn test_notification_monitor_tracks_hook_status_changes() {
     let mut running_text = None;
     while start.elapsed() <= Duration::from_secs(8) {
         running_text = tmux_show_option_optional(&h, &alpha_name, "@aoe_waiting");
-        if running_text.is_none() {
+        if running_text
+            .as_deref()
+            .is_some_and(|text| text.contains("\u{25cf}"))
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
     assert!(
-        running_text.is_none(),
-        "expected waiting notification to clear once Beta Waiter is running, got {:?}",
+        running_text
+            .as_deref()
+            .is_some_and(|text| text.contains("[1] \u{25cf} Beta Waiter")),
+        "expected running notification for Beta Waiter, got {:?}",
         running_text
     );
 

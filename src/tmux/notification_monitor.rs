@@ -1,7 +1,7 @@
 //! Background notification monitor for tmux status bar.
 //!
 //! Polls session statuses and updates per-session tmux user options so the
-//! status bar can display Waiting/Idle sessions.
+//! status bar can display Waiting/Running/Idle sessions.
 
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -33,7 +33,7 @@ const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const POLL_INTERVAL_RUNNING: Duration = Duration::from_secs(1);
 const POLL_INTERVAL_WAITING: Duration = Duration::from_secs(2);
 const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(3);
-const MAX_NOTIFICATION_BINDINGS: usize = 6;
+const MAX_NOTIFICATION_BINDINGS: usize = 8;
 
 #[derive(Debug, Clone)]
 struct MonitorSessionState {
@@ -121,6 +121,7 @@ struct ActivityGateDecision {
 fn status_icon(status: Status) -> &'static str {
     match status {
         Status::Waiting => "\u{25d0}",
+        Status::Running => "\u{25cf}",
         Status::Idle => "\u{25cb}",
         _ => "",
     }
@@ -212,7 +213,9 @@ fn should_notify_for_instance(
 ) -> bool {
     match effective_status {
         Status::Waiting => true,
-        Status::Idle => !is_in_collapsed_group(&instance.group_path, collapsed_paths),
+        Status::Running | Status::Idle => {
+            !is_in_collapsed_group(&instance.group_path, collapsed_paths)
+        }
         _ => false,
     }
 }

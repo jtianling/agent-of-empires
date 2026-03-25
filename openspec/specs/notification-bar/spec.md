@@ -1,14 +1,18 @@
 ## ADDED Requirements
 
 ### Requirement: Notification bar displays in tmux status-left
-The tmux status bar for each AoE-managed session SHALL display a notification section after the "Ctrl+b d detach" hint, showing other sessions that are Waiting or Idle.
+The tmux status bar for each AoE-managed session SHALL display a notification section after the "Ctrl+b d detach" hint, showing other sessions that are Waiting, Running, or Idle.
 
 #### Scenario: Sessions are waiting
 - **WHEN** one or more other AoE sessions are in Waiting status
-- **THEN** the status bar shows ` | [index] title [index] title` after "Ctrl+b d detach", with each waiting session's index and title
+- **THEN** the status bar shows ` | [index] ◐ title [index] ◐ title` after "Ctrl+b d detach"
+
+#### Scenario: Sessions are running
+- **WHEN** one or more other AoE sessions are in Running status and not in a collapsed group
+- **THEN** the status bar shows those sessions with ● icon, e.g., `[index] ● title`
 
 #### Scenario: No sessions need attention
-- **WHEN** no other AoE sessions are Waiting or Idle (per visibility rules)
+- **WHEN** no other AoE sessions are Waiting, Running, or Idle (per visibility rules)
 - **THEN** the notification section is empty and no ` | ` separator is shown
 
 #### Scenario: Current session excluded
@@ -29,6 +33,31 @@ Idle sessions SHALL be shown in the notification bar unless they belong to a col
 #### Scenario: Waiting session in collapsed group
 - **WHEN** a session is Waiting and belongs to a collapsed group
 - **THEN** it still appears in the notification bar (Waiting always shown)
+
+### Requirement: Running sessions shown conditionally based on group collapse state
+Running sessions SHALL be shown in the notification bar unless they belong to a collapsed group. This follows the same visibility rules as Idle sessions.
+
+#### Scenario: Running session in expanded or no group
+- **WHEN** a session is Running and belongs to an expanded group or no group
+- **THEN** it appears in the notification bar with ● icon
+
+#### Scenario: Running session in collapsed group
+- **WHEN** a session is Running and belongs to a collapsed group
+- **THEN** it does NOT appear in the notification bar
+
+### Requirement: Running status icon is filled circle
+Running sessions in the notification bar SHALL use ● (`U+25CF`) as their status icon, matching the TUI session list.
+
+#### Scenario: Running session icon displayed
+- **WHEN** a Running session appears in the notification bar
+- **THEN** it is displayed as `[index] ● title`
+
+### Requirement: Notification entries sorted by session index
+Notification bar entries SHALL be sorted by session index (ascending), regardless of status.
+
+#### Scenario: Mixed status sessions sorted by index
+- **WHEN** sessions with index 2 (Running), 3 (Waiting), and 5 (Idle) are all visible
+- **THEN** the notification shows `[2] ● run [3] ◐ wait [5] ○ idle` in index order
 
 ### Requirement: Notification format uses index and title
 Each session in the notification bar SHALL be displayed as `[index] title` where index matches the session's `@aoe_index` used by `Ctrl+b <N>` jump keys.
@@ -62,6 +91,17 @@ A background daemon process SHALL poll session statuses and update each session'
 #### Scenario: Monitor exits when no sessions remain
 - **WHEN** all AoE tmux sessions have been destroyed
 - **THEN** the monitor process exits
+
+### Requirement: Maximum notification bindings increased to 8
+The notification bar SHALL support up to 8 keybinding slots.
+
+#### Scenario: 8 sessions visible
+- **WHEN** 8 sessions are in the notification bar
+- **THEN** all 8 have keybindings assigned (1-8) and the hint shows `1..8`
+
+#### Scenario: More than 8 sessions visible
+- **WHEN** more than 8 sessions qualify for the notification bar
+- **THEN** only the first 8 (by session index) receive keybindings
 
 ### Requirement: Status-left-length increased
 The tmux `status-left-length` SHALL be increased from 80 to 160 to accommodate notification text with multiple session entries.
