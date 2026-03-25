@@ -261,6 +261,28 @@ fn track_session_switch(
     set_target_session_index(instances, groups, sort_order, target_session);
 }
 
+fn resolve_instance_id_for_session(target_session: &str, instances: &[Instance]) -> Option<String> {
+    instances.iter().find_map(|instance| {
+        (crate::tmux::Session::generate_name(&instance.id, &instance.title) == target_session)
+            .then(|| instance.id.clone())
+    })
+}
+
+fn acknowledge_switched_session(target_session: &str, instances: &[Instance]) {
+    let Some(instance_id) = resolve_instance_id_for_session(target_session, instances) else {
+        return;
+    };
+
+    if let Err(err) = super::write_ack_signal(&instance_id) {
+        tracing::debug!(
+            "Failed to write ack signal for session {} (instance {}): {}",
+            target_session,
+            instance_id,
+            err
+        );
+    }
+}
+
 fn switch_to_previous_session<FExists, FSwitch>(
     current_session: Option<&str>,
     previous_session: Option<&str>,
@@ -498,6 +520,7 @@ pub fn switch_aoe_session(
     }
 
     switch_client_to_session(&target_session, resolved_client_name.as_deref())?;
+    acknowledge_switched_session(&target_session, &instances);
     track_session_switch(
         &current,
         &target_session,
@@ -597,7 +620,13 @@ fn switch_client_to_session(target_session: &str, client_name: Option<&str>) -> 
         command.args(["-c", client_name]);
     }
     command.args(["-t", target_session]);
-    command.output()?;
+    let output = command.output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "tmux switch-client failed for {}: {}",
+        target_session,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     Ok(())
 }
 
@@ -653,6 +682,7 @@ pub fn switch_aoe_session_by_index(
     }
 
     switch_client_to_session(target_session, resolved_client_name.as_deref())?;
+    acknowledge_switched_session(target_session, &instances);
     if let Some(current_session) = current.as_deref() {
         track_session_switch(
             current_session,
@@ -689,6 +719,7 @@ pub fn switch_aoe_session_back(profile: &str, client_name: Option<&str>) -> anyh
 
     let storage = crate::session::Storage::new(profile)?;
     let (instances, groups) = storage.load_with_groups()?;
+    acknowledge_switched_session(&target_session, &instances);
     if let Some(current_session) = current.as_deref() {
         track_session_switch(
             current_session,
@@ -1067,6 +1098,28 @@ mod tests {
     fn test_resolve_cycle_target_requires_current_session_in_scope() {
         let sessions = ["aoe_a".to_string(), "aoe_b".to_string()];
         assert_eq!(resolve_cycle_target(&sessions, "aoe_other", "next"), None);
+    }
+
+    #[test]
+    fn test_resolve_instance_id_for_session_matches_generated_name() {
+        let alpha = Instance::new("Alpha", "/tmp/alpha");
+        let beta = Instance::new("Beta", "/tmp/beta");
+        let beta_session = crate::tmux::Session::generate_name(&beta.id, &beta.title);
+
+        assert_eq!(
+            resolve_instance_id_for_session(&beta_session, &[alpha, beta.clone()]),
+            Some(beta.id)
+        );
+    }
+
+    #[test]
+    fn test_resolve_instance_id_for_session_returns_none_when_missing() {
+        let alpha = Instance::new("Alpha", "/tmp/alpha");
+
+        assert_eq!(
+            resolve_instance_id_for_session("aoe_missing", &[alpha]),
+            None
+        );
     }
 
     #[test]

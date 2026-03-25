@@ -581,7 +581,7 @@ fn test_notification_monitor_tracks_hook_status_changes() {
     );
     assert_eq!(
         tmux_show_option_optional(&h, &alpha_name, "@aoe_notification_hint").as_deref(),
-        Some("Ctrl+b N 1 notify")
+        None
     );
 
     std::fs::write(beta_hook_dir.join("status"), "running").expect("write running hook status");

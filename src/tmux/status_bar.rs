@@ -17,8 +17,7 @@ const STATUS_LEFT_FORMAT: &str = concat!(
     "#[fg=colour252,nobold] #{@aoe_title}",
     "#{?#{@aoe_from_title},  #[fg=colour245]from: #{@aoe_from_title}#[fg=colour252],}",
     "  #[fg=colour245]Ctrl+b d detach",
-    "#{?#{@aoe_waiting}, | #[fg=colour220]#{@aoe_waiting}#[fg=colour245],} ",
-    "#{?#{@aoe_notification_hint},| #[fg=colour39]#{@aoe_notification_hint}#[fg=colour245],}"
+    "#{?#{@aoe_waiting}, | #[fg=colour220]#{@aoe_waiting}#[fg=colour245],}"
 );
 
 /// Information about a sandboxed session for status bar display.
@@ -455,8 +454,7 @@ mod tests {
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_from_title}"));
         assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b d detach"));
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_waiting}"));
-        assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_notification_hint}"));
         assert!(STATUS_LEFT_FORMAT.contains("colour220"));
-        assert!(STATUS_LEFT_FORMAT.contains("colour39"));
+        assert!(!STATUS_LEFT_FORMAT.contains("@aoe_notification_hint"));
     }
 }

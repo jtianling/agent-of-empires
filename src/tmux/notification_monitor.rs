@@ -25,15 +25,11 @@ use super::{
 
 const NOTIFICATION_MONITOR_PID_OPTION: &str = "@aoe_notification_monitor_pid";
 const NOTIFICATION_OPTION: &str = "@aoe_waiting";
-const NOTIFICATION_HINT_OPTION: &str = "@aoe_notification_hint";
-const NOTIFICATION_TRIGGER_KEY: &str = "N";
-const NOTIFICATION_KEY_TABLE: &str = "aoe_notify";
 const ACK_SIGNAL_FILE_NAME: &str = "ack-signal";
 const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const POLL_INTERVAL_RUNNING: Duration = Duration::from_secs(1);
 const POLL_INTERVAL_WAITING: Duration = Duration::from_secs(2);
 const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(3);
-const MAX_NOTIFICATION_BINDINGS: usize = 8;
 
 #[derive(Debug, Clone)]
 struct MonitorSessionState {
@@ -99,7 +95,6 @@ impl MonitorSessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NotificationEntry {
-    instance_id: String,
     session_name: String,
     title: String,
     status: Status,
@@ -174,7 +169,6 @@ fn ordered_existing_notification_entries(
                 .then_some((session_name, instance))
         })
         .map(|(session_name, instance)| NotificationEntry {
-            instance_id: instance.id.clone(),
             session_name,
             title: instance.title.clone(),
             status: instance.status,
@@ -277,21 +271,6 @@ fn format_notification_text(entries: &[NotificationEntry], current_session: &str
         .join(" ")
 }
 
-fn notification_option_name(prefix: &str, index: usize) -> String {
-    format!("{prefix}_{index}")
-}
-
-fn notification_binding_hint(visible_entries: usize) -> Option<String> {
-    (visible_entries > 0).then(|| {
-        let upper = visible_entries.min(MAX_NOTIFICATION_BINDINGS);
-        if upper == 1 {
-            format!("Ctrl+b {} 1 notify", NOTIFICATION_TRIGGER_KEY)
-        } else {
-            format!("Ctrl+b {} 1..{} notify", NOTIFICATION_TRIGGER_KEY, upper)
-        }
-    })
-}
-
 fn build_notification_session_updates(
     session_names: &[String],
     entries: &[NotificationEntry],
@@ -299,7 +278,6 @@ fn build_notification_session_updates(
     let mut updates = Vec::new();
 
     for session_name in session_names {
-        let visible_entries = visible_notification_entries(entries, session_name);
         let notification_text = format_notification_text(entries, session_name);
 
         updates.push(SessionOptionUpdate {
@@ -307,25 +285,6 @@ fn build_notification_session_updates(
             option: NOTIFICATION_OPTION.to_string(),
             value: (!notification_text.is_empty()).then_some(notification_text),
         });
-        updates.push(SessionOptionUpdate {
-            session_name: session_name.clone(),
-            option: NOTIFICATION_HINT_OPTION.to_string(),
-            value: notification_binding_hint(visible_entries.len()),
-        });
-
-        for index in 1..=MAX_NOTIFICATION_BINDINGS {
-            let visible = visible_entries.get(index - 1).copied();
-            updates.push(SessionOptionUpdate {
-                session_name: session_name.clone(),
-                option: notification_option_name("@aoe_notify_target", index),
-                value: visible.map(|entry| entry.session_name.clone()),
-            });
-            updates.push(SessionOptionUpdate {
-                session_name: session_name.clone(),
-                option: notification_option_name("@aoe_notify_instance", index),
-                value: visible.map(|entry| entry.instance_id.clone()),
-            });
-        }
     }
 
     updates
@@ -479,86 +438,17 @@ fn ack_signal_path() -> Result<PathBuf> {
     Ok(crate::session::get_app_dir()?.join(ACK_SIGNAL_FILE_NAME))
 }
 
+pub fn write_ack_signal(instance_id: &str) -> Result<()> {
+    fs::write(ack_signal_path()?, instance_id)?;
+    Ok(())
+}
+
 fn take_ack_signal() -> Option<String> {
     let path = ack_signal_path().ok()?;
     let ack = fs::read_to_string(&path).ok()?;
     let _ = fs::remove_file(path);
     let ack = ack.trim().to_string();
     (!ack.is_empty()).then_some(ack)
-}
-
-fn setup_notification_key_bindings() -> Result<()> {
-    let ack_signal_path = ack_signal_path()?;
-    let ack_signal_path = super::utils::shell_escape(&ack_signal_path.to_string_lossy());
-
-    let _ = Command::new("tmux")
-        .args([
-            "bind-key",
-            NOTIFICATION_TRIGGER_KEY,
-            "switch-client",
-            "-T",
-            NOTIFICATION_KEY_TABLE,
-        ])
-        .output();
-
-    let _ = Command::new("tmux")
-        .args([
-            "bind-key",
-            "-T",
-            NOTIFICATION_KEY_TABLE,
-            "Escape",
-            "switch-client",
-            "-T",
-            "root",
-        ])
-        .output();
-
-    for index in 1..=MAX_NOTIFICATION_BINDINGS {
-        let command = format!(
-            "instance=#{{@aoe_notify_instance_{index}}}; \
-target=#{{@aoe_notify_target_{index}}}; \
-if [ -n \"$instance\" ] && [ -n \"$target\" ]; then \
-printf '%s' \"$instance\" > {ack_path} && tmux switch-client -t \"$target\"; \
-fi",
-            ack_path = ack_signal_path,
-            index = index,
-        );
-        let _ = Command::new("tmux")
-            .args([
-                "bind-key",
-                "-T",
-                NOTIFICATION_KEY_TABLE,
-                &index.to_string(),
-                "run-shell",
-                &command,
-                ";",
-                "switch-client",
-                "-T",
-                "root",
-            ])
-            .output();
-    }
-
-    Ok(())
-}
-
-fn cleanup_notification_key_bindings() {
-    let _ = Command::new("tmux")
-        .args(["unbind-key", NOTIFICATION_TRIGGER_KEY])
-        .output();
-    let _ = Command::new("tmux")
-        .args(["unbind-key", "-T", NOTIFICATION_KEY_TABLE, "Escape"])
-        .output();
-    for index in 1..=MAX_NOTIFICATION_BINDINGS {
-        let _ = Command::new("tmux")
-            .args([
-                "unbind-key",
-                "-T",
-                NOTIFICATION_KEY_TABLE,
-                &index.to_string(),
-            ])
-            .output();
-    }
 }
 
 fn update_notification_options(
@@ -615,15 +505,6 @@ fn update_notification_options(
     let sort_order = current_home_sort_order();
     let entries = build_notification_entries(&instances, &groups, sort_order, &existing_sessions);
     let updates = build_notification_session_updates(session_names, &entries);
-    let has_bindings = session_names
-        .iter()
-        .any(|session_name| !visible_notification_entries(&entries, session_name).is_empty());
-
-    if has_bindings {
-        setup_notification_key_bindings()?;
-    } else {
-        cleanup_notification_key_bindings();
-    }
     apply_session_option_updates(&updates)?;
 
     Ok(poll_interval_for_statuses(
@@ -632,21 +513,8 @@ fn update_notification_options(
 }
 
 fn clear_notification_options(session_names: &[String]) {
-    cleanup_notification_key_bindings();
-
     for session_name in session_names {
         let _ = unset_session_option(session_name, NOTIFICATION_OPTION);
-        let _ = unset_session_option(session_name, NOTIFICATION_HINT_OPTION);
-        for index in 1..=MAX_NOTIFICATION_BINDINGS {
-            let _ = unset_session_option(
-                session_name,
-                &notification_option_name("@aoe_notify_target", index),
-            );
-            let _ = unset_session_option(
-                session_name,
-                &notification_option_name("@aoe_notify_instance", index),
-            );
-        }
     }
 }
 
@@ -734,7 +602,6 @@ pub fn clear_notification_option_for_current_session() {
         return;
     }
     let _ = unset_session_option(&session_name, NOTIFICATION_OPTION);
-    let _ = unset_session_option(&session_name, NOTIFICATION_HINT_OPTION);
 }
 
 #[cfg(test)]
@@ -742,24 +609,29 @@ mod tests {
     use super::*;
     use crate::session::config::SortOrder;
     use crate::session::Status;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    fn setup_test_home(temp: &TempDir) {
+        std::env::set_var("HOME", temp.path());
+        #[cfg(target_os = "linux")]
+        std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+    }
 
     #[test]
     fn test_format_notification_text_with_multiple_sessions() {
         let entries = vec![
             NotificationEntry {
-                instance_id: "alpha".to_string(),
                 session_name: "aoe_alpha_1".to_string(),
                 title: "alpha".to_string(),
                 status: Status::Waiting,
             },
             NotificationEntry {
-                instance_id: "beta".to_string(),
                 session_name: "aoe_beta_2".to_string(),
                 title: "beta".to_string(),
                 status: Status::Idle,
             },
             NotificationEntry {
-                instance_id: "gamma".to_string(),
                 session_name: "aoe_gamma_3".to_string(),
                 title: "gamma".to_string(),
                 status: Status::Waiting,
@@ -776,13 +648,11 @@ mod tests {
     fn test_format_notification_text_excludes_self_and_renumbers() {
         let entries = vec![
             NotificationEntry {
-                instance_id: "alpha".to_string(),
                 session_name: "aoe_alpha_1".to_string(),
                 title: "alpha".to_string(),
                 status: Status::Waiting,
             },
             NotificationEntry {
-                instance_id: "beta".to_string(),
                 session_name: "aoe_beta_2".to_string(),
                 title: "beta".to_string(),
                 status: Status::Idle,
@@ -988,6 +858,17 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_write_ack_signal_round_trips_through_take_ack_signal() {
+        let temp = TempDir::new().unwrap();
+        setup_test_home(&temp);
+
+        write_ack_signal("abc123").unwrap();
+        assert_eq!(take_ack_signal(), Some("abc123".to_string()));
+        assert_eq!(take_ack_signal(), None);
+    }
+
+    #[test]
     fn test_build_batched_session_option_args_supports_set_and_unset() {
         let args = build_batched_session_option_args(&[
             SessionOptionUpdate {
@@ -997,7 +878,7 @@ mod tests {
             },
             SessionOptionUpdate {
                 session_name: "aoe_beta".to_string(),
-                option: "@aoe_notification_hint".to_string(),
+                option: "@aoe_waiting".to_string(),
                 value: None,
             },
         ]);
@@ -1015,7 +896,7 @@ mod tests {
                 "-t",
                 "aoe_beta",
                 "-u",
-                "@aoe_notification_hint",
+                "@aoe_waiting",
             ]
         );
     }
