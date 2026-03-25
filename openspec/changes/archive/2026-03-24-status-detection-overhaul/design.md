@@ -28,9 +28,9 @@ Reference project agent-deck demonstrates several optimizations that reduce tmux
 
 ### D1: Activity-gated polling via window_activity timestamp
 
-**Decision**: Expand the session cache to include `window_activity` timestamps. Before calling `capture_pane`, compare the current `window_activity` against the value from the last poll. Skip capture if unchanged and more than 2s since last full check.
+**Decision**: Expand the session cache to include `window_activity` timestamps. Before calling `capture_pane`, compare the current `window_activity` against the value from the last poll. Skip capture if unchanged and less than 10s since last full check.
 
-**Why over alternatives**: tmux already tracks `window_activity` -- we just need to read it. This avoids adding file watchers or inotify complexity. The 2s floor ensures we don't miss rapid state changes.
+**Why over alternatives**: tmux already tracks `window_activity` -- we just need to read it. This avoids adding file watchers or inotify complexity. The 10s floor ensures we don't miss slow state changes while still saving most subprocess calls.
 
 **Implementation**: Extend `refresh_session_cache()` to query `#{window_activity}` alongside `#{session_name}`. Store per-session last-checked activity in the `StatusPoller` state. Pass activity timestamps to `update_status()` as a parameter.
 
@@ -40,7 +40,7 @@ Reference project agent-deck demonstrates several optimizations that reduce tmux
 
 **Why over alternatives**: One subprocess call replaces N calls. agent-deck uses this approach with a 4s cache. We can use the same poll-cycle scope (no separate TTL needed since we already refresh once per cycle).
 
-**Implementation**: Add a `PaneInfoCache` struct in `tmux/mod.rs` alongside the existing `SessionCache`. Populate it in `refresh_session_cache()` (renamed to `refresh_tmux_cache()`). Provide `get_cached_pane_info(session_name) -> Option<PaneInfo>` for consumers.
+**Implementation**: Add a `PaneInfoCache` struct in `tmux/mod.rs` alongside the existing `SessionCache`. Populate it via a separate `refresh_pane_info_cache()` call in the poll cycle (alongside `refresh_session_cache()`). Provide `get_cached_pane_info(session_name) -> Option<PaneInfo>` for consumers.
 
 ### D3: Pane title fast-path for spinner detection
 

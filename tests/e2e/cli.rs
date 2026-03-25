@@ -1,4 +1,5 @@
 use serial_test::serial;
+use std::process::Command;
 use std::time::Duration;
 
 use crate::harness::TuiTestHarness;
@@ -118,6 +119,38 @@ fn wait_for_file_size(path: &std::path::Path, expected_len: u64) {
         path.display(),
         expected_len
     );
+}
+
+fn tmux_show_option_optional(h: &TuiTestHarness, target: &str, option: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .arg("-S")
+        .arg(h.tmux_socket_path())
+        .args(["show-options", "-t", target, "-v", option])
+        .output()
+        .expect("failed to show tmux option");
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn tmux_show_global_option_optional(h: &TuiTestHarness, option: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .arg("-S")
+        .arg(h.tmux_socket_path())
+        .args(["show-options", "-g", "-v", option])
+        .output()
+        .expect("failed to show global tmux option");
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 #[test]
@@ -460,6 +493,118 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
     assert_eq!(resumed_title, "Codex Wait Title");
 
     h.kill_tmux_target(&tmux_name);
+}
+
+#[test]
+#[serial]
+fn test_notification_monitor_tracks_hook_status_changes() {
+    crate::harness::require_tmux!();
+
+    let h = TuiTestHarness::new("cli_notification_monitor");
+    let project = h.project_path();
+
+    for title in ["Alpha Waiter", "Beta Waiter"] {
+        let add_output = h.run_cli(&[
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            title,
+            "--cmd-override",
+            "sh",
+        ]);
+        assert!(
+            add_output.status.success(),
+            "aoe add failed for {}: {}",
+            title,
+            String::from_utf8_lossy(&add_output.stderr)
+        );
+
+        let start_output = h.run_cli_in_tmux(&["session", "start", title]);
+        assert!(
+            start_output.status.success(),
+            "aoe session start failed for {}: {}",
+            title,
+            String::from_utf8_lossy(&start_output.stderr)
+        );
+    }
+
+    let sessions = read_sessions_json(&h);
+    let alpha = sessions
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find(|session| session["title"].as_str() == Some("Alpha Waiter"))
+        .expect("alpha session");
+    let beta = sessions
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find(|session| session["title"].as_str() == Some("Beta Waiter"))
+        .expect("beta session");
+
+    let alpha_id = alpha["id"].as_str().expect("alpha id");
+    let beta_id = beta["id"].as_str().expect("beta id");
+    let alpha_name = agent_of_empires::tmux::Session::generate_name(alpha_id, "Alpha Waiter");
+    let beta_name = agent_of_empires::tmux::Session::generate_name(beta_id, "Beta Waiter");
+
+    let monitor_deadline = std::time::Instant::now();
+    while monitor_deadline.elapsed() <= Duration::from_secs(5) {
+        if tmux_show_global_option_optional(&h, "@aoe_notification_monitor_pid").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let beta_hook_dir = agent_of_empires::hooks::hook_status_dir(beta_id);
+    std::fs::create_dir_all(&beta_hook_dir).expect("create hook dir");
+    std::fs::write(beta_hook_dir.join("status"), "waiting").expect("write waiting hook status");
+
+    let start = std::time::Instant::now();
+    let mut waiting_text = None;
+    while start.elapsed() <= Duration::from_secs(8) {
+        waiting_text = tmux_show_option_optional(&h, &alpha_name, "@aoe_waiting");
+        if waiting_text
+            .as_deref()
+            .is_some_and(|text| text.contains("Beta Waiter"))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        waiting_text
+            .as_deref()
+            .is_some_and(|text| text.contains("[1] ◐ Beta Waiter")),
+        "expected waiting notification for Beta Waiter, got {:?}",
+        waiting_text
+    );
+    assert_eq!(
+        tmux_show_option_optional(&h, &alpha_name, "@aoe_notification_hint").as_deref(),
+        Some("Ctrl+b N 1 notify")
+    );
+
+    std::fs::write(beta_hook_dir.join("status"), "running").expect("write running hook status");
+
+    let start = std::time::Instant::now();
+    let mut running_text = None;
+    while start.elapsed() <= Duration::from_secs(8) {
+        running_text = tmux_show_option_optional(&h, &alpha_name, "@aoe_waiting");
+        if running_text.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        running_text.is_none(),
+        "expected waiting notification to clear once Beta Waiter is running, got {:?}",
+        running_text
+    );
+
+    agent_of_empires::hooks::cleanup_hook_status_dir(beta_id);
+    h.kill_tmux_target(&alpha_name);
+    h.kill_tmux_target(&beta_name);
 }
 
 #[test]

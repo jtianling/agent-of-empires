@@ -461,7 +461,7 @@ fn cleanup_number_jump_bindings() {
     }
 }
 
-fn shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     if s.contains(|c: char| c.is_whitespace() || c == '\'' || c == '"') {
         format!("'{}'", s.replace('\'', "'\\''"))
     } else {

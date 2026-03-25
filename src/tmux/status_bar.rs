@@ -17,7 +17,8 @@ const STATUS_LEFT_FORMAT: &str = concat!(
     "#[fg=colour252,nobold] #{@aoe_title}",
     "#{?#{@aoe_from_title},  #[fg=colour245]from: #{@aoe_from_title}#[fg=colour252],}",
     "  #[fg=colour245]Ctrl+b d detach",
-    "#{?#{@aoe_waiting}, | #[fg=colour220]#{@aoe_waiting}#[fg=colour245],} "
+    "#{?#{@aoe_waiting}, | #[fg=colour220]#{@aoe_waiting}#[fg=colour245],} ",
+    "#{?#{@aoe_notification_hint},| #[fg=colour39]#{@aoe_notification_hint}#[fg=colour245],}"
 );
 
 /// Information about a sandboxed session for status bar display.
@@ -65,7 +66,7 @@ pub fn apply_status_bar(
     // Dark background with light text - matches aoe phosphor theme
     set_session_option(session_name, "status-style", "bg=colour235,fg=colour252")?;
     set_session_option(session_name, "status-left", STATUS_LEFT_FORMAT)?;
-    set_session_option(session_name, "status-left-length", "160")?;
+    set_session_option(session_name, "status-left-length", "220")?;
     set_window_option(session_name, "window-status-format", "")?;
     set_window_option(session_name, "window-status-current-format", "")?;
 
@@ -454,7 +455,8 @@ mod tests {
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_from_title}"));
         assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b d detach"));
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_waiting}"));
+        assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_notification_hint}"));
         assert!(STATUS_LEFT_FORMAT.contains("colour220"));
-        assert!(!STATUS_LEFT_FORMAT.contains("Ctrl+b 1-9"));
+        assert!(STATUS_LEFT_FORMAT.contains("colour39"));
     }
 }

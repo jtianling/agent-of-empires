@@ -119,9 +119,7 @@ without retyping the group path.
 - **AND** the user MAY edit or clear the value before creating the session
 
 ### Requirement: Returning from an attached session restores the actual detached session selection
-When the user returns from an attached AoE-managed tmux session to the home screen, AoE SHALL
-restore selection to the session the user actually detached from, even if they switched sessions
-inside tmux after the initial attach.
+When the user returns from an attached AoE-managed tmux session to the home screen, AoE SHALL restore selection to the session the user actually detached from, even if they switched sessions inside tmux after the initial attach. The client name for per-client tracking SHALL be resolved from the terminal's tty name.
 
 #### Scenario: Detach restores the originally attached session when no cycling occurred
 - **WHEN** the user attaches to a session from the home screen
@@ -134,6 +132,11 @@ inside tmux after the initial attach.
 - **AND** the user presses `Ctrl+b d` to return to the TUI
 - **THEN** the home screen SHALL select the session the user detached from
 - **AND** AoE SHALL NOT force selection back to the originally attached session
+
+#### Scenario: Client name resolved from tty name
+- **WHEN** the TUI resolves the attach client name for per-client tracking
+- **THEN** the system SHALL use `get_tty_name()` to obtain the terminal's tty path
+- **AND** the system SHALL NOT check the TMUX env var for client name resolution
 
 ### Requirement: TUI integrates terminal tab title updates into event loop
 The TUI event loop SHALL compute the current tab title state after processing events and before rendering, and update the terminal tab title when it changes. Title writes SHALL occur alongside the existing synchronized update sequence.
@@ -213,8 +216,6 @@ When a pending jump is active, the TUI SHALL display a visual indicator showing 
 - **FR-001**: The TUI MUST launch without arguments (`aoe` with no subcommand).
 - **FR-002**: Session status MUST update in real-time via background polling.
 - **FR-003**: Attaching to a session MUST detach from the TUI and attach the terminal to the tmux session.
-- **FR-003a**: When AoE runs inside an existing tmux session, `Ctrl+b d` inside a managed session (`aoe_*`) MUST switch back to the previous session rather than fully detaching the tmux client. If no previous session exists, it SHALL fall back to normal detach. This binding MUST revert to default `detach-client` when the user switches to a non-AoE session, and the hook MUST be cleaned up when the TUI exits.
-- **FR-003b**: When AoE runs inside an existing tmux session, the TUI MUST temporarily enable `mouse on` so that crossterm receives proper mouse events (scroll wheel, etc.) instead of tmux converting them to arrow key sequences. The original mouse setting MUST be restored when the TUI exits. Additionally, AoE-managed tmux sessions MUST always have session-level `mouse on` enabled regardless of the user's tmux configuration, so that mouse scroll works correctly when attached to agent sessions.
 - **FR-004**: The session list MUST support collapsible group hierarchies.
 - **FR-005**: The diff view MUST open files in `$EDITOR` (or a sensible default).
 - **FR-006**: Settings MUST save immediately on field change (no explicit "save" button except Esc).
