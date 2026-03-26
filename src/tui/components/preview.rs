@@ -16,11 +16,13 @@ impl Preview {
         cached_output: &str,
         theme: &Theme,
     ) {
-        // Adjust height based on whether worktree info is present
+        // 3 base lines (path/tool/status) + optional profile + optional worktree block
+        let has_profile = !instance.source_profile.is_empty();
+        let base = if has_profile { 4 } else { 3 };
         let info_height = if instance.worktree_info.is_some() {
-            10 // Expanded to show worktree details
+            base + 4 // blank + header + branch + main
         } else {
-            6 // Standard height
+            base
         };
 
         let chunks = Layout::default()
@@ -36,11 +38,16 @@ impl Preview {
     }
 
     fn render_info(frame: &mut Frame, area: Rect, instance: &Instance, theme: &Theme) {
-        let mut info_lines = vec![
-            Line::from(vec![
-                Span::styled("Title:   ", Style::default().fg(theme.dimmed)),
-                Span::styled(&instance.title, Style::default().fg(theme.text).bold()),
-            ]),
+        let mut info_lines = Vec::new();
+
+        if !instance.source_profile.is_empty() {
+            info_lines.push(Line::from(vec![
+                Span::styled("Profile: ", Style::default().fg(theme.dimmed)),
+                Span::styled(&instance.source_profile, Style::default().fg(theme.accent)),
+            ]));
+        }
+
+        info_lines.extend([
             Line::from(vec![
                 Span::styled("Path:    ", Style::default().fg(theme.dimmed)),
                 Span::styled(
@@ -69,18 +76,7 @@ impl Preview {
                     }),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled("Group:   ", Style::default().fg(theme.dimmed)),
-                Span::styled(
-                    if instance.group_path.is_empty() {
-                        "(none)"
-                    } else {
-                        &instance.group_path
-                    },
-                    Style::default().fg(theme.group),
-                ),
-            ]),
-        ];
+        ]);
 
         // Add worktree information if present
         if let Some(wt_info) = &instance.worktree_info {
@@ -99,23 +95,6 @@ impl Preview {
                 Span::styled(
                     shorten_path(&wt_info.main_repo_path),
                     Style::default().fg(theme.text),
-                ),
-            ]));
-
-            let managed_text = if wt_info.managed_by_aoe {
-                "Yes (delete branch on aoe session delete)"
-            } else {
-                "No (manual worktree)"
-            };
-            info_lines.push(Line::from(vec![
-                Span::styled("Managed: ", Style::default().fg(theme.dimmed)),
-                Span::styled(
-                    managed_text,
-                    Style::default().fg(if wt_info.managed_by_aoe {
-                        theme.worktree_managed
-                    } else {
-                        theme.worktree_manual
-                    }),
                 ),
             ]));
         }

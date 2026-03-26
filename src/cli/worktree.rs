@@ -10,6 +10,7 @@ use crate::session::Storage;
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
     /// List all worktrees in current repository
+    #[command(alias = "ls")]
     List,
 
     /// Show worktree information for a session
@@ -90,14 +91,6 @@ async fn show_info(profile: &str, identifier: &str) -> Result<()> {
         println!(
             "  Managed by aoe: {}",
             if wt_info.managed_by_aoe { "Yes" } else { "No" }
-        );
-        println!(
-            "  Cleanup on delete: {}",
-            if wt_info.cleanup_on_delete {
-                "Yes"
-            } else {
-                "No"
-            }
         );
         println!(
             "  Created at:    {}",

@@ -23,10 +23,6 @@ pub struct TerminalInfo {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -77,7 +73,7 @@ pub struct WorktreeInfo {
     pub main_repo_path: String,
     pub managed_by_aoe: bool,
     pub created_at: DateTime<Utc>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub cleanup_on_delete: bool,
 }
 
@@ -314,7 +310,7 @@ impl Instance {
                 // Install hooks in the user's home directory settings
                 if let Some(home) = dirs::home_dir() {
                     let settings_path = home.join(hook_cfg.settings_rel_path);
-                    if let Err(e) = crate::hooks::install_hooks(&settings_path) {
+                    if let Err(e) = crate::hooks::install_hooks(&settings_path, hook_cfg.events) {
                         tracing::warn!("Failed to install agent hooks: {}", e);
                     }
                 }
@@ -1041,6 +1037,8 @@ fn generate_id() -> String {
     Uuid::new_v4().to_string().replace("-", "")[..16].to_string()
 }
 
+/// Format an environment variable assignment as a shell-safe command prefix.
+///
 /// Wrap a command to disable Ctrl-Z (SIGTSTP) suspension.
 ///
 /// When running agents directly as tmux session commands (without a parent shell),
@@ -1398,15 +1396,6 @@ mod tests {
         assert_eq!(info.branch, deserialized.branch);
         assert_eq!(info.main_repo_path, deserialized.main_repo_path);
         assert_eq!(info.managed_by_aoe, deserialized.managed_by_aoe);
-        assert_eq!(info.cleanup_on_delete, deserialized.cleanup_on_delete);
-    }
-
-    #[test]
-    fn test_worktree_info_default_cleanup_on_delete() {
-        // Deserialize without cleanup_on_delete field - should default to true
-        let json = r#"{"branch":"test","main_repo_path":"/path","managed_by_aoe":true,"created_at":"2024-01-01T00:00:00Z"}"#;
-        let info: WorktreeInfo = serde_json::from_str(json).unwrap();
-        assert!(info.cleanup_on_delete);
     }
 
     // Tests for SandboxInfo

@@ -27,7 +27,7 @@ use crate::migrations;
 use crate::session::get_update_settings;
 use crate::update::check_for_update;
 
-pub async fn run(profile: &str) -> Result<()> {
+pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
     // Capture the directory where the user launched aoe, before anything changes cwd
     let launch_dir = std::env::current_dir().unwrap_or_default();
 
@@ -118,6 +118,9 @@ pub async fn run(profile: &str) -> Result<()> {
 
     // Create app and run
     let mut app = App::new(profile, available_tools, launch_dir)?;
+    if let Some(warning) = startup_warning {
+        app.show_startup_warning(&warning);
+    }
     let _ = tab_title::push_terminal_title(&mut io::stdout());
     let _ = tab_title::set_tui_title(&mut io::stdout(), profile);
     let result = app.run(&mut terminal).await;
