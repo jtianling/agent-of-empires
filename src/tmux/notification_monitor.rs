@@ -175,7 +175,7 @@ fn ordered_existing_notification_entries(
         .into_iter()
         .filter_map(|item| match item {
             Item::Session { id, .. } => Some(id),
-            Item::Group { .. } => None,
+            Item::Group { .. } | Item::ProfileHeader { .. } => None,
         })
         .enumerate()
         .filter_map(|(index, id)| {

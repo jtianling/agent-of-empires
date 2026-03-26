@@ -780,6 +780,10 @@ impl HomeView {
                     self.selected_session = None;
                     self.selected_group = Some(path.clone());
                 }
+                Item::ProfileHeader { .. } => {
+                    self.selected_session = None;
+                    self.selected_group = None;
+                }
             }
         }
     }
@@ -845,6 +849,7 @@ impl HomeView {
                 Item::Group { name, path, .. } => {
                     format!("{} {}", name, path)
                 }
+                Item::ProfileHeader { name, .. } => name.clone(),
             };
 
             let haystack_utf32 = Utf32Str::new(&haystack, &mut buf);
@@ -899,6 +904,7 @@ impl HomeView {
                 Item::Group { name, path, .. } => {
                     format!("{} {}", name, path)
                 }
+                Item::ProfileHeader { name, .. } => name.clone(),
             };
 
             let haystack_utf32 = Utf32Str::new(&haystack, &mut buf);

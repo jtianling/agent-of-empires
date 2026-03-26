@@ -335,7 +335,7 @@ impl HomeView {
             .into_iter()
             .filter_map(|item| match item {
                 Item::Session { id, .. } => Some(id),
-                Item::Group { .. } => None,
+                Item::Group { .. } | Item::ProfileHeader { .. } => None,
             })
             .collect();
         let indices = session_ids

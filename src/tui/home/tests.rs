@@ -1866,6 +1866,7 @@ fn test_o_key_flat_items_sorted_az() {
                     }
                 }
             }
+            Item::ProfileHeader { .. } => {}
         }
     }
 
@@ -1899,6 +1900,7 @@ fn test_o_key_flat_items_sorted_za() {
                     }
                 }
             }
+            Item::ProfileHeader { .. } => {}
         }
     }
 
@@ -1934,6 +1936,7 @@ fn test_o_key_flat_items_newest_preserves_insertion_order() {
                     }
                 }
             }
+            Item::ProfileHeader { .. } => {}
         }
     }
 

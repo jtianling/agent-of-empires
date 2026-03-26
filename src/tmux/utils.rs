@@ -564,7 +564,7 @@ fn ordered_profile_session_names(
                 .iter()
                 .find(|instance| instance.id == id)
                 .map(|instance| crate::tmux::Session::generate_name(&instance.id, &instance.title)),
-            Item::Group { .. } => None,
+            Item::Group { .. } | Item::ProfileHeader { .. } => None,
         })
         .collect()
 }

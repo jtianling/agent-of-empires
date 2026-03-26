@@ -15,6 +15,14 @@ use crate::tmux;
 use super::container_config;
 use super::environment::{build_docker_env_args, shell_escape};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    #[serde(default)]
+    pub created: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -122,6 +130,14 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_info: Option<SandboxInfo>,
 
+    // Paired terminal session
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_info: Option<TerminalInfo>,
+
+    /// Runtime-only: which profile this instance was loaded from. Not persisted to disk.
+    #[serde(default, skip_serializing)]
+    pub source_profile: String,
+
     // Runtime state (not serialized)
     #[serde(skip)]
     pub last_error_check: Option<std::time::Instant>,
@@ -160,6 +176,8 @@ impl Instance {
             last_accessed_at: None,
             worktree_info: None,
             sandbox_info: None,
+            terminal_info: None,
+            source_profile: String::new(),
             last_error_check: None,
             last_start_time: None,
             last_error: None,

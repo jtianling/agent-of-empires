@@ -163,7 +163,7 @@ impl HomeView {
                         .get(id)
                         .copied()
                         .filter(|index| *index <= 99),
-                    Item::Group { .. } => None,
+                    Item::Group { .. } | Item::ProfileHeader { .. } => None,
                 };
                 self.render_item(item, is_selected, is_match, session_num, theme)
             })
@@ -239,6 +239,20 @@ impl HomeView {
                 collapsed,
                 session_count,
                 ..
+            } => {
+                let icon = if *collapsed {
+                    ICON_COLLAPSED
+                } else {
+                    ICON_EXPANDED
+                };
+                let text = Cow::Owned(format!("{} ({})", name, session_count));
+                let style = Style::default().fg(theme.group).bold();
+                (icon, text, style)
+            }
+            Item::ProfileHeader {
+                name,
+                collapsed,
+                session_count,
             } => {
                 let icon = if *collapsed {
                     ICON_COLLAPSED
@@ -403,6 +417,12 @@ impl HomeView {
                 collapsed: true, ..
             }) => Some(" Expand "),
             Some(Item::Group {
+                collapsed: false, ..
+            }) => Some(" Collapse "),
+            Some(Item::ProfileHeader {
+                collapsed: true, ..
+            }) => Some(" Expand "),
+            Some(Item::ProfileHeader {
                 collapsed: false, ..
             }) => Some(" Collapse "),
             Some(Item::Session { .. }) => Some(" Attach "),

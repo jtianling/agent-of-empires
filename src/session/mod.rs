@@ -18,9 +18,14 @@ pub use config::{
     TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
 };
 pub use environment::validate_env_entry;
-pub use groups::{expanded_groups, flatten_tree, validate_group_path, Group, GroupTree, Item};
+pub use groups::{
+    expanded_groups, flatten_tree, flatten_tree_all_profiles, validate_group_path, Group,
+    GroupTree, Item,
+};
 pub(crate) use instance::{extract_resume_token, is_valid_resume_token};
-pub use instance::{Instance, SandboxInfo, Status, StatusUpdateOptions, WorktreeInfo};
+pub use instance::{
+    Instance, SandboxInfo, Status, StatusUpdateOptions, TerminalInfo, WorktreeInfo,
+};
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,
     validate_check_interval, validate_memory_limit, validate_path_exists, validate_volume_format,
@@ -112,6 +117,9 @@ pub fn create_profile(name: &str) -> Result<()> {
     }
     if name.contains('/') || name.contains('\\') {
         anyhow::bail!("Profile name cannot contain path separators");
+    }
+    if name.eq_ignore_ascii_case("all") {
+        anyhow::bail!("Profile name 'all' is reserved");
     }
 
     let profiles = list_profiles()?;
