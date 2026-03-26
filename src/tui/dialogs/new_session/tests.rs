@@ -108,6 +108,8 @@ fn test_tab_cycles_fields_single_tool() {
 
 #[test]
 fn test_tab_cycles_fields_single_tool_with_worktree() {
+    // Even with worktree set, new_branch and extra_repos are in a Ctrl+P overlay,
+    // so the main form has the same tab stops as without worktree.
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature".to_string());
     assert_eq!(dialog.focused_field, 0); // title

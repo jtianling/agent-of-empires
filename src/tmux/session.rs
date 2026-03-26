@@ -210,6 +210,7 @@ impl Session {
                 "-t",
                 &target,
                 "-p",
+                "-e",
                 "-S",
                 &format!("-{}", lines),
             ])

@@ -33,6 +33,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             vec![
                 ("Enter", "Attach to session"),
                 ("n", "New session"),
+                ("N", "New from selection"),
                 ("x", "Stop session"),
                 ("R", "Restart agent pane"),
                 ("d", "Delete session/group"),

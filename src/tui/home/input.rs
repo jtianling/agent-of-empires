@@ -491,6 +491,56 @@ impl HomeView {
                     };
                     self.cursor = self.search_matches[self.search_match_index];
                     self.update_selected();
+                } else {
+                    // Pre-filled new session from selection
+                    let prefill_path = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|id| self.get_instance(id))
+                        .map(|inst| {
+                            inst.worktree_info
+                                .as_ref()
+                                .map(|wt| wt.main_repo_path.clone())
+                                .unwrap_or_else(|| inst.project_path.clone())
+                        });
+                    let prefill_group = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|id| self.get_instance(id))
+                        .and_then(|inst| {
+                            if inst.group_path.is_empty() {
+                                None
+                            } else {
+                                Some(inst.group_path.clone())
+                            }
+                        })
+                        .or_else(|| self.selected_group.clone());
+
+                    if prefill_path.is_some() || prefill_group.is_some() {
+                        let existing_titles: Vec<String> =
+                            self.instances.iter().map(|i| i.title.clone()).collect();
+                        let existing_groups: Vec<String> =
+                            self.groups.iter().map(|g| g.path.clone()).collect();
+                        let group_directories = self.group_tree.get_group_directories();
+                        let current_profile = self.storage.profile().to_string();
+                        let default_group = self.selected_group_context();
+                        let mut dialog = NewSessionDialog::new(
+                            self.available_tools.clone(),
+                            existing_titles,
+                            existing_groups,
+                            group_directories,
+                            default_group,
+                            &current_profile,
+                            &self.launch_dir,
+                        );
+                        if let Some(path) = prefill_path {
+                            dialog.set_path(path);
+                        }
+                        if let Some(group) = prefill_group {
+                            dialog.set_group(group);
+                        }
+                        self.new_dialog = Some(dialog);
+                    }
                 }
             }
             KeyCode::Char('s') => {
@@ -565,7 +615,8 @@ impl HomeView {
                                 .worktree_info
                                 .as_ref()
                                 .filter(|wt| wt.managed_by_aoe)
-                                .map(|wt| wt.branch.clone()),
+                                .map(|wt| wt.branch.clone())
+                                .or_else(|| inst.workspace_info.as_ref().map(|w| w.branch.clone())),
                             has_sandbox: inst.sandbox_info.as_ref().is_some_and(|s| s.enabled),
                         };
 

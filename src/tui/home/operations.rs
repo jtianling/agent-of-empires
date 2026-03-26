@@ -40,6 +40,7 @@ impl HomeView {
             extra_args: data.extra_args,
             command_override: data.command_override,
             reuse_worktree: data.reuse_worktree,
+            extra_repo_paths: data.extra_repo_paths,
         };
 
         let build_result = builder::build_instance(params, &existing_titles, &target_profile)?;
