@@ -317,6 +317,26 @@ impl Session {
             &content, tool, fg_pid,
         ))
     }
+
+    /// Capture pane content by tmux pane ID (e.g., "%42").
+    pub fn capture_pane_by_id(pane_id: &str, lines: usize) -> Result<String> {
+        let output = Command::new("tmux")
+            .args([
+                "capture-pane",
+                "-t",
+                pane_id,
+                "-p",
+                "-S",
+                &format!("-{}", lines),
+            ])
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Ok(String::new())
+        }
+    }
 }
 
 fn get_cached_capture(session_name: &str, lines: usize, now: Instant) -> Option<String> {

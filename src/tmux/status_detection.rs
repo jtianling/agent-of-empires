@@ -30,10 +30,120 @@ pub fn detect_status_from_content(content: &str, tool: &str, _fg_pid: Option<u32
     status
 }
 
-/// Claude Code status is detected via hooks (file-based), not tmux pane parsing.
-/// This stub exists so the agent registry has a valid function pointer; it only
-/// runs when hooks haven't written a status file yet (e.g. first few seconds).
-pub fn detect_claude_status(_content: &str) -> Status {
+pub fn detect_claude_status(raw_content: &str) -> Status {
+    let lines: Vec<&str> = raw_content.lines().collect();
+    let non_empty_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect();
+
+    let last_lines: String = non_empty_lines
+        .iter()
+        .rev()
+        .take(30)
+        .rev()
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let last_lines_lower = last_lines.to_lowercase();
+
+    // IDLE early-exit: Claude Code shows ❯ (U+276F) as its input prompt.
+    // If the prompt is visible in the last few non-empty lines (ignoring
+    // status bar lines), the agent is idle. Check this BEFORE tool-use
+    // patterns because completed tool calls like "Bash(sleep 10)" remain
+    // in scrollback and would otherwise false-positive as Running.
+    let has_idle_prompt = non_empty_lines.iter().rev().take(6).any(|line| {
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
+        trimmed == "\u{276f}" || trimmed.starts_with("\u{276f} ")
+    });
+
+    // RUNNING: Braille spinner characters (U+2800..U+28FF) in last 5 lines.
+    // Spinners override the idle prompt since they indicate active work.
+    for line in non_empty_lines.iter().rev().take(5) {
+        if line
+            .chars()
+            .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+        {
+            return Status::Running;
+        }
+    }
+
+    // If idle prompt is visible and no spinner, agent is idle -- skip
+    // tool-use pattern matching which would hit completed calls in scrollback.
+    if has_idle_prompt {
+        return Status::Idle;
+    }
+
+    // RUNNING: Tool use output patterns in last 10 lines
+    let tool_patterns = [
+        "Read(",
+        "Edit(",
+        "Write(",
+        "Bash(",
+        "Grep(",
+        "Glob(",
+        "Agent(",
+        "TodoWrite(",
+        "TodoRead(",
+        "Skill(",
+        "ToolSearch(",
+        "WebFetch(",
+        "WebSearch(",
+        "NotebookEdit(",
+    ];
+    for line in non_empty_lines.iter().rev().take(10) {
+        let trimmed = strip_ansi(line);
+        for pattern in &tool_patterns {
+            if trimmed.contains(pattern) {
+                return Status::Running;
+            }
+        }
+    }
+
+    // RUNNING: Progress-like patterns ("..." at end of line with content before it)
+    for line in non_empty_lines.iter().rev().take(5) {
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
+        if trimmed.len() > 3 && (trimmed.ends_with("...") || trimmed.ends_with("…")) {
+            return Status::Running;
+        }
+    }
+
+    // WAITING: Permission/approval prompts with "Allow" and "Deny" choices
+    if last_lines.contains("Allow") && last_lines.contains("Deny") {
+        return Status::Waiting;
+    }
+
+    // WAITING: Lowercase allow/deny action buttons
+    if last_lines_lower.contains("allow") && last_lines_lower.contains("deny") {
+        return Status::Waiting;
+    }
+
+    // WAITING: Yes/no confirmation prompts
+    let yn_prompts = ["(y/n)", "(Y/n)", "(yes/no)", "[y/n]", "[Y/n]"];
+    for prompt in &yn_prompts {
+        if last_lines.contains(prompt) {
+            return Status::Waiting;
+        }
+    }
+
+    // WAITING: Interactive numbered selection in last 10 lines
+    let recent_10: Vec<&str> = non_empty_lines.iter().rev().take(10).copied().collect();
+    let has_numbered_options = recent_10
+        .iter()
+        .filter(|line| {
+            let trimmed = strip_ansi(line);
+            let trimmed = trimmed.trim();
+            trimmed.starts_with("1.") || trimmed.starts_with("2.") || trimmed.starts_with("3.")
+        })
+        .count()
+        >= 2;
+    if has_numbered_options {
+        return Status::Waiting;
+    }
+
     Status::Idle
 }
 
@@ -271,18 +381,32 @@ pub fn detect_codex_status(raw_content: &str) -> Status {
         .join("\n");
     let last_lines_lower = last_lines.to_lowercase();
 
+    // IDLE early-exit: Codex uses › (U+203A) as its input prompt.
+    // If the prompt is visible in the last few lines, Codex is idle.
+    // Check this BEFORE bullet spinner patterns because completed
+    // Codex responses use • as a bullet prefix in scrollback.
+    let has_idle_prompt = non_empty_lines.iter().rev().take(6).any(|line| {
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
+        trimmed == "\u{203a}" || trimmed.starts_with("\u{203a} ")
+    });
+
     // RUNNING: Codex shows "• Working (Xs • esc to interrupt)" while processing.
-    // The bullet spinner (U+2022) is Codex-specific and more reliable than
-    // matching the generic word "working" which appears in normal output.
+    // "esc to interrupt" is a definitive Running signal even with idle prompt.
     if last_lines_lower.contains("esc to interrupt") {
         return Status::Running;
     }
-    // Codex uses • (U+2022) / ◦ (U+25E6) as its spinner, not braille chars.
-    for line in non_empty_lines.iter().rev().take(10) {
-        let trimmed = strip_ansi(line);
-        let trimmed = trimmed.trim();
-        if trimmed.starts_with('\u{2022}') || trimmed.starts_with('\u{25E6}') {
-            return Status::Running;
+
+    // If idle prompt is visible and no "esc to interrupt", skip bullet spinner
+    // check which would false-positive on completed response bullets in scrollback.
+    if !has_idle_prompt {
+        // Codex uses • (U+2022) / ◦ (U+25E6) as its spinner, not braille chars.
+        for line in non_empty_lines.iter().rev().take(10) {
+            let trimmed = strip_ansi(line);
+            let trimmed = trimmed.trim();
+            if trimmed.starts_with('\u{2022}') || trimmed.starts_with('\u{25E6}') {
+                return Status::Running;
+            }
         }
     }
 
@@ -303,16 +427,6 @@ pub fn detect_codex_status(raw_content: &str) -> Status {
         }
     }
 
-    // WAITING: Input prompt -- Codex uses › (U+203A) as its prompt character.
-    // Check only the last few lines to avoid matching › in older output.
-    for line in non_empty_lines.iter().rev().take(5) {
-        let trimmed = strip_ansi(line);
-        let trimmed = trimmed.trim();
-        if trimmed.starts_with('\u{203a}') {
-            return Status::Waiting;
-        }
-    }
-
     Status::Idle
 }
 
@@ -324,6 +438,94 @@ pub fn detect_cursor_status(_content: &str) -> Status {
 /// Terminal sessions are plain shells -- no meaningful status to detect.
 pub fn detect_terminal_status(_content: &str) -> Status {
     Status::Idle
+}
+
+/// Aggregate statuses from multiple panes. Priority: Waiting > Running > Idle.
+pub fn aggregate_pane_statuses(statuses: &[Status]) -> Status {
+    if statuses.contains(&Status::Waiting) {
+        return Status::Waiting;
+    }
+    if statuses.contains(&Status::Running) {
+        return Status::Running;
+    }
+    Status::Idle
+}
+
+const SHELL_COMMANDS: &[&str] = &[
+    "bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "elvish",
+];
+
+pub fn is_shell_command(cmd: &str) -> bool {
+    let cmd_lower = cmd.to_lowercase();
+    let basename = cmd_lower.rsplit('/').next().unwrap_or(&cmd_lower);
+    SHELL_COMMANDS.contains(&basename)
+}
+
+pub fn detect_agent_type_from_command(pane_current_command: &str) -> Option<&'static str> {
+    if pane_current_command.is_empty() {
+        return None;
+    }
+
+    let cmd_lower = pane_current_command.to_lowercase();
+
+    if is_shell_command(&cmd_lower) {
+        return Some("shell");
+    }
+
+    if cmd_lower.contains("claude") {
+        return Some("claude");
+    }
+    if cmd_lower.contains("codex") {
+        return Some("codex");
+    }
+    if cmd_lower.contains("gemini") {
+        return Some("gemini");
+    }
+    if cmd_lower.contains("opencode") || cmd_lower.contains("open-code") {
+        return Some("opencode");
+    }
+    if cmd_lower.contains("vibe") {
+        return Some("vibe");
+    }
+    if cmd_lower == "agent" {
+        return Some("cursor");
+    }
+
+    None
+}
+
+/// Detect which agent type is running in a pane.
+/// Returns the agent name (e.g., "claude", "codex") or "shell" for shell panes.
+/// Returns None if the pane type cannot be determined.
+pub fn detect_agent_type_from_pane(pane_info: &crate::tmux::PaneInfo) -> Option<&'static str> {
+    if let Some(agent) = detect_agent_type_from_command(&pane_info.current_command) {
+        return Some(agent);
+    }
+
+    if let Some(pid) = pane_info.pane_pid {
+        if let Some(comm) = crate::process::get_process_comm(pid) {
+            if let Some(agent) = detect_agent_type_from_command(&comm) {
+                if agent != "shell" {
+                    return Some(agent);
+                }
+            }
+
+            if is_shell_command(&comm) {
+                if let Some(fg_pid) = crate::process::get_foreground_pid(pid) {
+                    if fg_pid != pid {
+                        if let Some(fg_comm) = crate::process::get_process_comm(fg_pid) {
+                            if let Some(agent) = detect_agent_type_from_command(&fg_comm) {
+                                return Some(agent);
+                            }
+                        }
+                    }
+                }
+                return Some("shell");
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -428,11 +630,115 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_claude_status_is_stub() {
-        // Claude/Cursor/Terminal use hook-based or stub detection; always returns Idle
-        assert_eq!(detect_claude_status("anything"), Status::Idle);
+    fn test_detect_cursor_terminal_status_is_stub() {
         assert_eq!(detect_cursor_status("anything"), Status::Idle);
         assert_eq!(detect_terminal_status("anything"), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_claude_status_running_spinner() {
+        let content = "Some output\n\u{280b} Working on task...\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_claude_status_running_tool_use() {
+        let content = "Let me read that file.\n\n  Read(/Users/foo/bar.rs)\n\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+
+        let content = "I'll edit this.\n\n  Edit(/src/main.rs)\n\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+
+        let content = "Running a command.\n\n  Bash(cargo test)\n\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+
+        let content = "Searching files.\n\n  Grep(pattern)\n\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+
+        let content = "Finding files.\n\n  Glob(**/*.rs)\n\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_claude_status_running_progress() {
+        let content = "Analyzing the codebase...\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+
+        let content = "Generating response\u{2026}\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_claude_status_waiting_permission() {
+        let content = "Claude wants to run a command:\n\n  bash: rm -rf /tmp/test\n\nAllow  Deny\n";
+        assert_eq!(detect_claude_status(content), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_claude_status_waiting_yn_prompt() {
+        let content = "Do you want to proceed? (y/n)\n";
+        assert_eq!(detect_claude_status(content), Status::Waiting);
+
+        let content = "Continue? (Y/n)\n";
+        assert_eq!(detect_claude_status(content), Status::Waiting);
+
+        let content = "Overwrite file? (yes/no)\n";
+        assert_eq!(detect_claude_status(content), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_claude_status_waiting_numbered_selection() {
+        let content = "Select an option:\n1. Create new file\n2. Edit existing\n3. Cancel\n";
+        assert_eq!(detect_claude_status(content), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_claude_status_idle() {
+        let content = "Done! The file has been updated.\n\n> \n";
+        assert_eq!(detect_claude_status(content), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_claude_status_idle_with_prompt() {
+        // Claude Code's ❯ prompt means idle
+        let content = "Done.\n\n\u{276f} \n";
+        assert_eq!(detect_claude_status(content), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_claude_status_idle_prompt_overrides_historical_tool_calls() {
+        // Completed tool calls in scrollback should NOT trigger Running
+        // when the idle prompt is visible
+        let content =
+            "\u{23fa} Bash(sleep 10)\n  \u{23bf}  (No output)\n\n\u{23fa} Done.\n\n\u{276f} \n";
+        assert_eq!(detect_claude_status(content), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_claude_status_idle_real_world_scrollback() {
+        // Real-world case: multiple completed Bash() calls in scrollback with idle prompt
+        let content = "\u{23fa} Bash(sleep 10)\n  \u{23bf}  (No output)\n\n\u{23fa} Done.\n\n\u{276f} sleep 10\n\n\u{23fa} Bash(sleep 10)\n  \u{23bf}  (No output)\n\n\u{23fa} Done.\n\n\u{276f} \n───\n  Opus 4.6 (1M context)\n  \u{23f5}\u{23f5} bypass permissions\n";
+        assert_eq!(detect_claude_status(content), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_claude_status_idle_plain_output() {
+        let content = "file saved successfully";
+        assert_eq!(detect_claude_status(content), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_claude_status_running_spinner_overrides_idle_prompt() {
+        // Spinner should still win even if prompt is visible (edge case during transition)
+        let content = "\u{276f} \n\u{280b} Working on task...\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_claude_status_running_beats_waiting() {
+        // Spinner present alongside allow/deny -- Running wins
+        let content = "Processing...\n\u{280b} Working\nAllow  Deny\n";
+        assert_eq!(detect_claude_status(content), Status::Running);
     }
 
     #[test]
@@ -576,13 +882,7 @@ mod tests {
 
     #[test]
     fn test_detect_codex_status_waiting() {
-        // Input prompt with › (U+203A)
-        assert_eq!(
-            detect_codex_status("some output\n\u{203a} Ask Codex to do anything"),
-            Status::Waiting
-        );
-        assert_eq!(detect_codex_status("done!\n\u{203a} "), Status::Waiting);
-        // Approval dialog
+        // Approval dialog with numbered selection
         assert_eq!(
             detect_codex_status(
                 "Would you like to run the following command?\n\u{203a} 1. Yes, proceed (y)\n  2. No (esc)\n\nPress enter to confirm or esc to cancel"
@@ -594,6 +894,24 @@ mod tests {
             detect_codex_status("some dialog\nPress enter to confirm or esc to cancel"),
             Status::Waiting
         );
+    }
+
+    #[test]
+    fn test_detect_codex_status_idle_at_prompt() {
+        // Bare › prompt is Codex's idle input prompt, not Waiting
+        assert_eq!(
+            detect_codex_status("some output\n\u{203a} Ask Codex to do anything"),
+            Status::Idle
+        );
+        assert_eq!(detect_codex_status("done!\n\u{203a} "), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_codex_status_idle_prompt_overrides_bullet_scrollback() {
+        // Completed Codex responses use • as bullet prefix. When the idle
+        // prompt › is visible, • in scrollback should NOT trigger Running.
+        let content = "\u{2022} Hello. What do you need help with?\n\n\n\u{203a} Explain this codebase\n\n  gpt-5.4 high fast\n";
+        assert_eq!(detect_codex_status(content), Status::Idle);
     }
 
     #[test]
@@ -641,5 +959,34 @@ mod tests {
     fn test_detect_gemini_status_idle() {
         assert_eq!(detect_gemini_status("file saved"), Status::Idle);
         assert_eq!(detect_gemini_status("random output text"), Status::Idle);
+    }
+
+    #[test]
+    fn test_is_shell_command() {
+        assert!(is_shell_command("zsh"));
+        assert!(is_shell_command("bash"));
+        assert!(is_shell_command("fish"));
+        assert!(is_shell_command("/bin/zsh"));
+        assert!(is_shell_command("/usr/local/bin/fish"));
+        assert!(!is_shell_command("claude"));
+        assert!(!is_shell_command("codex"));
+        assert!(!is_shell_command("2.1.81"));
+    }
+
+    #[test]
+    fn test_detect_agent_type_from_command() {
+        assert_eq!(detect_agent_type_from_command("claude"), Some("claude"));
+        assert_eq!(
+            detect_agent_type_from_command("codex-aarch64-apple-darwin"),
+            Some("codex")
+        );
+        assert_eq!(detect_agent_type_from_command("gemini"), Some("gemini"));
+        assert_eq!(detect_agent_type_from_command("opencode"), Some("opencode"));
+        assert_eq!(detect_agent_type_from_command("vibe"), Some("vibe"));
+        assert_eq!(detect_agent_type_from_command("agent"), Some("cursor"));
+        assert_eq!(detect_agent_type_from_command("zsh"), Some("shell"));
+        assert_eq!(detect_agent_type_from_command("bash"), Some("shell"));
+        assert_eq!(detect_agent_type_from_command("2.1.81"), None);
+        assert_eq!(detect_agent_type_from_command(""), None);
     }
 }

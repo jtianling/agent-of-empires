@@ -815,78 +815,136 @@ impl Instance {
         let previous_status = self.status;
         let now = Instant::now();
 
+        // --- Detect status for the primary (AoE-created) agent pane ---
+        let mut primary_status: Option<Status> = None;
+
         // Check hook-based status first (more reliable than tmux pane parsing)
         if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
             tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
             self.clear_spike_state();
-            self.status = if session.is_pane_dead() {
+            primary_status = Some(if session.is_pane_dead() {
                 Status::Error
             } else {
-                self.apply_acknowledged_mapping(hook_status)
-            };
-            self.last_error = None;
-            return;
+                hook_status
+            });
         }
 
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
-        if let Some(detected) = tmux::get_cached_pane_info(&session_name)
-            .and_then(|info| tmux::status_detection::detect_status_from_title(&info.pane_title))
-        {
-            self.clear_spike_state();
-            self.last_spinner_seen = Some(now);
-            self.status = detected;
-            self.last_error = None;
-            return;
-        }
 
-        let mut detected = if options.allow_capture {
-            match session.detect_status(&self.tool) {
-                Ok(status) => status,
-                Err(_) => Status::Idle,
+        if primary_status.is_none() {
+            if let Some(detected) = tmux::get_cached_pane_info(&session_name)
+                .and_then(|info| tmux::status_detection::detect_status_from_title(&info.pane_title))
+            {
+                self.clear_spike_state();
+                self.last_spinner_seen = Some(now);
+                primary_status = Some(detected);
             }
+        }
+
+        if primary_status.is_none() {
+            let mut detected = if options.allow_capture {
+                match session.detect_status(&self.tool) {
+                    Ok(status) => status,
+                    Err(_) => Status::Idle,
+                }
+            } else {
+                options.reused_status.unwrap_or(previous_status)
+            };
+            tracing::trace!(
+                "status detection '{}' (tool={}, custom_cmd={}, allow_capture={}): {:?}",
+                self.title,
+                self.tool,
+                self.has_custom_command(),
+                options.allow_capture,
+                detected
+            );
+
+            if options.allow_capture && detected == Status::Running {
+                self.last_spinner_seen = Some(now);
+            }
+
+            if options.allow_capture {
+                detected = self.apply_spike_detection(detected, previous_status, now);
+                detected = self.apply_spinner_grace_period(detected, previous_status, now);
+            }
+
+            // Apply shell/dead heuristics for single-pane sessions
+            let is_single_pane = session.pane_count() <= 1;
+            let is_shell_stale =
+                || is_single_pane && !self.expects_shell() && session.is_pane_running_shell();
+            detected = match detected {
+                Status::Idle if self.has_custom_command() => {
+                    if session.is_pane_dead() || is_shell_stale() {
+                        Status::Error
+                    } else {
+                        Status::Unknown
+                    }
+                }
+                Status::Idle if session.is_pane_dead() || is_shell_stale() => Status::Error,
+                other => other,
+            };
+
+            primary_status = Some(detected);
+        }
+
+        let primary_status = primary_status.unwrap_or(Status::Idle);
+
+        // --- Detect status for extra (user-split) panes and aggregate ---
+        let extra_pane_statuses =
+            self.detect_extra_pane_statuses(&session_name, options.allow_capture);
+        let aggregated = if extra_pane_statuses.is_empty() {
+            primary_status
         } else {
-            options.reused_status.unwrap_or(previous_status)
+            let mut all_statuses = vec![primary_status];
+            all_statuses.extend(extra_pane_statuses);
+            tmux::status_detection::aggregate_pane_statuses(&all_statuses)
         };
-        tracing::trace!(
-            "status detection '{}' (tool={}, custom_cmd={}, allow_capture={}): {:?}",
-            self.title,
-            self.tool,
-            self.has_custom_command(),
-            options.allow_capture,
-            detected
-        );
 
-        if options.allow_capture && detected == Status::Running {
-            self.last_spinner_seen = Some(now);
-        }
+        self.status = self.apply_acknowledged_mapping(aggregated);
+        self.last_error = None;
+    }
 
-        if options.allow_capture {
-            detected = self.apply_spike_detection(detected, previous_status, now);
-            detected = self.apply_spinner_grace_period(detected, previous_status, now);
-        }
-        detected = self.apply_acknowledged_mapping(detected);
+    /// Detect status for extra (user-split) panes beyond the primary agent pane.
+    /// Returns statuses only for panes identified as running a known agent (not shell).
+    fn detect_extra_pane_statuses(&self, session_name: &str, allow_capture: bool) -> Vec<Status> {
+        let all_panes = match tmux::get_all_cached_pane_infos(session_name) {
+            Some(panes) if panes.len() > 1 => panes,
+            _ => return Vec::new(),
+        };
 
-        // In multi-pane sessions, is_pane_running_shell may target a user-created
-        // shell pane (e.g. from Ctrl+B %) rather than the agent pane when
-        // @aoe_agent_pane is not set. Only treat a shell as stale for
-        // single-pane sessions where a shell unambiguously means the agent exited.
-        let is_single_pane = session.pane_count() <= 1;
-        let is_shell_stale =
-            || is_single_pane && !self.expects_shell() && session.is_pane_running_shell();
-        self.status = match detected {
-            Status::Idle if self.has_custom_command() => {
-                if session.is_pane_dead() || is_shell_stale() {
-                    Status::Error
-                } else {
-                    Status::Unknown
+        // Skip pane index 0 (or whichever is the primary agent pane)
+        let extra_panes: Vec<_> = all_panes.into_iter().skip(1).collect();
+        let mut statuses = Vec::new();
+
+        for pane_info in &extra_panes {
+            let agent_type = match tmux::status_detection::detect_agent_type_from_pane(pane_info) {
+                Some("shell") | None => continue,
+                Some(agent) => agent,
+            };
+
+            // Title-based detection (fast, no capture needed)
+            if let Some(status) =
+                tmux::status_detection::detect_status_from_title(&pane_info.pane_title)
+            {
+                statuses.push(status);
+                continue;
+            }
+
+            // Content-based detection (requires capture)
+            if allow_capture {
+                if let Ok(content) = tmux::Session::capture_pane_by_id(&pane_info.pane_id, 50) {
+                    let status = tmux::status_detection::detect_status_from_content(
+                        &content, agent_type, None,
+                    );
+                    statuses.push(status);
+                    continue;
                 }
             }
-            Status::Idle if session.is_pane_dead() || is_shell_stale() => Status::Error,
-            other => other,
-        };
 
-        // Clear stale error now that the session is healthy
-        self.last_error = None;
+            statuses.push(Status::Idle);
+        }
+
+        statuses
     }
 
     fn clear_spike_state(&mut self) {

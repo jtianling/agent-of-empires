@@ -43,6 +43,25 @@ pub fn get_foreground_pid(shell_pid: u32) -> Option<u32> {
     }
 }
 
+/// Get the comm name (binary name) of a process by PID
+pub fn get_process_comm(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::get_process_comm(pid)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::get_process_comm(pid)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Kill a process and all its descendants
 /// Sends SIGTERM first, then SIGKILL to any survivors
 pub fn kill_process_tree(pid: u32) {

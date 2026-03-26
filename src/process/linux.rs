@@ -145,6 +145,16 @@ fn parse_stat_field(content: &str, field_idx: usize) -> Option<i64> {
     fields.get(adjusted_idx)?.parse().ok()
 }
 
+/// Get the comm name (binary name) of a process by PID
+pub fn get_process_comm(pid: u32) -> Option<String> {
+    let comm = fs::read_to_string(format!("/proc/{}/comm", pid)).ok()?;
+    let trimmed = comm.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

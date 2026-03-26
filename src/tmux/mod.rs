@@ -33,7 +33,7 @@ struct SessionCache {
 }
 
 struct PaneInfoCache {
-    data: Option<HashMap<String, PaneInfo>>,
+    data: Option<HashMap<String, Vec<PaneInfo>>>,
     time: Option<Instant>,
 }
 
@@ -45,6 +45,8 @@ pub struct SessionActivity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneInfo {
+    pub pane_index: u32,
+    pub pane_id: String,
     pub pane_title: String,
     pub current_command: String,
     pub is_dead: bool,
@@ -77,7 +79,7 @@ pub fn refresh_pane_info_cache() {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_index}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}",
+            "#{session_name}\t#{pane_index}\t#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}",
         ])
         .output();
 
@@ -126,7 +128,25 @@ pub fn get_cached_pane_info(name: &str) -> Option<PaneInfo> {
         return None;
     }
 
-    cache.data.as_ref().and_then(|m| m.get(name)).cloned()
+    cache
+        .data
+        .as_ref()
+        .and_then(|m| m.get(name))
+        .and_then(|panes| panes.first())
+        .cloned()
+}
+
+pub fn get_all_cached_pane_infos(session_name: &str) -> Option<Vec<PaneInfo>> {
+    let cache = PANE_INFO_CACHE.read().ok()?;
+    if is_cache_stale(cache.time) {
+        return None;
+    }
+
+    cache
+        .data
+        .as_ref()
+        .and_then(|m| m.get(session_name))
+        .cloned()
 }
 
 pub fn get_current_session_name() -> Option<String> {
@@ -222,12 +242,12 @@ fn parse_session_cache_output(output: &[u8]) -> HashMap<String, SessionActivity>
     map
 }
 
-fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, PaneInfo> {
+fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, Vec<PaneInfo>> {
     let stdout = String::from_utf8_lossy(output);
-    let mut panes_by_session: HashMap<String, (u32, PaneInfo)> = HashMap::new();
+    let mut panes_by_session: HashMap<String, Vec<PaneInfo>> = HashMap::new();
 
     for line in stdout.lines() {
-        let mut parts = line.splitn(6, '\t');
+        let mut parts = line.splitn(7, '\t');
         let Some(session_name) = parts.next() else {
             continue;
         };
@@ -235,7 +255,10 @@ fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, PaneInfo> {
             continue;
         }
 
-        let Some(pane_index) = parts.next() else {
+        let Some(pane_index_str) = parts.next() else {
+            continue;
+        };
+        let Some(pane_id) = parts.next() else {
             continue;
         };
         let Some(pane_title) = parts.next() else {
@@ -251,26 +274,27 @@ fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, PaneInfo> {
             continue;
         };
 
-        let pane_index = pane_index.parse().unwrap_or(u32::MAX);
+        let pane_index = pane_index_str.parse().unwrap_or(u32::MAX);
         let info = PaneInfo {
+            pane_index,
+            pane_id: pane_id.to_string(),
             pane_title: pane_title.to_string(),
             current_command: current_command.to_string(),
             is_dead: is_dead.trim() == "1",
             pane_pid: pane_pid.trim().parse().ok(),
         };
 
-        match panes_by_session.get(session_name) {
-            Some((existing_index, _)) if *existing_index <= pane_index => {}
-            _ => {
-                panes_by_session.insert(session_name.to_string(), (pane_index, info));
-            }
-        }
+        panes_by_session
+            .entry(session_name.to_string())
+            .or_default()
+            .push(info);
+    }
+
+    for panes in panes_by_session.values_mut() {
+        panes.sort_by_key(|p| p.pane_index);
     }
 
     panes_by_session
-        .into_iter()
-        .map(|(session_name, (_, info))| (session_name, info))
-        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -339,35 +363,54 @@ mod tests {
     #[test]
     fn test_parse_pane_info_cache_output_filters_non_aoe_sessions() {
         let parsed = parse_pane_info_cache_output(
-            b"aoe_alpha\t0\talpha title\tcodex\t0\t101\nother\t0\tother title\tbash\t1\t202\n",
+            b"aoe_alpha\t0\t%1\talpha title\tcodex\t0\t101\nother\t0\t%2\tother title\tbash\t1\t202\n",
         );
 
         assert_eq!(parsed.len(), 1);
+        let panes = parsed.get("aoe_alpha").unwrap();
+        assert_eq!(panes.len(), 1);
         assert_eq!(
-            parsed.get("aoe_alpha"),
-            Some(&PaneInfo {
+            panes[0],
+            PaneInfo {
+                pane_index: 0,
+                pane_id: "%1".to_string(),
                 pane_title: "alpha title".to_string(),
                 current_command: "codex".to_string(),
                 is_dead: false,
                 pane_pid: Some(101),
-            })
+            }
         );
     }
 
     #[test]
-    fn test_parse_pane_info_cache_output_prefers_lowest_pane_index() {
+    fn test_parse_pane_info_cache_output_stores_all_panes_sorted() {
         let parsed = parse_pane_info_cache_output(
-            b"aoe_alpha\t2\tright pane\tbash\t0\t300\naoe_alpha\t0\tagent pane\tcodex\t0\t200\n",
+            b"aoe_alpha\t2\t%3\tright pane\tbash\t0\t300\naoe_alpha\t0\t%1\tagent pane\tcodex\t0\t200\n",
         );
 
+        let panes = parsed.get("aoe_alpha").unwrap();
+        assert_eq!(panes.len(), 2);
         assert_eq!(
-            parsed.get("aoe_alpha"),
-            Some(&PaneInfo {
+            panes[0],
+            PaneInfo {
+                pane_index: 0,
+                pane_id: "%1".to_string(),
                 pane_title: "agent pane".to_string(),
                 current_command: "codex".to_string(),
                 is_dead: false,
                 pane_pid: Some(200),
-            })
+            }
+        );
+        assert_eq!(
+            panes[1],
+            PaneInfo {
+                pane_index: 2,
+                pane_id: "%3".to_string(),
+                pane_title: "right pane".to_string(),
+                current_command: "bash".to_string(),
+                is_dead: false,
+                pane_pid: Some(300),
+            }
         );
     }
 }

@@ -144,6 +144,26 @@ fn find_process_in_group(pgrp: u32) -> Option<u32> {
     None
 }
 
+/// Get the comm name (binary name) of a process by PID
+pub fn get_process_comm(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let comm = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if comm.is_empty() {
+        return None;
+    }
+
+    // Extract just the binary name (last path component)
+    comm.rsplit('/').next().map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
