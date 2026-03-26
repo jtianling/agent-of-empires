@@ -343,7 +343,8 @@ impl Instance {
                         crate::agents::YoloMode::CliFlag(flag) => {
                             format!("{} {}", base_cmd, flag)
                         }
-                        crate::agents::YoloMode::EnvVar(..) => base_cmd,
+                        crate::agents::YoloMode::EnvVar(..)
+                        | crate::agents::YoloMode::AlwaysYolo => base_cmd,
                     }
                 } else {
                     base_cmd
@@ -386,6 +387,7 @@ impl Instance {
                                 crate::agents::YoloMode::EnvVar(key, value) => {
                                     env_vars.push((key, value));
                                 }
+                                crate::agents::YoloMode::AlwaysYolo => {}
                             }
                         }
                     }
@@ -407,6 +409,7 @@ impl Instance {
                             crate::agents::YoloMode::EnvVar(key, value) => {
                                 env_vars.push((key, value));
                             }
+                            crate::agents::YoloMode::AlwaysYolo => {}
                         }
                     }
                 }
@@ -822,7 +825,8 @@ impl Instance {
         if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
             tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
             self.clear_spike_state();
-            primary_status = Some(if session.is_pane_dead() {
+            let crashed_to_shell = !self.expects_shell() && session.is_pane_running_shell();
+            primary_status = Some(if session.is_pane_dead() || crashed_to_shell {
                 Status::Error
             } else {
                 hook_status
@@ -1028,7 +1032,7 @@ fn generate_id() -> String {
 ///
 /// Uses POSIX-standard `stty susp undef` which works on both Linux and macOS.
 /// Single quotes in `cmd` are escaped with the `'\''` technique to prevent
-/// breaking out of the outer `bash -c '...'` wrapper.
+/// breaking out of the outer shell wrapper.
 ///
 /// Environment variables are exported before `exec` because `exec VAR=val cmd`
 /// is not portable and fails in many shells.
@@ -1037,8 +1041,9 @@ fn wrap_command_ignore_suspend(cmd: &str) -> String {
 }
 
 fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) -> String {
+    let shell = crate::session::environment::user_posix_shell();
     let escaped = cmd.replace('\'', "'\\''");
-    // Place env vars before `bash -c` so they're parsed at the outer shell
+    // Place env vars before the shell so they're parsed at the outer shell
     // level, avoiding quoting conflicts with the inner single-quoted string.
     let env_prefix = env_vars
         .iter()
@@ -1047,7 +1052,11 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
             format!("{}='{}' ", k, escaped_v)
         })
         .collect::<String>();
-    format!("{}bash -c 'stty susp undef; exec {}'", env_prefix, escaped)
+    // Use login shell (-l) so version-manager PATHs (NVM, etc.) are available.
+    format!(
+        "{}{} -lc 'stty susp undef; exec env {}'",
+        env_prefix, shell, escaped
+    )
 }
 
 pub(crate) fn extract_resume_token(output: &str, pattern: &str) -> Option<String> {
@@ -1212,22 +1221,26 @@ mod tests {
 
     #[test]
     fn test_wrap_command_ignore_suspend_basic() {
+        let shell = crate::session::environment::user_posix_shell();
         assert_eq!(
             wrap_command_ignore_suspend("opencode"),
-            "bash -c 'stty susp undef; exec opencode'"
+            format!("{shell} -lc 'stty susp undef; exec env opencode'")
         );
     }
 
     #[test]
     fn test_wrap_command_ignore_suspend_with_env() {
+        let shell = crate::session::environment::user_posix_shell();
         let result = wrap_command_ignore_suspend_with_env(
             "opencode",
             &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)],
         );
-        // Env vars are placed before bash -c, not inside the single-quoted string
+        // Env vars are placed before the shell, not inside the single-quoted string
         assert_eq!(
             result,
-            r#"OPENCODE_PERMISSION='{"*":"allow"}' bash -c 'stty susp undef; exec opencode'"#
+            format!(
+                r#"OPENCODE_PERMISSION='{{"*":"allow"}}' {shell} -lc 'stty susp undef; exec env opencode'"#
+            )
         );
     }
 
@@ -1254,9 +1267,10 @@ mod tests {
             cmd.starts_with("AOE_INSTANCE_ID='"),
             "expected hook env prefix, got {cmd}"
         );
+        let shell = crate::session::environment::user_posix_shell();
         assert!(
             cmd.contains(
-                "bash -c 'stty susp undef; exec claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11 --model sonnet --dangerously-skip-permissions'"
+                &format!("{shell} -lc 'stty susp undef; exec env claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11 --model sonnet --dangerously-skip-permissions'")
             ),
             "unexpected claude resume command: {cmd}"
         );
@@ -1273,9 +1287,10 @@ mod tests {
             .build_agent_command(Some("019d1af9-a899-7df1-8f7d-a244126e5ded"))
             .unwrap();
 
+        let shell = crate::session::environment::user_posix_shell();
         assert_eq!(
             cmd,
-            "bash -c 'stty susp undef; exec codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'"
+            format!("{shell} -lc 'stty susp undef; exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'")
         );
     }
 

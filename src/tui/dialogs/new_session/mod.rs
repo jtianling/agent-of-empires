@@ -132,6 +132,7 @@ pub struct NewSessionDialog {
     pub(super) sandbox_image: Input,
     pub(super) docker_available: bool,
     pub(super) yolo_mode: bool,
+    pub(super) yolo_mode_default: bool,
     /// Extra environment entries (session-specific).
     /// `KEY` = pass through, `KEY=VALUE` = set explicitly.
     pub(super) extra_env: Vec<String>,
@@ -337,7 +338,11 @@ impl NewSessionDialog {
         let yolo_mode = config.session.yolo_mode_default;
 
         // Load extra args and command override for the default tool
-        let selected_tool = available_tools.get(tool_index).copied().unwrap_or("claude");
+        let selected_tool = available_tools
+            .get(tool_index)
+            .or_else(|| available_tools.first())
+            .copied()
+            .unwrap_or("claude");
         let extra_args_value = config
             .session
             .agent_extra_args
@@ -383,6 +388,7 @@ impl NewSessionDialog {
             ),
             docker_available,
             yolo_mode,
+            yolo_mode_default: yolo_mode,
             extra_env,
             env_list_expanded: false,
             env_selected_index: 0,
@@ -477,6 +483,14 @@ impl NewSessionDialog {
         self.available_tools.get(self.tool_index).copied() == Some("shell")
     }
 
+    /// Whether the currently selected tool is always in YOLO mode (no opt-in needed).
+    pub(super) fn selected_tool_always_yolo(&self) -> bool {
+        let tool_name = self.available_tools[self.tool_index];
+        crate::agents::get_agent(tool_name)
+            .and_then(|a| a.yolo.as_ref())
+            .is_some_and(|y| matches!(y, crate::agents::YoloMode::AlwaysYolo))
+    }
+
     fn path_field(&self) -> usize {
         1
     }
@@ -516,6 +530,7 @@ impl NewSessionDialog {
             ),
             docker_available: false,
             yolo_mode: false,
+            yolo_mode_default: false,
             extra_env: Vec::new(),
             env_list_expanded: false,
             env_selected_index: 0,
@@ -571,6 +586,7 @@ impl NewSessionDialog {
             ),
             docker_available: false,
             yolo_mode: false,
+            yolo_mode_default: false,
             extra_env: Vec::new(),
             env_list_expanded: false,
             env_selected_index: 0,
@@ -683,7 +699,8 @@ impl NewSessionDialog {
             fi += 1;
             f
         };
-        let yolo_mode_field = if !is_terminal {
+        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
+        let yolo_mode_field = if has_yolo {
             let f = fi;
             fi += 1;
             f
@@ -830,11 +847,21 @@ impl NewSessionDialog {
             }
             KeyCode::Right if self.focused_field == tool_field => {
                 self.tool_index = (self.tool_index + 1) % self.available_tools.len();
+                if self.selected_tool_always_yolo() {
+                    self.yolo_mode = true;
+                } else {
+                    self.yolo_mode = self.yolo_mode_default;
+                }
                 self.reload_tool_config();
                 DialogResult::Continue
             }
             KeyCode::Char(' ') if self.focused_field == tool_field => {
                 self.tool_index = (self.tool_index + 1) % self.available_tools.len();
+                if self.selected_tool_always_yolo() {
+                    self.yolo_mode = true;
+                } else {
+                    self.yolo_mode = self.yolo_mode_default;
+                }
                 self.reload_tool_config();
                 DialogResult::Continue
             }
@@ -1036,6 +1063,7 @@ impl NewSessionDialog {
         let tool = self
             .available_tools
             .get(self.tool_index)
+            .or_else(|| self.available_tools.first())
             .copied()
             .unwrap_or("claude");
         self.extra_args = Input::new(
@@ -1068,14 +1096,17 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
+        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
         let base = 0;
 
-        // Field layout: [profile], title, path, [tool], right_pane, [yolo], [worktree],
+        // Field layout: title, path, [tool], right_pane, [yolo], [worktree],
         //   [new_branch], [sandbox], group
         let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
         fi += 1; // right_pane (always visible)
         let worktree_field = if !is_terminal {
-            fi += 1; // yolo
+            if has_yolo {
+                fi += 1; // yolo
+            }
             let f = fi;
             fi += 1;
             if has_worktree {
@@ -1163,7 +1194,7 @@ impl NewSessionDialog {
             create_new_branch: self.create_new_branch,
             sandbox: self.sandbox_enabled,
             sandbox_image: self.sandbox_image.value().trim().to_string(),
-            yolo_mode: self.yolo_mode,
+            yolo_mode: self.yolo_mode || self.selected_tool_always_yolo(),
             extra_env: if self.sandbox_enabled {
                 self.extra_env.clone()
             } else {

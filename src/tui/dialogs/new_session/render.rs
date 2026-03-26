@@ -31,6 +31,7 @@ impl NewSessionDialog {
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
+        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
         let dialog_width = 80;
 
         // Build constraints dynamically based on visible fields only
@@ -41,8 +42,10 @@ impl NewSessionDialog {
             Constraint::Length(2), // Tool (always shown, interactive or not)
             Constraint::Length(2), // Right Pane (always shown)
         ]);
-        if !is_terminal {
+        if has_yolo {
             constraints.push(Constraint::Length(2)); // YOLO mode checkbox
+        }
+        if !is_terminal {
             constraints.push(Constraint::Length(2)); // Worktree Branch
         }
         if !is_terminal && has_worktree {
@@ -263,8 +266,8 @@ impl NewSessionDialog {
             ci += 1;
         }
 
-        // YOLO Mode checkbox (hidden for terminal)
-        if !is_terminal {
+        // YOLO Mode checkbox (hidden for terminal and AlwaysYolo agents like pi)
+        if has_yolo {
             let is_yolo_focused = self.focused_field == yolo_mode_field;
             let yolo_label_style = if is_yolo_focused {
                 Style::default().fg(theme.accent).underlined()
@@ -682,6 +685,7 @@ impl NewSessionDialog {
         let selected_tool = self
             .available_tools
             .get(self.tool_index)
+            .or_else(|| self.available_tools.first())
             .copied()
             .unwrap_or("claude");
         let title = format!(" Tool Configuration: {} ", selected_tool);
@@ -901,6 +905,8 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let show_sandbox_options_help = has_sandbox && self.sandbox_enabled;
+        let is_terminal = self.is_terminal_selected();
+        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
 
         let dialog_width: u16 = HELP_DIALOG_WIDTH;
         // Base fields: Title, Path, Right Pane, YOLO, Worktree, New Branch, Group + close hint
@@ -933,7 +939,11 @@ impl NewSessionDialog {
             if idx == 3 && !has_tool_selection {
                 continue; // Tool
             }
-            // idx 4 (Right Pane), 5 (YOLO), 6 (Worktree), 7 (New Branch) always shown
+            // idx 4 (Right Pane) always shown
+            if idx == 5 && !has_yolo {
+                continue; // YOLO (hidden for terminal and AlwaysYolo agents)
+            }
+            // idx 6 (Worktree), 7 (New Branch) always shown
             if idx == 8 && !has_sandbox {
                 continue; // Sandbox
             }

@@ -77,6 +77,7 @@ fn build_right_pane_command(instance: &crate::session::Instance, tool_name: &str
                 let escaped_v = value.replace('\'', "'\\''");
                 env_prefix = format!("{}='{}' ", key, escaped_v);
             }
+            Some(crate::agents::YoloMode::AlwaysYolo) => {}
             None => {}
         }
     }
