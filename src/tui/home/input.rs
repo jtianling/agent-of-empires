@@ -312,7 +312,7 @@ impl HomeView {
                     self.group_rename_dialog = None;
                 }
                 DialogResult::Submit(path) => {
-                    if let Err(e) = self.rename_selected_group(&path) {
+                    if let Err(e) = self.rename_selected_group(&path.new_path, path.directory) {
                         tracing::error!("Failed to rename group: {}", e);
                         if let Some(dialog) = &mut self.group_rename_dialog {
                             dialog.set_error(e.to_string());
@@ -639,7 +639,13 @@ impl HomeView {
                         ));
                     }
                 } else if let Some(group_path) = &self.selected_group {
-                    self.group_rename_dialog = Some(GroupRenameDialog::new(group_path));
+                    let launch_dir = self.launch_dir.to_string_lossy().to_string();
+                    let current_directory = self
+                        .group_tree
+                        .get_default_directory(group_path)
+                        .unwrap_or(launch_dir.as_str());
+                    self.group_rename_dialog =
+                        Some(GroupRenameDialog::new(group_path, current_directory));
                 }
             }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {

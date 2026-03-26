@@ -18,7 +18,7 @@ pub use confirm::ConfirmDialog;
 pub use custom_instruction::CustomInstructionDialog;
 pub use delete_options::{DeleteDialogConfig, DeleteOptions, UnifiedDeleteDialog};
 pub use group_delete_options::{GroupDeleteOptions, GroupDeleteOptionsDialog};
-pub use group_rename::GroupRenameDialog;
+pub use group_rename::{GroupRenameDialog, GroupRenameResult};
 pub use hook_trust::{HookTrustAction, HookTrustDialog};
 pub use info::InfoDialog;
 pub use new_session::{NewSessionData, NewSessionDialog};

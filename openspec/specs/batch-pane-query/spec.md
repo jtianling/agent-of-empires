@@ -11,10 +11,10 @@ Replace per-instance tmux subprocess calls with a single `tmux list-panes -a` ba
 ## Requirements
 
 ### Requirement: Single batch pane info query per poll cycle
-The status poller SHALL execute a single `tmux list-panes -a` command at the start of each poll cycle to collect pane information for all sessions. This replaces per-instance `display-message` calls for pane dead state, current command, pane title, and pane PID.
+The status poller and the notification monitor SHALL execute a single `tmux list-panes -a` command at the start of each poll cycle to collect pane information for all sessions. This replaces per-instance `display-message` calls for pane dead state, current command, pane title, and pane PID.
 
 #### Scenario: Batch query populates pane info cache
-- **WHEN** the status poller begins a new poll cycle
+- **WHEN** the status poller or notification monitor begins a new poll cycle
 - **THEN** it SHALL execute one `tmux list-panes -a -F` command
 - **AND** parse the output into a `PaneInfoCache` keyed by session name
 - **AND** each entry SHALL contain: pane title, current command, dead flag, pane PID
@@ -27,6 +27,11 @@ The status poller SHALL execute a single `tmux list-panes -a` command at the sta
 #### Scenario: Non-AoE sessions filtered from cache
 - **WHEN** the batch query returns panes from non-AoE sessions
 - **THEN** the cache SHALL only store entries for sessions whose name starts with the AoE prefix (`aoe_`)
+
+#### Scenario: Notification monitor refreshes cache at cycle start
+- **WHEN** the notification monitor begins a poll cycle
+- **THEN** it SHALL call `refresh_pane_info_cache()` and `refresh_session_cache()` before processing sessions
+- **AND** use the cached pane titles for title fast-path detection instead of per-session `tmux list-panes -t` calls
 
 ### Requirement: Batch query includes agent pane targeting
 For sessions with the `@aoe_agent_pane` user option, the batch query SHALL identify the correct agent pane. The `list-panes -a` output includes all panes per session; the cache SHALL prefer the pane matching `@aoe_agent_pane` if set, otherwise use the first pane.

@@ -11,11 +11,16 @@ Distinguish between sessions that need user attention (unacknowledged Waiting) a
 ## Requirements
 
 ### Requirement: Track user acknowledgment of session output
-Each instance SHALL maintain an `acknowledged` flag (transient, not persisted) that tracks whether the user has viewed the session's current output. This flag SHALL be used to distinguish between "needs attention" (Waiting) and "already seen" (Idle).
+Each instance SHALL maintain an `acknowledged` flag (transient, not persisted) that tracks whether the user has viewed the session's current output. This flag SHALL be used by both the TUI and the notification monitor to distinguish between "needs attention" (Waiting) and "already seen" (Idle).
 
 #### Scenario: User attaches to session marks as acknowledged
 - **WHEN** the user attaches to (switches to) a session in the TUI
 - **THEN** the instance's `acknowledged` flag SHALL be set to `true`
+
+#### Scenario: Notification key binding marks as acknowledged
+- **WHEN** the user presses a notification bar key binding to switch to a session
+- **THEN** the monitor SHALL mark that session as acknowledged in its state map
+- **AND** the notification bar SHALL reflect the updated status on the next cycle
 
 #### Scenario: New activity resets acknowledgment
 - **WHEN** the `window_activity` timestamp changes for an instance
@@ -23,11 +28,11 @@ Each instance SHALL maintain an `acknowledged` flag (transient, not persisted) t
 - **THEN** the `acknowledged` flag SHALL be reset to `false`
 
 #### Scenario: New instances start unacknowledged
-- **WHEN** a new instance is created or the TUI restarts
+- **WHEN** a new instance is created or the monitor/TUI restarts
 - **THEN** the instance's `acknowledged` flag SHALL default to `false`
 
 ### Requirement: Acknowledged Waiting maps to Idle
-When content-based detection returns `Waiting` and the instance is acknowledged, the final reported status SHALL be `Idle` instead of `Waiting`. This signals that the user is already aware of the prompt.
+When content-based detection returns `Waiting` and the instance is acknowledged, the final reported status SHALL be `Idle` instead of `Waiting`. This applies to both the TUI status poller and the notification monitor.
 
 #### Scenario: Unacknowledged Waiting stays Waiting
 - **WHEN** content detection returns `Waiting`

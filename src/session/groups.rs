@@ -261,6 +261,13 @@ impl GroupTree {
         }
     }
 
+    pub fn clear_default_directory(&mut self, path: &str) {
+        if let Some(group) = self.groups_by_path.get_mut(path) {
+            group.default_directory = None;
+            self.rebuild_tree();
+        }
+    }
+
     pub fn get_default_directory(&self, path: &str) -> Option<&str> {
         self.groups_by_path
             .get(path)

@@ -797,7 +797,11 @@ fn test_group_rename_conflict_opens_merge_confirmation() {
     assert!(env.view.confirm_dialog.is_some());
     assert_eq!(
         env.view.pending_group_rename,
-        Some(("temp/api".to_string(), "work/api".to_string()))
+        Some((
+            "temp/api".to_string(),
+            "work/api".to_string(),
+            Some(std::env::current_dir().unwrap().display().to_string())
+        ))
     );
 }
 
@@ -913,6 +917,46 @@ fn test_group_rename_updates_sessions_and_creates_intermediate_groups() {
     assert!(groups
         .iter()
         .any(|group| group.path == "work/tools/personal"));
+}
+
+#[test]
+#[serial]
+fn test_group_rename_updates_directory_without_renaming() {
+    let mut env = create_test_env_with_groups();
+    env.view.select_group_by_path("personal");
+
+    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view
+        .group_rename_dialog
+        .as_mut()
+        .unwrap()
+        .set_directory_value("/tmp/personal-new");
+    env.view.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(
+        env.view.group_tree.get_default_directory("personal"),
+        Some("/tmp/personal-new")
+    );
+    assert_eq!(env.view.selected_group.as_deref(), Some("personal"));
+}
+
+#[test]
+#[serial]
+fn test_group_merge_confirmation_preserves_directory_update() {
+    let mut env = create_test_env_with_group_rename_conflict();
+    env.view.select_group_by_path("temp/api");
+
+    env.view.handle_key(key(KeyCode::Char('r')));
+    let dialog = env.view.group_rename_dialog.as_mut().unwrap();
+    dialog.set_path_value("work/api");
+    dialog.set_directory_value("/tmp/merged-api");
+    env.view.handle_key(key(KeyCode::Enter));
+    env.view.handle_key(key(KeyCode::Char('y')));
+
+    assert_eq!(
+        env.view.group_tree.get_default_directory("work/api"),
+        Some("/tmp/merged-api")
+    );
 }
 
 #[test]

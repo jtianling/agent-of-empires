@@ -22,9 +22,9 @@ use crate::session::Config;
 use crate::session::{civilizations, resolve_config};
 use crate::tmux::AvailableTools;
 use crate::tui::components::{
-    DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult,
+    expand_tilde, DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult,
+    PathGhostCompletion,
 };
-use path_input::PathGhostCompletion;
 
 pub(super) struct FieldHelp {
     pub(super) name: &'static str,
@@ -767,7 +767,7 @@ impl NewSessionDialog {
             KeyCode::Enter => {
                 self.error_message = None;
                 let path_str = self.path.value().trim().to_string();
-                let resolved = path_input::expand_tilde(&path_str);
+                let resolved = expand_tilde(&path_str);
                 if !std::path::Path::new(&resolved).exists() {
                     self.confirm_create_dir = Some(false);
                     return DialogResult::Continue;
@@ -1112,7 +1112,7 @@ impl NewSessionDialog {
         }
 
         let path_str = self.path.value().trim().to_string();
-        let resolved = path_input::expand_tilde(&path_str);
+        let resolved = expand_tilde(&path_str);
         let path = std::path::PathBuf::from(&resolved);
 
         if !GitWorktree::is_git_repo(&path) {
@@ -1222,7 +1222,7 @@ impl NewSessionDialog {
 
     fn try_create_dir_and_submit(&mut self) -> DialogResult<NewSessionData> {
         let path_str = self.path.value().trim().to_string();
-        let resolved = path_input::expand_tilde(&path_str);
+        let resolved = expand_tilde(&path_str);
         match std::fs::create_dir_all(&resolved) {
             Ok(()) => self.build_submit_result(),
             Err(e) => {

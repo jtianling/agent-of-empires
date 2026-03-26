@@ -1,61 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::path::PathBuf;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::NewSessionDialog;
-use crate::tui::components::longest_common_prefix;
-
-pub(super) struct PathGhostCompletion {
-    input_snapshot: String,
-    cursor_snapshot: usize,
-    pub(super) ghost_text: String,
-    #[allow(dead_code)]
-    candidates: Vec<String>,
-}
-
-fn char_to_byte_idx(value: &str, char_idx: usize) -> usize {
-    value
-        .char_indices()
-        .nth(char_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or(value.len())
-}
-
-/// Expand a leading `~` to the user's home directory.
-pub(super) fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.to_string_lossy().to_string();
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().to_string();
-        }
-    }
-    path.to_string()
-}
-
-fn path_completion_base(parent_prefix: &str) -> Option<PathBuf> {
-    if parent_prefix.is_empty() {
-        return Some(PathBuf::from("."));
-    }
-
-    let trimmed = parent_prefix.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return Some(PathBuf::from("/"));
-    }
-
-    if trimmed == "~" {
-        return dirs::home_dir();
-    }
-
-    if let Some(stripped) = trimmed.strip_prefix("~/") {
-        return dirs::home_dir().map(|home| home.join(stripped));
-    }
-
-    Some(PathBuf::from(trimmed))
-}
+use crate::tui::components::PathGhostCompletion;
 
 impl NewSessionDialog {
     pub(super) fn handle_path_shortcuts(&mut self, key: KeyEvent) -> bool {
@@ -165,80 +113,7 @@ impl NewSessionDialog {
     }
 
     pub(super) fn recompute_path_ghost(&mut self) {
-        self.path_ghost = None;
-
-        let value = self.path.value().to_string();
-        let char_len = value.chars().count();
-        let cursor_char = self.path.visual_cursor().min(char_len);
-
-        // Only show ghost when cursor is at end of input
-        if cursor_char < char_len {
-            return;
-        }
-
-        let cursor_byte = char_to_byte_idx(&value, cursor_char);
-
-        let segment_start = value[..cursor_byte].rfind('/').map_or(0, |idx| idx + 1);
-        let parent_prefix = &value[..segment_start];
-        let current_segment = &value[segment_start..cursor_byte];
-
-        let Some(base_dir) = path_completion_base(parent_prefix) else {
-            return;
-        };
-
-        let include_hidden = current_segment.starts_with('.');
-        let mut matches = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&base_dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
-            }
-            let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else {
-                continue;
-            };
-            if !include_hidden && name.starts_with('.') {
-                continue;
-            }
-            if name.starts_with(current_segment) {
-                matches.push(name.to_string());
-            }
-        }
-
-        if matches.is_empty() {
-            return;
-        }
-        matches.sort();
-
-        let ghost_text = if matches.len() == 1 {
-            // Single match: ghost = remaining chars + /
-            let remainder = &matches[0][current_segment.len()..];
-            format!("{}/", remainder)
-        } else {
-            let common_prefix = longest_common_prefix(&matches);
-            if common_prefix.len() > current_segment.len() {
-                // Multiple matches with common prefix extension
-                common_prefix[current_segment.len()..].to_string()
-            } else {
-                // Common prefix equals what's typed; show first candidate's remainder
-                let remainder = &matches[0][current_segment.len()..];
-                format!("{}/", remainder)
-            }
-        };
-
-        if ghost_text.is_empty() {
-            return;
-        }
-
-        self.path_ghost = Some(PathGhostCompletion {
-            input_snapshot: value,
-            cursor_snapshot: cursor_char,
-            ghost_text,
-            candidates: matches,
-        });
+        self.path_ghost = PathGhostCompletion::compute(&self.path);
     }
 
     pub(super) fn accept_path_ghost(&mut self) -> bool {
@@ -246,17 +121,9 @@ impl NewSessionDialog {
             Some(g) => g,
             None => return false,
         };
-
-        let value = self.path.value().to_string();
-        let cursor_char = self.path.visual_cursor().min(value.chars().count());
-
-        // Staleness check
-        if ghost.input_snapshot != value || ghost.cursor_snapshot != cursor_char {
+        let Some(new_value) = ghost.accept(&self.path) else {
             return false;
-        }
-
-        let mut new_value = value;
-        new_value.push_str(&ghost.ghost_text);
+        };
         let new_cursor = new_value.chars().count();
         self.set_path_value_with_cursor(new_value, new_cursor);
         self.error_message = None;
@@ -270,7 +137,9 @@ impl NewSessionDialog {
     }
 
     pub(super) fn ghost_text(&self) -> Option<&str> {
-        self.path_ghost.as_ref().map(|g| g.ghost_text.as_str())
+        self.path_ghost
+            .as_ref()
+            .map(PathGhostCompletion::ghost_text)
     }
 
     pub(super) fn is_path_invalid_flash_active(&self) -> bool {

@@ -121,7 +121,7 @@ pub struct HomeView {
     /// Session to stop after the confirmation dialog is accepted
     pub(super) pending_stop_session: Option<String>,
     /// Source and destination paths for a rename waiting on merge confirmation
-    pub(super) pending_group_rename: Option<(String, String)>,
+    pub(super) pending_group_rename: Option<(String, String, Option<String>)>,
     /// Right pane tool to launch after next session attach (one-shot, consumed on use)
     pub(super) pending_right_pane_tool: Option<String>,
 

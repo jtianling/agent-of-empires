@@ -11,7 +11,7 @@ Cache `capture-pane` results with a short TTL to avoid redundant tmux subprocess
 ## Requirements
 
 ### Requirement: Cache capture-pane results with 500ms TTL
-The system SHALL cache the result of `capture-pane` calls per session with a 500ms time-to-live. Subsequent requests for the same session's pane content within the TTL SHALL return the cached content without spawning a new tmux subprocess.
+The system SHALL cache the result of `capture-pane` calls per session with a 500ms time-to-live. Subsequent requests for the same session's pane content within the TTL SHALL return the cached content without spawning a new tmux subprocess. This cache operates per-process: both the TUI and the notification monitor maintain their own cache instances.
 
 #### Scenario: First capture within TTL window
 - **WHEN** `capture_pane()` is called for a session
@@ -29,6 +29,11 @@ The system SHALL cache the result of `capture-pane` calls per session with a 500
 - **AND** a cached result exists that is more than 500ms old
 - **THEN** the system SHALL execute a fresh `tmux capture-pane`
 - **AND** replace the cached content
+
+#### Scenario: Notification monitor uses capture cache
+- **WHEN** the notification monitor needs pane content for status detection
+- **THEN** it SHALL call `capture_pane_cached()` instead of direct subprocess calls
+- **AND** benefit from the cache if the same session was captured within the TTL
 
 ### Requirement: Resume token extraction reuses capture cache
 When the status poller extracts a resume token after detecting pane death, it SHALL reuse the capture cache if a recent capture is available, instead of calling `capture_pane()` again.

@@ -187,14 +187,18 @@ impl HomeView {
         })
     }
 
-    pub(super) fn rename_selected_group(&mut self, new_path: &str) -> anyhow::Result<()> {
+    pub(super) fn rename_selected_group(
+        &mut self,
+        new_path: &str,
+        directory: Option<String>,
+    ) -> anyhow::Result<()> {
         let Some(old_path) = self.selected_group.clone() else {
             bail!("No group selected");
         };
 
         let new_path = new_path.trim();
         if old_path == new_path {
-            return Ok(());
+            return self.apply_group_updates(&old_path, new_path, directory.as_deref());
         }
 
         validate_group_path(new_path)?;
@@ -204,7 +208,7 @@ impl HomeView {
         }
 
         if self.group_tree.group_exists(new_path) {
-            self.pending_group_rename = Some((old_path.clone(), new_path.to_string()));
+            self.pending_group_rename = Some((old_path.clone(), new_path.to_string(), directory));
             let message = format!("Group '{new_path}' already exists. Merge into it?");
             self.confirm_dialog = Some(crate::tui::dialogs::ConfirmDialog::new(
                 "Merge Groups",
@@ -214,15 +218,15 @@ impl HomeView {
             return Ok(());
         }
 
-        self.apply_group_rename(&old_path, new_path)
+        self.apply_group_updates(&old_path, new_path, directory.as_deref())
     }
 
     pub(super) fn confirm_pending_group_rename(&mut self) -> anyhow::Result<()> {
-        let Some((old_path, new_path)) = self.pending_group_rename.take() else {
+        let Some((old_path, new_path, directory)) = self.pending_group_rename.take() else {
             bail!("No group rename is pending confirmation");
         };
 
-        self.apply_group_rename(&old_path, &new_path)
+        self.apply_group_updates(&old_path, &new_path, directory.as_deref())
     }
 
     pub(super) fn rename_selected(
@@ -341,13 +345,25 @@ impl HomeView {
         self.pending_status_refresh = false;
     }
 
-    fn apply_group_rename(&mut self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
-        self.group_tree.rename_group(old_path, new_path)?;
+    fn apply_group_updates(
+        &mut self,
+        old_path: &str,
+        new_path: &str,
+        directory: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if old_path != new_path {
+            self.group_tree.rename_group(old_path, new_path)?;
 
-        for instance in &mut self.instances {
-            if let Some(remapped) = remap_group_path(&instance.group_path, old_path, new_path) {
-                instance.group_path = remapped;
+            for instance in &mut self.instances {
+                if let Some(remapped) = remap_group_path(&instance.group_path, old_path, new_path) {
+                    instance.group_path = remapped;
+                }
             }
+        }
+
+        match directory {
+            Some(directory) => self.group_tree.set_default_directory(new_path, directory),
+            None => self.group_tree.clear_default_directory(new_path),
         }
 
         self.groups = self.group_tree.get_all_groups();
