@@ -615,10 +615,14 @@ impl App {
         // For multi-pane sessions the is_pane_running_shell check is unreliable:
         // user-created shell panes (Ctrl+B %) are legitimate and should not
         // trigger a restart. Only restart when the agent pane itself is dead.
+        // Also trust hook status over shell detection (wrapper scripts like
+        // Devbox run agents via shell, making is_pane_running_shell unreliable).
+        let hook_tracked = crate::hooks::read_hook_status(&instance.id).is_some();
         let needs_restart = !is_starting
             && (!session_exists
                 || tmux_session.is_pane_dead()
                 || (!multi_pane
+                    && !hook_tracked
                     && !instance.expects_shell()
                     && tmux_session.is_pane_running_shell()));
 

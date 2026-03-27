@@ -835,7 +835,6 @@ impl Instance {
             return;
         }
 
-        // Skip expensive checks for recently errored sessions
         if self.status == Status::Error {
             if let Some(last_check) = self.last_error_check {
                 if last_check.elapsed().as_secs() < 30 {
@@ -844,7 +843,6 @@ impl Instance {
             }
         }
 
-        // Grace period for starting sessions
         if let Some(start_time) = self.last_start_time {
             if start_time.elapsed().as_secs() < 3 {
                 self.status = Status::Starting;
@@ -1080,6 +1078,15 @@ fn generate_id() -> String {
 
 /// Format an environment variable assignment as a shell-safe command prefix.
 ///
+/// Uses `shell_escape` (single-quote escaping) so the value is preserved
+/// verbatim when parsed by the inner `bash -c '...'` shell created by
+/// `wrap_command_ignore_suspend`.
+#[cfg(test)]
+fn format_env_var_prefix(key: &str, value: &str, cmd: &str) -> String {
+    let escaped = shell_escape(value);
+    format!("{}={} {}", key, escaped, cmd)
+}
+
 /// Wrap a command to disable Ctrl-Z (SIGTSTP) suspension.
 ///
 /// When running agents directly as tmux session commands (without a parent shell),
@@ -1193,6 +1200,30 @@ mod tests {
         inst.yolo_mode = true;
         assert!(inst.is_yolo_mode());
         assert!(!inst.is_sandboxed());
+    }
+
+    #[test]
+    fn test_yolo_envvar_command_is_quoted() {
+        // EnvVar values containing JSON must be shell-escaped to prevent
+        // the inner bash from expanding special characters ({, *, ").
+        let result = format_env_var_prefix("OPENCODE_PERMISSION", r#"{"*":"allow"}"#, "opencode");
+        assert_eq!(result, r#"OPENCODE_PERMISSION='{"*":"allow"}' opencode"#);
+    }
+
+    #[test]
+    fn test_yolo_envvar_survives_suspend_wrapper() {
+        // The full chain: format_env_var_prefix -> wrap_command_ignore_suspend
+        // must preserve the JSON value through both quoting layers.
+        // Single quotes from shell_escape are escaped by wrap_command_ignore_suspend
+        // via the '\'' technique, which correctly round-trips through the shell.
+        let cmd = format_env_var_prefix("OPENCODE_PERMISSION", r#"{"*":"allow"}"#, "opencode");
+        let wrapped = wrap_command_ignore_suspend(&cmd);
+        // The inner single quotes from shell_escape become '\'' in the outer wrapper
+        assert!(
+            wrapped.contains(r#"OPENCODE_PERMISSION='\''{"*":"allow"}'\'' opencode"#),
+            "wrapped command should contain the escaped env var assignment: {}",
+            wrapped,
+        );
     }
 
     // Additional tests for is_sandboxed
