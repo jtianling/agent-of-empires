@@ -78,11 +78,11 @@ Each session in the notification bar SHALL be displayed as `[index] icon title` 
 - **THEN** the system SHALL switch to the "myapp" session
 
 ### Requirement: Notification text uses distinct color
-The notification section SHALL use a visually distinct color (yellow/colour220) to differentiate from the dim hint text (colour245).
+The notification section SHALL use theme-consistent colors that align with the AoE TUI Empire palette. Session index uses `#22c55e` (running green), session title uses `#cbd5e1` (text cool gray), hint text uses `#94a3b8` (hint light slate), notification/waiting text uses `#fbbf24` (waiting amber), and from-title text uses `#64748b` (dimmed slate). Colors SHALL be specified using tmux hex color syntax (`#[fg=#rrggbb]`).
 
 #### Scenario: Notification visible
 - **WHEN** notification text is displayed
-- **THEN** it renders in colour220 (yellow), contrasting with the colour245 (grey) of "Ctrl+b d detach"
+- **THEN** it renders in `#fbbf24` (amber), contrasting with the `#94a3b8` (light slate) of "Ctrl+b d detach"
 
 ### Requirement: Background notification monitor daemon
 A background daemon process SHALL poll session statuses and update each session's `@aoe_waiting` tmux user option. This enables real-time notification updates even when the TUI is blocked (user attached to a session). The monitor SHALL NOT set up or clean up any tmux keybindings. The monitor SHALL NOT write `@aoe_notification_hint`, `@aoe_notify_target_*`, or `@aoe_notify_instance_*` session options.

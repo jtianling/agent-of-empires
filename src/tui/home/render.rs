@@ -128,7 +128,7 @@ impl HomeView {
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let title = format!(" Agent of Empires [{}] ", self.storage.profile());
+        let title = format!(" AoE [{}] ", self.storage.profile());
         let (border_color, title_color) = (theme.border, theme.title);
         let block = Block::default()
             .borders(Borders::ALL)

@@ -273,12 +273,23 @@ fn visible_notification_entries<'a>(
         .collect()
 }
 
+/// Returns a tmux color code matching the TUI theme for a given session status.
+fn status_tmux_color(status: Status) -> &'static str {
+    match status {
+        Status::Waiting => "#[fg=#fbbf24]", // amber - theme.waiting
+        Status::Running => "#[fg=#22c55e]", // green - theme.running
+        Status::Idle => "#[fg=#64748b]",    // slate - theme.idle
+        _ => "#[fg=#64748b]",               // slate - fallback
+    }
+}
+
 fn format_notification_text(entries: &[NotificationEntry], current_session: &str) -> String {
     visible_notification_entries(entries, current_session)
         .into_iter()
         .map(|entry| {
             format!(
-                "[{}] {} {}",
+                "{}[{}] {} {}",
+                status_tmux_color(entry.status),
                 entry.real_index,
                 status_icon(entry.status),
                 entry.title
@@ -744,7 +755,7 @@ mod tests {
 
         assert_eq!(
             format_notification_text(&entries, "aoe_missing"),
-            "[1] \u{25d0} alpha [2] \u{25cb} beta [5] \u{25d0} gamma"
+            "#[fg=#fbbf24][1] \u{25d0} alpha #[fg=#64748b][2] \u{25cb} beta #[fg=#fbbf24][5] \u{25d0} gamma"
         );
     }
 
@@ -767,7 +778,7 @@ mod tests {
 
         assert_eq!(
             format_notification_text(&entries, "aoe_alpha_1"),
-            "[5] \u{25cb} beta"
+            "#[fg=#64748b][5] \u{25cb} beta"
         );
     }
 

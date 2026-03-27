@@ -15,11 +15,11 @@ const CODEX_TITLE_MONITOR_TITLE_OPTION: &str = "@aoe_codex_title_monitor_title";
 const CODEX_TITLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_WAITING_TITLE_PREFIX: &str = "\u{270b} ";
 const STATUS_LEFT_FORMAT: &str = concat!(
-    " #[fg=colour46,bold]#{@aoe_index}",
-    "#[fg=colour252,nobold] #{@aoe_title}",
-    "#{?#{@aoe_from_title},  #[fg=colour245]from: #{@aoe_from_title}#[fg=colour252],}",
-    "  #[fg=colour245]Ctrl+b d detach",
-    "#{?#{@aoe_waiting}, | #[fg=colour220]#{@aoe_waiting}#[fg=colour245],}"
+    " #[fg=#22c55e,bold]#{@aoe_index}",
+    "#[fg=#cbd5e1,nobold] #{@aoe_title}",
+    "#{?#{@aoe_from_title},  #[fg=#64748b]from: #{@aoe_from_title}#[fg=#cbd5e1],}",
+    "  #[fg=#94a3b8]Ctrl+b d detach",
+    "#{?#{@aoe_waiting}, | #{@aoe_waiting}#[fg=#94a3b8],}"
 );
 
 use crate::tui::styles::Theme;
@@ -68,16 +68,16 @@ pub fn apply_status_bar(
     }
 
     let status_format = concat!(
-        "#{?#{@aoe_branch}, #[fg=colour48]#{@aoe_branch}#[fg=colour252],}",
-        "#{?#{@aoe_sandbox},#{?#{@aoe_branch}, #[fg=colour252]|,} #[fg=colour214]#{@aoe_sandbox}#[fg=colour252],}",
-        "#{?#{@aoe_branch}, #[fg=colour252]| %H:%M ,#{?#{@aoe_sandbox}, #[fg=colour252]| %H:%M , %H:%M }}"
+        "#{?#{@aoe_branch}, #[fg=#0d9488]#{@aoe_branch}#[fg=#cbd5e1],}",
+        "#{?#{@aoe_sandbox},#{?#{@aoe_branch}, #[fg=#cbd5e1]|,} #[fg=#94a3b8]#{@aoe_sandbox}#[fg=#cbd5e1],}",
+        "#{?#{@aoe_branch}, #[fg=#cbd5e1]| %H:%M ,#{?#{@aoe_sandbox}, #[fg=#cbd5e1]| %H:%M , %H:%M }}"
     );
 
     set_session_option(session_name, "status-right", status_format)?;
     set_session_option(session_name, "status-right-length", "80")?;
 
-    // Dark background with light text - matches aoe phosphor theme
-    set_session_option(session_name, "status-style", "bg=colour235,fg=colour252")?;
+    // Dark background with light text - matches aoe Empire theme
+    set_session_option(session_name, "status-style", "bg=#0f172a,fg=#cbd5e1")?;
     set_session_option(session_name, "status-left", STATUS_LEFT_FORMAT)?;
     set_session_option(session_name, "status-left-length", "220")?;
     set_window_option(session_name, "window-status-format", "")?;
@@ -478,7 +478,8 @@ mod tests {
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_from_title}"));
         assert!(STATUS_LEFT_FORMAT.contains("Ctrl+b d detach"));
         assert!(STATUS_LEFT_FORMAT.contains("#{@aoe_waiting}"));
-        assert!(STATUS_LEFT_FORMAT.contains("colour220"));
+        // Per-entry status colors are now embedded in @aoe_waiting by the notification monitor
+        assert!(STATUS_LEFT_FORMAT.contains("#94a3b8"));
         assert!(!STATUS_LEFT_FORMAT.contains("@aoe_notification_hint"));
     }
 
