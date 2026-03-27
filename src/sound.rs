@@ -5,7 +5,7 @@
 //!   - Linux: ~/.config/agent-of-empires/sounds/
 //!   - macOS: ~/.agent-of-empires/sounds/
 //!
-//! Expected filenames (any .wav/.ogg file works):
+//! Expected filenames (any .wav/.ogg/.aiff file works):
 //!   wololo.wav, rogan.wav, allhail.wav, monk.wav,
 //!   alarm.wav, start.wav
 
@@ -188,7 +188,10 @@ pub fn list_available_sounds() -> Vec<String> {
     for entry in entries.flatten() {
         let path = entry.path();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if ext.eq_ignore_ascii_case("wav") || ext.eq_ignore_ascii_case("ogg") {
+            if ext.eq_ignore_ascii_case("wav")
+                || ext.eq_ignore_ascii_case("ogg")
+                || ext.eq_ignore_ascii_case("aiff")
+            {
                 if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
                     sounds.push(filename.to_string());
                 }
@@ -219,7 +222,7 @@ pub fn validate_sound_exists(filename: &str) -> Result<(), String> {
     let available = list_available_sounds();
     if available.is_empty() {
         return Err(
-            "No sounds installed. Run 'aoe sounds install' or add your own .wav/.ogg files."
+            "No sounds installed. Run 'aoe sounds install' or add your own .wav/.ogg/.aiff files."
                 .to_string(),
         );
     }
@@ -246,12 +249,15 @@ fn get_audio_command(path: &str) -> Result<(&'static str, Vec<&str>), std::io::E
             .and_then(|e| e.to_str())
             .unwrap_or("wav");
 
-        if ext.eq_ignore_ascii_case("ogg") {
-            // Check if paplay is available
+        if ext.eq_ignore_ascii_case("ogg") || ext.eq_ignore_ascii_case("aiff") {
+            // ogg/aiff need paplay; aplay only handles raw PCM/WAV
             if which_command("paplay").is_ok() {
                 Ok(("paplay", vec![path]))
             } else if which_command("aplay").is_ok() {
-                tracing::warn!("paplay not found, using aplay (may not support .ogg files)");
+                tracing::warn!(
+                    "paplay not found, using aplay (may not support .{} files)",
+                    ext
+                );
                 Ok(("aplay", vec![path]))
             } else {
                 Err(std::io::Error::new(
