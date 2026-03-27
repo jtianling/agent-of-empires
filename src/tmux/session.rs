@@ -156,12 +156,10 @@ impl Session {
         Ok(())
     }
 
-    pub fn attach(&self, profile: &str) -> Result<()> {
+    pub fn attach(&self) -> Result<()> {
         if !self.exists() {
             bail!("Session does not exist: {}", self.name);
         }
-
-        super::utils::setup_session_cycle_bindings(profile);
 
         let status = Command::new("tmux")
             .args(["attach-session", "-t", &self.name])

@@ -749,7 +749,8 @@ impl App {
             .mutate_instance(session_id, |inst| inst.acknowledged = true);
 
         let profile = self.home.storage.profile().to_string();
-        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach(&profile))?;
+        crate::tmux::utils::setup_session_cycle_bindings(&profile);
+        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach())?;
         reapply_tui_title(terminal, self.home.storage.profile());
 
         self.needs_redraw = true;

@@ -310,129 +310,76 @@ where
 /// Binds root-table session cycling plus prefix-table back toggle and number
 /// jump keys for AoE-managed tmux sessions.
 pub fn setup_session_cycle_bindings(profile: &str) {
-    tag_sessions_with_profile(profile);
+    let mut lines = Vec::new();
 
+    // Profile tagging
+    collect_tag_sessions_with_profile(profile, &mut lines);
+
+    // Base bindings
     let switch_back = back_toggle_run_shell_cmd(profile);
     let (switch_next, switch_prev) = session_cycle_run_shell_cmds(profile);
     let guarded_next = format!("run-shell {}", shell_escape(&switch_next));
     let guarded_prev = format!("run-shell {}", shell_escape(&switch_prev));
-    Command::new("tmux")
-        .args(["bind-key", "b", "run-shell", &switch_back])
-        .output()
-        .ok();
-    Command::new("tmux")
-        .args([
-            "bind-key",
-            "-T",
-            "root",
-            "C-.",
-            "if-shell",
-            "-F",
-            "#{m:aoe_*,#{session_name}}",
-        ])
-        .arg(&guarded_next)
-        .arg(CTRL_PERIOD_CSI_U_PASSTHROUGH)
-        .output()
-        .ok();
-    Command::new("tmux")
-        .args([
-            "bind-key",
-            "-T",
-            "root",
-            "C-,",
-            "if-shell",
-            "-F",
-            "#{m:aoe_*,#{session_name}}",
-        ])
-        .arg(&guarded_prev)
-        .arg(CTRL_COMMA_CSI_U_PASSTHROUGH)
-        .output()
-        .ok();
-    for (key, dir) in [("h", "-L"), ("j", "-D"), ("k", "-U"), ("l", "-R")] {
-        Command::new("tmux")
-            .args(["bind-key", key, "select-pane", dir])
-            .output()
-            .ok();
-    }
-    Command::new("tmux")
-        .args([
-            "bind-key",
-            "-T",
-            "root",
-            "C-\\;",
-            "select-pane",
-            "-t",
-            ":.+",
-        ])
-        .output()
-        .ok();
-    // Ctrl+q in root table: detach if in aoe_* session, pass through otherwise.
-    Command::new("tmux")
-        .args([
-            "bind-key",
-            "-T",
-            "root",
-            "C-q",
-            "run-shell",
-            &root_ctrl_q_run_shell_cmd(),
-        ])
-        .output()
-        .ok();
 
-    // Number jump: Ctrl+b 1-9 enters aoe-N key tables for two-phase digit input
-    setup_number_jump_bindings(profile);
+    lines.push(format!(
+        "bind-key b run-shell {}",
+        shell_escape(&switch_back)
+    ));
+    lines.push(format!(
+        "bind-key -T root C-. if-shell -F '#{{m:aoe_*,#{{session_name}}}}' {} {}",
+        shell_escape(&guarded_next),
+        shell_escape(CTRL_PERIOD_CSI_U_PASSTHROUGH)
+    ));
+    lines.push(format!(
+        "bind-key -T root C-, if-shell -F '#{{m:aoe_*,#{{session_name}}}}' {} {}",
+        shell_escape(&guarded_prev),
+        shell_escape(CTRL_COMMA_CSI_U_PASSTHROUGH)
+    ));
+    for (key, dir) in [("h", "-L"), ("j", "-D"), ("k", "-U"), ("l", "-R")] {
+        lines.push(format!("bind-key {} select-pane {}", key, dir));
+    }
+    lines.push("bind-key -T root C-\\; select-pane -t :.+".to_string());
+    lines.push(format!(
+        "bind-key -T root C-q run-shell {}",
+        shell_escape(&root_ctrl_q_run_shell_cmd())
+    ));
+
+    // Number jump key tables
+    collect_number_jump_bindings(profile, &mut lines);
+
+    source_file_batch(&lines);
 }
 
-fn setup_number_jump_bindings(profile: &str) {
+fn collect_number_jump_bindings(profile: &str, lines: &mut Vec<String>) {
     for first_digit in 1..=9u8 {
         let table_name = format!("aoe-{}", first_digit);
 
-        // Bind Ctrl+b <digit> -> switch to aoe-N key table
-        Command::new("tmux")
-            .args([
-                "bind-key",
-                &first_digit.to_string(),
-                "switch-client",
-                "-T",
-                &table_name,
-            ])
-            .output()
-            .ok();
+        lines.push(format!(
+            "bind-key {} switch-client -T {}",
+            first_digit, table_name
+        ));
 
-        // In aoe-N table: Space confirms single-digit jump
         let single_cmd = index_jump_run_shell_cmd(first_digit as usize, profile);
-        Command::new("tmux")
-            .args([
-                "bind-key",
-                "-T",
-                &table_name,
-                "Space",
-                "run-shell",
-                &single_cmd,
-            ])
-            .output()
-            .ok();
+        lines.push(format!(
+            "bind-key -T {} Space run-shell {}",
+            table_name,
+            shell_escape(&single_cmd)
+        ));
 
-        // In aoe-N table: 0-9 auto-confirms two-digit jump
         for second_digit in 0..=9u8 {
             let two_digit_index = (first_digit as usize) * 10 + (second_digit as usize);
             let two_digit_cmd = index_jump_run_shell_cmd(two_digit_index, profile);
-            Command::new("tmux")
-                .args([
-                    "bind-key",
-                    "-T",
-                    &table_name,
-                    &second_digit.to_string(),
-                    "run-shell",
-                    &two_digit_cmd,
-                ])
-                .output()
-                .ok();
+            lines.push(format!(
+                "bind-key -T {} {} run-shell {}",
+                table_name,
+                second_digit,
+                shell_escape(&two_digit_cmd)
+            ));
         }
     }
 }
 
-fn tag_sessions_with_profile(profile: &str) {
+fn collect_tag_sessions_with_profile(profile: &str, lines: &mut Vec<String>) {
     let Ok(storage) = crate::session::Storage::new(profile) else {
         return;
     };
@@ -441,45 +388,61 @@ fn tag_sessions_with_profile(profile: &str) {
     };
     for instance in &instances {
         let name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
-        Command::new("tmux")
-            .args(["set-option", "-t", &name, AOE_PROFILE_OPTION, profile])
-            .output()
-            .ok();
+        lines.push(format!(
+            "set-option -qt {} {} {}",
+            shell_escape(&name),
+            AOE_PROFILE_OPTION,
+            shell_escape(profile)
+        ));
+    }
+}
+
+/// Write all tmux commands to a temp file and execute via `tmux source-file`.
+fn source_file_batch(lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let content = lines.join("\n");
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("aoe-tmux-{}.conf", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp_path, &content) {
+        tracing::warn!("Failed to write tmux commands to temp file: {}", e);
+        return;
+    }
+    let output = Command::new("tmux")
+        .args(["source-file"])
+        .arg(&tmp_path)
+        .output();
+    let _ = std::fs::remove_file(&tmp_path);
+    match output {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::warn!("tmux source-file failed: {}", stderr.trim());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to run tmux source-file: {}", e);
+        }
+        _ => {}
     }
 }
 
 pub fn cleanup_session_cycle_bindings() {
+    let mut lines = Vec::new();
     for key in ["b", "h", "j", "k", "l"] {
-        Command::new("tmux").args(["unbind-key", key]).output().ok();
+        lines.push(format!("unbind-key {}", key));
     }
     for key in ["C-\\;", "C-q", "C-,", "C-."] {
-        Command::new("tmux")
-            .args(["unbind-key", "-T", "root", key])
-            .output()
-            .ok();
+        lines.push(format!("unbind-key -T root {}", key));
     }
-    cleanup_number_jump_bindings();
-}
-
-fn cleanup_number_jump_bindings() {
     for digit in 1..=9u8 {
-        Command::new("tmux")
-            .args(["unbind-key", &digit.to_string()])
-            .output()
-            .ok();
-
+        lines.push(format!("unbind-key {}", digit));
         let table_name = format!("aoe-{}", digit);
-        Command::new("tmux")
-            .args(["unbind-key", "-T", &table_name, "Space"])
-            .output()
-            .ok();
+        lines.push(format!("unbind-key -T {} Space", table_name));
         for second in 0..=9u8 {
-            Command::new("tmux")
-                .args(["unbind-key", "-T", &table_name, &second.to_string()])
-                .output()
-                .ok();
+            lines.push(format!("unbind-key -T {} {}", table_name, second));
         }
     }
+    source_file_batch(&lines);
 }
 
 pub(crate) fn shell_escape(s: &str) -> String {

@@ -227,7 +227,8 @@ async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     }
 
     inst.refresh_agent_tmux_options(profile);
-    tmux_session.attach(profile)?;
+    crate::tmux::utils::setup_session_cycle_bindings(profile);
+    tmux_session.attach()?;
     Ok(())
 }
 
