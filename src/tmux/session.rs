@@ -269,6 +269,45 @@ impl Session {
         Ok(())
     }
 
+    /// Send a message to the agent, handling multi-line text with Shift+Enter
+    /// and pressing Enter to submit.
+    pub fn send_keys(&self, text: &str) -> Result<()> {
+        if !self.exists() {
+            bail!("Session does not exist: {}", self.name);
+        }
+
+        let target = format!("{}:^.0", self.name);
+
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            Self::tmux_send(&target, &["-l", line])?;
+            if i < lines.len() - 1 {
+                // ESC + CR: what terminals send for Shift+Enter (inserts newline)
+                Self::tmux_send(&target, &["-H", "1b", "0d"])?;
+            }
+        }
+
+        // Enter to submit
+        Self::tmux_send(&target, &["Enter"])?;
+
+        Ok(())
+    }
+
+    fn tmux_send(target: &str, args: &[&str]) -> Result<()> {
+        let output = Command::new("tmux")
+            .arg("send-keys")
+            .args(["-t", target])
+            .args(args)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to send keys: {}", stderr);
+        }
+
+        Ok(())
+    }
+
     pub fn send_keys_to_agent_pane(&self, keys: &[&str]) -> Result<()> {
         if keys.is_empty() {
             return Ok(());

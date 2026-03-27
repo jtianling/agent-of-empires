@@ -116,6 +116,9 @@ pub struct HomeView {
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
     pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,
+    pub(super) send_message_dialog: Option<super::dialogs::SendMessageDialog>,
+    /// Session to receive the message from the send dialog
+    pub(super) pending_send_session: Option<String>,
     /// Session to attach after the custom instruction warning dialog is dismissed
     pub(super) pending_attach_after_warning: Option<String>,
     /// Session to stop after the confirmation dialog is accepted
@@ -250,6 +253,8 @@ impl HomeView {
             changelog_dialog: None,
             info_dialog: None,
             profile_picker_dialog: None,
+            send_message_dialog: None,
+            pending_send_session: None,
             pending_attach_after_warning: None,
             pending_stop_session: None,
             pending_group_rename: None,
@@ -657,6 +662,7 @@ impl HomeView {
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
             || self.profile_picker_dialog.is_some()
+            || self.send_message_dialog.is_some()
             || self.settings_view.is_some()
             || self.diff_view.is_some()
     }

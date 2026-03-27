@@ -39,6 +39,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("d", "Delete session/group"),
                 ("r", "Rename session"),
                 ("J/K", "Move item (Manual sort)"),
+                ("m", "Send message to agent"),
             ],
         ),
         (

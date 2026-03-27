@@ -121,6 +121,10 @@ impl HomeView {
         if let Some(dialog) = &self.profile_picker_dialog {
             dialog.render(frame, area, theme);
         }
+
+        if let Some(dialog) = &self.send_message_dialog {
+            dialog.render(frame, area, theme);
+        }
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -355,14 +359,16 @@ impl HomeView {
     pub(super) fn refresh_preview_cache_if_needed(&mut self, width: u16, height: u16) -> bool {
         const PREVIEW_REFRESH_MS: u128 = 250; // Refresh preview 4x/second max
 
-        let needs_refresh = match &self.selected_session {
-            Some(id) => {
-                self.preview_cache.session_id.as_ref() != Some(id)
-                    || self.preview_cache.dimensions != (width, height)
-                    || self.preview_cache.last_refresh.elapsed().as_millis() > PREVIEW_REFRESH_MS
-            }
+        let session_changed = match &self.selected_session {
+            Some(id) => self.preview_cache.session_id.as_ref() != Some(id),
             None => false,
         };
+        let dims_changed = self.preview_cache.dimensions != (width, height);
+        let timer_expired =
+            self.preview_cache.last_refresh.elapsed().as_millis() > PREVIEW_REFRESH_MS;
+
+        let needs_refresh =
+            self.selected_session.is_some() && (session_changed || dims_changed || timer_expired);
 
         if needs_refresh {
             if let Some(id) = &self.selected_session {
@@ -445,6 +451,14 @@ impl HomeView {
             Span::styled(" n", key_style),
             Span::styled(" New ", desc_style),
         ]);
+
+        if self.selected_session.is_some() {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" m", key_style),
+                Span::styled(" Msg ", desc_style),
+            ]);
+        }
 
         if !self.flat_items.is_empty() {
             spans.extend([
