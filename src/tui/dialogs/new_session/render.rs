@@ -91,6 +91,7 @@ impl NewSessionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(" New Session ")
             .title_style(Style::default().fg(theme.title).bold());
@@ -664,6 +665,7 @@ impl NewSessionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(" Sandbox Configuration ")
             .title_style(Style::default().fg(theme.title).bold());
@@ -748,6 +750,7 @@ impl NewSessionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(title)
             .title_style(Style::default().fg(theme.title).bold());
@@ -847,6 +850,7 @@ impl NewSessionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(title)
             .title_style(Style::default().fg(theme.title).bold());
@@ -1222,6 +1226,7 @@ impl NewSessionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border))
             .title(" New Session Help ")
             .title_style(Style::default().fg(theme.title).bold());
@@ -1306,6 +1311,7 @@ impl NewSessionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(title)
             .title_style(Style::default().fg(theme.title).bold());

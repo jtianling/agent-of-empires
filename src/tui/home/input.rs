@@ -11,7 +11,7 @@ use crate::tui::app::Action;
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, GroupRenameDialog,
     HookTrustAction, InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction,
-    RenameDialog, SendMessageDialog, UnifiedDeleteDialog,
+    RenameDialog, RenameMode, SendMessageDialog, UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
@@ -40,7 +40,7 @@ impl HomeView {
                         // Revert theme to saved config (undo any preview)
                         if let Ok(config) = resolve_config(self.storage.profile()) {
                             let theme_name = if config.theme.name.is_empty() {
-                                "phosphor".to_string()
+                                "empire".to_string()
                             } else {
                                 config.theme.name
                             };
@@ -65,7 +65,7 @@ impl HomeView {
                     // Reload theme from saved config
                     if let Ok(config) = resolve_config(self.storage.profile()) {
                         let theme_name = if config.theme.name.is_empty() {
-                            "phosphor".to_string()
+                            "empire".to_string()
                         } else {
                             config.theme.name
                         };
@@ -326,6 +326,7 @@ impl HomeView {
         }
 
         if let Some(dialog) = &mut self.rename_dialog {
+            let mode = dialog.mode();
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
                 DialogResult::Cancel => {
@@ -333,12 +334,23 @@ impl HomeView {
                 }
                 DialogResult::Submit(data) => {
                     self.rename_dialog = None;
-                    if let Err(e) = self.rename_selected(
-                        &data.title,
-                        data.group.as_deref(),
-                        data.profile.as_deref(),
-                    ) {
-                        tracing::error!("Failed to rename session: {}", e);
+                    match mode {
+                        RenameMode::Session => {
+                            if let Err(e) = self.rename_selected(
+                                &data.title,
+                                data.group.as_deref(),
+                                data.profile.as_deref(),
+                            ) {
+                                tracing::error!("Failed to rename session: {}", e);
+                            }
+                        }
+                        RenameMode::Group => {
+                            if let Some(new_path) = data.group.as_deref() {
+                                if let Err(e) = self.rename_selected_group(new_path, None) {
+                                    tracing::error!("Failed to rename group: {}", e);
+                                }
+                            }
+                        }
                     }
                 }
             }

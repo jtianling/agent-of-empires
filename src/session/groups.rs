@@ -1528,4 +1528,78 @@ mod tests {
         assert!(!group.collapsed);
         assert_eq!(group.default_directory, None);
     }
+
+    #[test]
+    fn test_rename_group_simple() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "projects").unwrap();
+
+        assert!(!tree.group_exists("work"));
+        assert!(tree.group_exists("projects"));
+        assert_eq!(
+            tree.groups_by_path.get("projects").unwrap().name,
+            "projects"
+        );
+    }
+
+    #[test]
+    fn test_rename_group_with_children() {
+        let mut inst1 = Instance::new("test1", "/tmp/1");
+        inst1.group_path = "work".to_string();
+        let mut inst2 = Instance::new("test2", "/tmp/2");
+        inst2.group_path = "work/frontend".to_string();
+        let instances = vec![inst1, inst2];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "projects").unwrap();
+
+        assert!(!tree.group_exists("work"));
+        assert!(!tree.group_exists("work/frontend"));
+        assert!(tree.group_exists("projects"));
+        assert!(tree.group_exists("projects/frontend"));
+    }
+
+    #[test]
+    fn test_rename_group_merge_into_existing() {
+        let mut inst1 = Instance::new("test1", "/tmp/1");
+        inst1.group_path = "old".to_string();
+        let mut inst2 = Instance::new("test2", "/tmp/2");
+        inst2.group_path = "existing".to_string();
+        let instances = vec![inst1, inst2];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("old", "existing").unwrap();
+
+        assert!(!tree.group_exists("old"));
+        assert!(tree.group_exists("existing"));
+    }
+
+    #[test]
+    fn test_rename_group_noop_same_path() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "work").unwrap();
+
+        assert!(tree.group_exists("work"));
+    }
+
+    #[test]
+    fn test_rename_group_noop_empty_target() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        // Empty target should fail validation
+        assert!(tree.rename_group("work", "").is_err());
+
+        assert!(tree.group_exists("work"));
+    }
 }

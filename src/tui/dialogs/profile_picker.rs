@@ -224,6 +224,7 @@ impl ProfilePickerDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(" Profiles ")
             .title_style(Style::default().fg(theme.title).bold());
@@ -338,6 +339,7 @@ impl ProfilePickerDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(" New Profile ")
             .title_style(Style::default().fg(theme.title).bold());
@@ -401,6 +403,7 @@ impl ProfilePickerDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.error))
             .title(" Delete Profile ")
             .title_style(Style::default().fg(theme.error).bold());
