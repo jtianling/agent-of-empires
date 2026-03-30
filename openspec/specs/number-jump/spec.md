@@ -98,21 +98,28 @@ When attached to an AoE-managed tmux session, `Ctrl+b 1` through `Ctrl+b 9` SHAL
 - **THEN** no session switch SHALL occur
 
 ### Requirement: Number jump keybinding lifecycle
-The number jump tmux bindings (1-9 in prefix table, aoe-1 through aoe-9 key tables) SHALL follow the same lifecycle as existing n/p/h/j/k/l bindings: set up on attach, cleaned up on detach/exit.
+The number jump tmux bindings (1-9 in prefix table, aoe-1 through aoe-9 key tables) SHALL follow the same lifecycle as existing n/p/h/j/k/l bindings: set up before attach, cleaned up on detach/exit.
 
-#### Scenario: Bindings set in both nested and non-nested modes
+All tmux binding commands (bind-key, set-option for profile tagging, unbind-key for cleanup) SHALL be batched into a single tmux invocation using `tmux source-file` with a temporary file, rather than individual subprocess calls.
+
+#### Scenario: Bindings set up via single tmux invocation
 - **WHEN** `setup_session_cycle_bindings()` is called
-- **THEN** keys 1-9 SHALL be bound in the prefix table
-- **AND** key tables aoe-1 through aoe-9 SHALL be created with Space + digit bindings
+- **THEN** all bind-key commands (session cycling, number jump tables, pane navigation, back toggle, detach) SHALL be written to a temporary file
+- **AND** `tmux source-file <tmpfile>` SHALL be called exactly once
+- **AND** no individual `Command::new("tmux").args(["bind-key"...])` calls SHALL be made
+
+#### Scenario: Profile tagging batched with bindings
+- **WHEN** `setup_session_cycle_bindings()` is called
+- **THEN** `set-option -t <session> @aoe_profile <profile>` commands for all sessions SHALL be included in the same source-file batch
+
+#### Scenario: Cleanup uses batched unbind
+- **WHEN** `cleanup_session_cycle_bindings()` is called
+- **THEN** all unbind-key commands SHALL be batched into a single `tmux source-file` invocation
 
 #### Scenario: Bindings cleaned up on detach
 - **WHEN** `cleanup_session_cycle_bindings()` is called
 - **THEN** keys 1-9 SHALL be unbound from the prefix table
 - **AND** all aoe-N key table bindings SHALL be unbound
-
-#### Scenario: Nested mode overrides use correct switch command
-- **WHEN** `apply_managed_session_bindings()` is called in nested mode
-- **THEN** the 1-9 bindings SHALL use the same profile-aware switch command as the n/p bindings
 
 ### Requirement: CLI switch-session supports --index parameter
 The `aoe tmux switch-session` command SHALL accept an `--index N` parameter (1-based) as an alternative to `--direction`. The index resolves against the global ordered session list computed from the fully-expanded group tree (same order as stable TUI indices), not scoped to the current group. Upon successful switch, the system SHALL set `@aoe_index` on the target session to its 1-based position in the ordered list.

@@ -53,18 +53,20 @@ Running sessions in the notification bar SHALL use ● (`U+25CF`) as their statu
 - **THEN** it is displayed as `[index] ● title`
 
 ### Requirement: Notification entries sorted by session index
-Notification bar entries SHALL be sorted by session index (ascending), regardless of status. The index used for sorting SHALL be the stable `@aoe_index` from the fully-expanded group tree. The notification bar SHALL NOT use sequential renumbering.
+Notification bar entries SHALL be sorted by session index (ascending), regardless of status. The index used for sorting SHALL be the stable `@aoe_index` from the expanded group tree.
 
-#### Scenario: Mixed status sessions sorted by index
-- **WHEN** sessions with index 2 (Running), 3 (Waiting), and 5 (Idle) are all visible
-- **THEN** the notification shows `[2] ● run [3] ◐ wait [5] ○ idle` in index order
+#### Scenario: Mixed status sessions sorted by stable index
+- **WHEN** sessions with stable index 2 (Running), 3 (Waiting), and 7 (Idle) are all visible
+- **THEN** the notification shows `[2] ● run [3] ◐ wait [7] ○ idle` in index order
 
 ### Requirement: Notification format uses index and title
 Each session in the notification bar SHALL be displayed as `[index] icon title` where index is the session's real `@aoe_index` computed from the fully-expanded group tree. The index SHALL match the number used by `Ctrl+b <N>` jump keys. The notification bar SHALL NOT use sequential renumbering.
 
-#### Scenario: Multiple sessions displayed
-- **WHEN** sessions with index 2 ("api") and index 5 ("frontend") are both Waiting
+#### Scenario: Multiple sessions displayed with real indices
+- **WHEN** sessions with stable index 2 ("api") and stable index 5 ("frontend") are both Waiting
 - **THEN** the notification shows `[2] ◐ api [5] ◐ frontend`
+- **AND** pressing `Ctrl+b 2 Space` SHALL jump to "api"
+- **AND** pressing `Ctrl+b 5 Space` SHALL jump to "frontend"
 
 #### Scenario: Indices have gaps from filtered sessions
 - **WHEN** sessions with indices 1, 2, 3, 4, 5 exist
@@ -72,17 +74,32 @@ Each session in the notification bar SHALL be displayed as `[index] icon title` 
 - **THEN** the notification shows `[2] icon title2 [5] icon title5`
 - **AND** the indices 1, 3, 4 SHALL NOT appear (those sessions are not shown)
 
-#### Scenario: Notification index matches number-jump
+#### Scenario: Notification index matches Ctrl+b N
 - **WHEN** notification bar shows `[3] ◐ myapp`
 - **AND** the user presses `Ctrl+b 3 Space`
 - **THEN** the system SHALL switch to the "myapp" session
 
 ### Requirement: Notification text uses distinct color
-The notification section SHALL use theme-consistent colors that align with the AoE TUI Empire palette. Session index uses `#22c55e` (running green), session title uses `#cbd5e1` (text cool gray), hint text uses `#94a3b8` (hint light slate), notification/waiting text uses `#fbbf24` (waiting amber), and from-title text uses `#64748b` (dimmed slate). Colors SHALL be specified using tmux hex color syntax (`#[fg=#rrggbb]`).
+The notification section SHALL use theme-consistent colors that align with the AoE TUI Empire palette. Specifically:
+- Session index: `#22c55e` (theme `running` green)
+- Session title text: `#cbd5e1` (theme `text` cool gray)
+- Hint text (e.g., "Ctrl+b d detach"): `#94a3b8` (theme `hint` light slate)
+- Notification/waiting text: `#fbbf24` (theme `waiting` amber)
+- From-title text: `#64748b` (theme `dimmed` slate)
+
+These colors SHALL be specified using tmux hex color syntax (`#[fg=#rrggbb]`).
 
 #### Scenario: Notification visible
 - **WHEN** notification text is displayed
 - **THEN** it renders in `#fbbf24` (amber), contrasting with the `#94a3b8` (light slate) of "Ctrl+b d detach"
+
+#### Scenario: Session index color matches theme
+- **WHEN** a session index is displayed in the status bar
+- **THEN** it renders in `#22c55e` (green), matching the TUI running indicator color
+
+#### Scenario: Title text color matches theme
+- **WHEN** session title text is displayed in the status bar
+- **THEN** it renders in `#cbd5e1` (cool gray), matching the TUI text color
 
 ### Requirement: Background notification monitor daemon
 A background daemon process SHALL poll session statuses and update each session's `@aoe_waiting` tmux user option. This enables real-time notification updates even when the TUI is blocked (user attached to a session). The monitor SHALL NOT set up or clean up any tmux keybindings. The monitor SHALL NOT write `@aoe_notification_hint`, `@aoe_notify_target_*`, or `@aoe_notify_instance_*` session options.
