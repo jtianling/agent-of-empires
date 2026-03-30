@@ -70,6 +70,7 @@ fn test_session_has_worktree_info_after_creation() {
         main_repo_path: repo_dir.path().to_string_lossy().to_string(),
         managed_by_aoe: true,
         created_at: now,
+        cleanup_on_delete: true,
     });
 
     let info = instance.worktree_info.as_ref().unwrap();

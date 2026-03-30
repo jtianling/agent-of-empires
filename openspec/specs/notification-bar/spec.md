@@ -72,7 +72,7 @@ Each session in the notification bar SHALL be displayed as `[index] icon title` 
 - **THEN** the notification shows `[2] icon title2 [5] icon title5`
 - **AND** the indices 1, 3, 4 SHALL NOT appear (those sessions are not shown)
 
-#### Scenario: Notification index matches Ctrl+b N
+#### Scenario: Notification index matches number-jump
 - **WHEN** notification bar shows `[3] ◐ myapp`
 - **AND** the user presses `Ctrl+b 3 Space`
 - **THEN** the system SHALL switch to the "myapp" session
