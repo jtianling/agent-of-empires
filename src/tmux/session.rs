@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use super::{
     get_cached_pane_info, refresh_session_cache, session_exists_from_cache,
     utils::{
-        append_remain_on_exit_args, append_store_pane_id_args, get_agent_pane_id, is_pane_dead,
-        is_pane_running_shell,
+        append_remain_on_exit_args, append_store_pane_id_args, append_store_project_path_args,
+        get_agent_pane_id, is_pane_dead, is_pane_running_shell,
     },
     SESSION_PREFIX,
 };
@@ -78,6 +78,7 @@ impl Session {
         let mut args = build_create_args(&self.name, working_dir, command, size);
         append_remain_on_exit_args(&mut args, &self.name);
         append_store_pane_id_args(&mut args, &self.name);
+        append_store_project_path_args(&mut args, &self.name, working_dir);
 
         let output = Command::new("tmux").args(&args).output()?;
 

@@ -343,6 +343,14 @@ pub fn setup_session_cycle_bindings(profile: &str) {
         "bind-key -T root C-q run-shell {}",
         shell_escape(&root_ctrl_q_run_shell_cmd())
     ));
+    lines.push(
+        "bind-key % if-shell -F '#{m:aoe_*,#{session_name}}' \"split-window -h -c '#{@aoe_project_path}'\" \"split-window -h\""
+            .to_string(),
+    );
+    lines.push(
+        "bind-key '\"' if-shell -F '#{m:aoe_*,#{session_name}}' \"split-window -v -c '#{@aoe_project_path}'\" \"split-window -v\""
+            .to_string(),
+    );
 
     // Number jump key tables
     collect_number_jump_bindings(profile, &mut lines);
@@ -393,6 +401,11 @@ fn collect_tag_sessions_with_profile(profile: &str, lines: &mut Vec<String>) {
             shell_escape(&name),
             AOE_PROFILE_OPTION,
             shell_escape(profile)
+        ));
+        lines.push(format!(
+            "set-option -qt {} @aoe_project_path {}",
+            shell_escape(&name),
+            shell_escape(&instance.project_path)
         ));
     }
 }
@@ -790,6 +803,17 @@ pub fn append_store_pane_id_args(args: &mut Vec<String>, target: &str) {
     ]);
 }
 
+pub fn append_store_project_path_args(args: &mut Vec<String>, target: &str, working_dir: &str) {
+    args.extend([
+        ";".to_string(),
+        "set-option".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "@aoe_project_path".to_string(),
+        working_dir.to_string(),
+    ]);
+}
+
 fn resolve_pane_target(session_name: &str) -> String {
     get_agent_pane_id(session_name).unwrap_or_else(|| session_name.to_string())
 }
@@ -899,6 +923,27 @@ mod tests {
         assert_eq!(sanitize_session_name("my-project"), "my-project");
         assert_eq!(sanitize_session_name("my project"), "my_project");
         assert_eq!(sanitize_session_name("a".repeat(30).as_str()).len(), 20);
+    }
+
+    #[test]
+    fn test_append_store_project_path_args_appends_expected_sequence() {
+        let mut args = vec!["new-session".to_string(), "-d".to_string()];
+
+        append_store_project_path_args(&mut args, "aoe_demo", "/tmp/demo project");
+
+        assert_eq!(
+            args,
+            vec![
+                "new-session",
+                "-d",
+                ";",
+                "set-option",
+                "-t",
+                "aoe_demo",
+                "@aoe_project_path",
+                "/tmp/demo project",
+            ]
+        );
     }
 
     #[test]

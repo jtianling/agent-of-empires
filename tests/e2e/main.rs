@@ -20,6 +20,7 @@ mod harness;
 mod cli;
 mod errors;
 mod new_session;
+mod pane_cwd;
 mod profile_picker;
 mod sandbox;
 mod session_rename;
