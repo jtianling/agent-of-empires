@@ -1618,7 +1618,7 @@ fn test_stable_session_cache_refreshes_when_sort_order_changes() {
 #[serial]
 fn test_list_width_default() {
     let env = create_test_env_empty();
-    assert_eq!(env.view.list_width, 35);
+    assert_eq!(env.view.list_width, 45);
 }
 
 #[test]
@@ -1626,7 +1626,7 @@ fn test_list_width_default() {
 fn test_shrink_list() {
     let mut env = create_test_env_empty();
     env.view.shrink_list();
-    assert_eq!(env.view.list_width, 30);
+    assert_eq!(env.view.list_width, 40);
 }
 
 #[test]
@@ -1634,7 +1634,7 @@ fn test_shrink_list() {
 fn test_grow_list() {
     let mut env = create_test_env_empty();
     env.view.grow_list();
-    assert_eq!(env.view.list_width, 40);
+    assert_eq!(env.view.list_width, 50);
 }
 
 #[test]
@@ -1663,18 +1663,18 @@ fn test_grow_list_clamps_at_maximum() {
 #[serial]
 fn test_uppercase_h_shrinks_list() {
     let mut env = create_test_env_empty();
-    assert_eq!(env.view.list_width, 35);
+    assert_eq!(env.view.list_width, 45);
     env.view.handle_key(key(KeyCode::Char('H')));
-    assert_eq!(env.view.list_width, 30);
+    assert_eq!(env.view.list_width, 40);
 }
 
 #[test]
 #[serial]
 fn test_uppercase_l_grows_list() {
     let mut env = create_test_env_empty();
-    assert_eq!(env.view.list_width, 35);
+    assert_eq!(env.view.list_width, 45);
     env.view.handle_key(key(KeyCode::Char('L')));
-    assert_eq!(env.view.list_width, 40);
+    assert_eq!(env.view.list_width, 50);
 }
 
 #[test]

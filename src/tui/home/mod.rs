@@ -280,7 +280,7 @@ impl HomeView {
             diff_view: None,
             list_width: user_config
                 .and_then(|c| c.app_state.home_list_width)
-                .unwrap_or(50),
+                .unwrap_or(45),
             needs_redraw: false,
         };
 
