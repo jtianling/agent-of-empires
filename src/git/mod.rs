@@ -18,7 +18,13 @@ const AGENT_DIRS: &[&str] = &[
     ".cursor",
     ".aider",
     ".continue",
+    ".agents",
 ];
+
+/// Well-known root-level agent config files that should be synced to worktrees.
+/// These files are typically `.gitignore`'d and contain project-level instructions
+/// for AI agents.
+const AGENT_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
 use error::{GitError, Result};
 use template::{resolve_template, TemplateVars};
@@ -245,14 +251,14 @@ impl GitWorktree {
         // the repo is mounted at different locations (e.g., in Docker containers).
         Self::convert_git_file_to_relative(path)?;
 
-        Self::sync_agent_dirs_to_worktree(&self.repo_path, path);
+        Self::sync_agent_config_to_worktree(&self.repo_path, path);
 
         Ok(())
     }
 
-    /// Copy `.gitignore`'d agent directories from the source repo to a new worktree.
+    /// Copy `.gitignore`'d agent directories and files from the source repo to a new worktree.
     /// Failures are logged but do not prevent worktree creation.
-    fn sync_agent_dirs_to_worktree(source_dir: &Path, worktree_dir: &Path) {
+    fn sync_agent_config_to_worktree(source_dir: &Path, worktree_dir: &Path) {
         for &dir_name in AGENT_DIRS {
             let source_path = source_dir.join(dir_name);
             let target_path = worktree_dir.join(dir_name);
@@ -273,11 +279,32 @@ impl GitWorktree {
                 tracing::debug!("Copied agent dir {} to worktree", dir_name);
             }
         }
+
+        for &file_name in AGENT_FILES {
+            let source_path = source_dir.join(file_name);
+            let target_path = worktree_dir.join(file_name);
+
+            if !source_path.is_file() {
+                continue;
+            }
+            if target_path.exists() {
+                continue;
+            }
+            if !is_gitignored(source_dir, file_name) {
+                continue;
+            }
+
+            if let Err(e) = std::fs::copy(&source_path, &target_path) {
+                tracing::warn!("Failed to copy agent file {} to worktree: {}", file_name, e);
+            } else {
+                tracing::debug!("Copied agent file {} to worktree", file_name);
+            }
+        }
     }
 
-    /// Remove `.gitignore`'d agent directories from a worktree before deletion.
+    /// Remove `.gitignore`'d agent directories and files from a worktree before deletion.
     /// Returns `true` if all cleanups succeeded (or there was nothing to clean).
-    pub fn cleanup_agent_dirs_from_worktree(worktree_dir: &Path) -> bool {
+    pub fn cleanup_agent_config_from_worktree(worktree_dir: &Path) -> bool {
         let mut all_ok = true;
         for &dir_name in AGENT_DIRS {
             let dir_path = worktree_dir.join(dir_name);
@@ -298,6 +325,27 @@ impl GitWorktree {
                 tracing::debug!("Cleaned up agent dir {} from worktree", dir_name);
             }
         }
+
+        for &file_name in AGENT_FILES {
+            let file_path = worktree_dir.join(file_name);
+            if !file_path.is_file() {
+                continue;
+            }
+            if !is_gitignored(worktree_dir, file_name) {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(&file_path) {
+                tracing::warn!(
+                    "Failed to clean up agent file {} from worktree: {}",
+                    file_name,
+                    e
+                );
+                all_ok = false;
+            } else {
+                tracing::debug!("Cleaned up agent file {} from worktree", file_name);
+            }
+        }
+
         all_ok
     }
 
@@ -421,7 +469,7 @@ impl GitWorktree {
             return Err(GitError::WorktreeNotFound(path.to_path_buf()));
         }
 
-        let cleanup_ok = Self::cleanup_agent_dirs_from_worktree(path);
+        let cleanup_ok = Self::cleanup_agent_config_from_worktree(path);
         let use_force = force || !cleanup_ok;
 
         let path_str = path
@@ -1387,7 +1435,7 @@ mod tests {
 
         // Initialize a git repo in target so is_gitignored can run there too
         // (but the check is against source_dir, not target)
-        GitWorktree::sync_agent_dirs_to_worktree(&repo_path, target_dir.path());
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
 
         // .claude and .codex should be copied
         assert!(target_dir.path().join(".claude/config.json").exists());
@@ -1408,7 +1456,7 @@ mod tests {
         std::fs::create_dir(&target_claude).unwrap();
         std::fs::write(target_claude.join("existing.txt"), "don't overwrite me").unwrap();
 
-        GitWorktree::sync_agent_dirs_to_worktree(&repo_path, target_dir.path());
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
 
         // .claude should keep its original content, not be overwritten
         assert!(target_claude.join("existing.txt").exists());
@@ -1449,7 +1497,7 @@ mod tests {
         .unwrap();
 
         let target_dir = TempDir::new().unwrap();
-        GitWorktree::sync_agent_dirs_to_worktree(&repo_path, target_dir.path());
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
 
         // .claude should NOT be copied since it's tracked (not gitignored)
         assert!(!target_dir.path().join(".claude").exists());
@@ -1471,7 +1519,7 @@ mod tests {
         std::fs::create_dir(&codex_wt).unwrap();
         std::fs::write(codex_wt.join("settings.yaml"), "key: val").unwrap();
 
-        let result = GitWorktree::cleanup_agent_dirs_from_worktree(worktree_dir.path());
+        let result = GitWorktree::cleanup_agent_config_from_worktree(worktree_dir.path());
 
         assert!(result);
         assert!(!claude_wt.exists());
@@ -1508,13 +1556,142 @@ mod tests {
         )
         .unwrap();
 
-        let result = GitWorktree::cleanup_agent_dirs_from_worktree(&repo_path);
+        let result = GitWorktree::cleanup_agent_config_from_worktree(&repo_path);
 
         // Should return true (no failures), but .claude should still exist
         assert!(result);
         assert!(claude_dir.exists());
 
         drop(dir);
+    }
+
+    // ---- Agent config file sync/cleanup tests ----
+
+    /// Set up a test repo with a .gitignore that also ignores agent config files.
+    fn setup_repo_with_agent_files() -> (TempDir, PathBuf) {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+
+        std::fs::write(
+            repo_path.join(".gitignore"),
+            ".claude\n.codex\n.agents\nCLAUDE.md\nAGENTS.md\n",
+        )
+        .unwrap();
+
+        {
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(".gitignore")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Add .gitignore", &tree, &[&head])
+                .unwrap();
+        }
+
+        // Create agent config files
+        std::fs::write(repo_path.join("CLAUDE.md"), "# Claude instructions").unwrap();
+        std::fs::write(repo_path.join("AGENTS.md"), "# Agents instructions").unwrap();
+
+        // Create .agents directory
+        let agents_dir = repo_path.join(".agents");
+        std::fs::create_dir(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("config.toml"), "[settings]").unwrap();
+
+        (dir, repo_path)
+    }
+
+    #[test]
+    fn test_sync_agent_files_copies_gitignored_files() {
+        let (_dir, repo_path) = setup_repo_with_agent_files();
+        let target_dir = TempDir::new().unwrap();
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        assert!(target_dir.path().join("CLAUDE.md").exists());
+        assert!(target_dir.path().join("AGENTS.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(target_dir.path().join("CLAUDE.md")).unwrap(),
+            "# Claude instructions"
+        );
+    }
+
+    #[test]
+    fn test_sync_agent_files_skips_tracked_files() {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+
+        // Create CLAUDE.md as a tracked file (no .gitignore entry)
+        std::fs::write(repo_path.join("CLAUDE.md"), "# Tracked instructions").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("CLAUDE.md")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &repo.signature().unwrap(),
+            &repo.signature().unwrap(),
+            "Add tracked CLAUDE.md",
+            &tree,
+            &[&head],
+        )
+        .unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        // CLAUDE.md should NOT be copied since it's tracked
+        assert!(!target_dir.path().join("CLAUDE.md").exists());
+
+        drop(dir);
+    }
+
+    #[test]
+    fn test_cleanup_agent_files_removes_gitignored_files() {
+        let worktree_dir = TempDir::new().unwrap();
+        git2::Repository::init(worktree_dir.path()).unwrap();
+        std::fs::write(
+            worktree_dir.path().join(".gitignore"),
+            "CLAUDE.md\nAGENTS.md\n",
+        )
+        .unwrap();
+
+        std::fs::write(worktree_dir.path().join("CLAUDE.md"), "# Instructions").unwrap();
+        std::fs::write(worktree_dir.path().join("AGENTS.md"), "# Agents").unwrap();
+
+        let result = GitWorktree::cleanup_agent_config_from_worktree(worktree_dir.path());
+
+        assert!(result);
+        assert!(!worktree_dir.path().join("CLAUDE.md").exists());
+        assert!(!worktree_dir.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn test_sync_agents_dir_when_gitignored() {
+        let (_dir, repo_path) = setup_repo_with_agent_files();
+        let target_dir = TempDir::new().unwrap();
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        assert!(target_dir.path().join(".agents/config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(target_dir.path().join(".agents/config.toml")).unwrap(),
+            "[settings]"
+        );
     }
 
     /// Sets up a bare repo whose parent directory contains a spurious `.git/` directory

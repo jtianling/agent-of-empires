@@ -30,7 +30,6 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe profile create`↴](#aoe-profile-create)
 * [`aoe profile delete`↴](#aoe-profile-delete)
 * [`aoe profile rename`↴](#aoe-profile-rename)
-* [`aoe profile default`↴](#aoe-profile-default)
 * [`aoe worktree`↴](#aoe-worktree)
 * [`aoe worktree list`↴](#aoe-worktree-list)
 * [`aoe worktree info`↴](#aoe-worktree-info)
@@ -103,6 +102,7 @@ Add a new session
 * `--trust-hooks` — Automatically trust repository hooks without prompting
 * `--extra-args <EXTRA_ARGS>` — Extra arguments to append after the agent binary
 * `--cmd-override <CMD_OVERRIDE>` — Override the agent binary command
+* `--reuse-worktree` — Reuse an existing worktree instead of failing (use with --worktree)
 
 
 
@@ -396,7 +396,6 @@ Manage profiles (separate workspaces)
 * `create` — Create a new profile
 * `delete` — Delete a profile
 * `rename` — Rename a profile
-* `default` — Show or set default profile
 
 
 
@@ -442,18 +441,6 @@ Rename a profile
 
 * `<OLD_NAME>` — Current profile name
 * `<NEW_NAME>` — New profile name
-
-
-
-## `aoe profile default`
-
-Show or set default profile
-
-**Usage:** `aoe profile default [NAME]`
-
-###### **Arguments:**
-
-* `<NAME>` — Profile name (optional, shows current if not provided)
 
 
 
