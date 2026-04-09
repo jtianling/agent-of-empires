@@ -437,6 +437,14 @@ pub fn split_window_right(session_name: &str, working_dir: &str, command: &str) 
         format!("{}:.0", session_name),
     ]);
 
+    tracing::debug!(
+        session = session_name,
+        working_dir,
+        command,
+        args = ?args,
+        "Splitting tmux window for right pane"
+    );
+
     let output = Command::new("tmux").args(&args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

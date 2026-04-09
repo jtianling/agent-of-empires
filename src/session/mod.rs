@@ -17,6 +17,7 @@ pub use config::{
     ContainerRuntimeName, SandboxConfig, SessionConfig, ThemeConfig, TmuxMouseMode,
     TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
 };
+pub(crate) use environment::shell_escape;
 pub use environment::validate_env_entry;
 pub use groups::{
     expanded_groups, flatten_tree, flatten_tree_all_profiles, validate_group_path, Group,
