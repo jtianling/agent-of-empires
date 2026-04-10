@@ -352,19 +352,22 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints(main_constraints)
                     .split(area);
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Length(self.home.list_width),
-                        Constraint::Min(40),
-                    ])
-                    .split(main_chunks[0]);
+                if !self.home.is_narrow_layout(main_chunks[0].width) {
+                    let effective_list_width = self.home.effective_list_width(main_chunks[0].width);
+                    let chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(effective_list_width),
+                            Constraint::Min(40),
+                        ])
+                        .split(main_chunks[0]);
 
-                let preview_area = chunks[1];
+                    let preview_area = chunks[1];
 
-                // Settle all state (including tmux captures) BEFORE drawing
-                self.home
-                    .update_caches(preview_area.width, preview_area.height);
+                    // Settle all state (including tmux captures) BEFORE drawing
+                    self.home
+                        .update_caches(preview_area.width, preview_area.height);
+                }
 
                 crossterm::execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
                 terminal.draw(|f| self.render(f))?;

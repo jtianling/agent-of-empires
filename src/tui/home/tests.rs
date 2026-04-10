@@ -1661,6 +1661,23 @@ fn test_grow_list_clamps_at_maximum() {
 
 #[test]
 #[serial]
+fn test_is_narrow_layout_uses_list_width_threshold() {
+    let env = create_test_env_empty();
+    assert!(env.view.is_narrow_layout(64));
+    assert!(!env.view.is_narrow_layout(65));
+}
+
+#[test]
+#[serial]
+fn test_is_narrow_layout_respects_custom_list_width() {
+    let mut env = create_test_env_empty();
+    env.view.list_width = 25;
+    assert!(!env.view.is_narrow_layout(45));
+    assert!(env.view.is_narrow_layout(44));
+}
+
+#[test]
+#[serial]
 fn test_uppercase_h_shrinks_list() {
     let mut env = create_test_env_empty();
     assert_eq!(env.view.list_width, 45);

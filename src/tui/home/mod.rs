@@ -189,6 +189,16 @@ impl HomeView {
         redraw
     }
 
+    pub(crate) fn is_narrow_layout(&self, available_width: u16) -> bool {
+        available_width < self.list_width.saturating_add(20)
+    }
+
+    pub(crate) fn effective_list_width(&self, available_width: u16) -> u16 {
+        self.list_width
+            .min(available_width.saturating_sub(40))
+            .max(10)
+    }
+
     /// Update preview caches for the currently selected session.
     /// This should be called before rendering to ensure all data is pre-fetched.
     pub fn update_caches(&mut self, width: u16, height: u16) {

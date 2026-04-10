@@ -59,23 +59,23 @@ impl HomeView {
             .constraints(constraints)
             .split(area);
 
-        // Layout: left panel (list) and right panel (preview)
-        // On small screens, cap list width so the preview pane gets adequate space
         let available_width = main_chunks[0].width;
-        let effective_list_width = self
-            .list_width
-            .min(available_width.saturating_sub(40))
-            .max(10);
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(effective_list_width),
-                Constraint::Min(40),
-            ])
-            .split(main_chunks[0]);
+        if self.is_narrow_layout(available_width) {
+            self.render_list(frame, main_chunks[0], theme);
+        } else {
+            let effective_list_width = self.effective_list_width(available_width);
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(effective_list_width),
+                    Constraint::Min(40),
+                ])
+                .split(main_chunks[0]);
 
-        self.render_list(frame, chunks[0], theme);
-        self.render_preview(frame, chunks[1], theme);
+            self.render_list(frame, chunks[0], theme);
+            self.render_preview(frame, chunks[1], theme);
+        }
+
         self.render_status_bar(frame, main_chunks[1], theme);
 
         if let Some(info) = update_info {
