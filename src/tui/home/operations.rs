@@ -5,7 +5,7 @@ use anyhow::bail;
 use crate::session::builder::{self, InstanceParams};
 use crate::session::{list_profiles, validate_group_path, GroupTree, Status, Storage};
 use crate::tui::deletion_poller::DeletionRequest;
-use crate::tui::dialogs::{DeleteOptions, GroupDeleteOptions, NewSessionData};
+use crate::tui::dialogs::{DeleteOptions, ForkSessionData, GroupDeleteOptions, NewSessionData};
 
 use super::HomeView;
 
@@ -78,6 +78,59 @@ impl HomeView {
             self.save()?;
         }
 
+        self.reload()?;
+        Ok(session_id)
+    }
+
+    /// Build a forked instance from the currently tracked parent, persist it,
+    /// and return its id on success. The caller is responsible for kicking off
+    /// the start/attach flow.
+    pub(super) fn create_forked_session_instance(
+        &mut self,
+        data: ForkSessionData,
+    ) -> anyhow::Result<String> {
+        let parent = self
+            .instances
+            .iter()
+            .find(|i| i.id == data.parent_id)
+            .ok_or_else(|| anyhow::anyhow!("Parent session no longer exists"))?;
+
+        let requested_title = if data.title.trim().is_empty() {
+            format!("{}-fork", parent.title)
+        } else {
+            data.title.trim().to_string()
+        };
+        let final_title = dedupe_title(&self.instances, &requested_title, &parent.project_path);
+
+        let group = data.group.and_then(|g| {
+            let trimmed = g.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(ref g) = group {
+            validate_group_path(g)?;
+        }
+
+        let forked = parent.create_fork(final_title, group)?;
+        let session_id = forked.id.clone();
+
+        let is_new_group =
+            !forked.group_path.is_empty() && !self.group_tree.group_exists(&forked.group_path);
+        self.instances.push(forked);
+        self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+        if let Some(inst) = self.instances.iter().find(|i| i.id == session_id) {
+            if !inst.group_path.is_empty() {
+                self.group_tree.create_group(&inst.group_path);
+                if is_new_group {
+                    self.group_tree
+                        .set_default_directory(&inst.group_path, &inst.project_path);
+                }
+            }
+        }
+        self.save()?;
         self.reload()?;
         Ok(session_id)
     }
@@ -401,4 +454,25 @@ fn remap_group_path(path: &str, old_path: &str, new_path: &str) -> Option<String
 
     path.strip_prefix(&format!("{old_path}/"))
         .map(|suffix| format!("{new_path}/{suffix}"))
+}
+
+/// Ensure a new session title is unique for a given project path by appending
+/// " (N)" suffixes when collisions exist.
+fn dedupe_title(instances: &[crate::session::Instance], base: &str, path: &str) -> String {
+    let normalized_path = path.trim_end_matches('/');
+    let has_conflict = |candidate: &str| -> bool {
+        instances.iter().any(|i| {
+            i.project_path.trim_end_matches('/') == normalized_path && i.title == candidate
+        })
+    };
+    if !has_conflict(base) {
+        return base.to_string();
+    }
+    for n in 2..100 {
+        let candidate = format!("{} ({})", base, n);
+        if !has_conflict(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{} ({})", base, chrono::Utc::now().timestamp())
 }

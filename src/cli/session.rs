@@ -31,6 +31,14 @@ pub enum SessionCommands {
 
     /// Auto-detect current session
     Current(CurrentArgs),
+
+    /// Fork a session using the agent's native fork-session command.
+    ///
+    /// Creates a new session that shares the parent's working directory and
+    /// config, and whose first launch runs `claude --resume ... --fork-session`,
+    /// `codex fork ...`, or `opencode --session ... --fork` depending on the
+    /// parent's tool. Only claude, codex, and opencode support forking.
+    Fork(ForkArgs),
 }
 
 #[derive(Args)]
@@ -92,6 +100,24 @@ pub struct CurrentArgs {
     json: bool,
 }
 
+#[derive(Args)]
+pub struct ForkArgs {
+    /// Parent session ID or title
+    identifier: String,
+
+    /// Title for the forked session (defaults to `<parent>-fork`, de-duplicated)
+    #[arg(short, long)]
+    title: Option<String>,
+
+    /// Group for the forked session (defaults to parent's group)
+    #[arg(short, long)]
+    group: Option<String>,
+
+    /// Do not launch the forked session immediately
+    #[arg(long)]
+    no_launch: bool,
+}
+
 #[derive(Serialize)]
 struct CaptureOutput {
     id: String,
@@ -126,6 +152,7 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
+        SessionCommands::Fork(args) => fork_session(profile, args).await,
     }
 }
 
@@ -469,4 +496,82 @@ async fn current_session(args: CurrentArgs) -> Result<()> {
     }
 
     bail!("Current tmux session is not an Agent of Empires session")
+}
+
+async fn fork_session(profile: &str, args: ForkArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let parent = super::resolve_session(&args.identifier, &instances)?;
+    let parent_title = parent.title.clone();
+    let parent_path = parent.project_path.clone();
+    let parent_group = parent.group_path.clone();
+
+    let requested_title = args
+        .title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| format!("{}-fork", parent_title));
+    let final_title = dedupe_fork_title(&instances, &requested_title, &parent_path);
+
+    let parent_group_opt = if parent_group.is_empty() {
+        None
+    } else {
+        Some(parent_group)
+    };
+    let effective_group = args
+        .group
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .or(parent_group_opt);
+
+    let mut forked = parent.create_fork(final_title, effective_group)?;
+    let new_id = forked.id.clone();
+    let new_title = forked.title.clone();
+
+    if !args.no_launch {
+        forked.start_with_size(crate::terminal::get_size())?;
+    }
+
+    instances.push(forked);
+    let mut group_tree = crate::session::GroupTree::new_with_groups(&instances, &groups);
+    if let Some(group) = instances
+        .iter()
+        .find(|i| i.id == new_id)
+        .map(|i| i.group_path.clone())
+    {
+        if !group.is_empty() {
+            group_tree.create_group(&group);
+        }
+    }
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!(
+        "✓ Forked session: {} → {} ({})",
+        parent_title,
+        new_title,
+        &new_id[..new_id.len().min(8)]
+    );
+    Ok(())
+}
+
+/// Ensure the forked title does not collide with an existing (title, path) pair
+/// by appending " (N)" suffixes.
+fn dedupe_fork_title(instances: &[crate::session::Instance], base: &str, path: &str) -> String {
+    let normalized_path = path.trim_end_matches('/');
+    let has_conflict = |candidate: &str| -> bool {
+        instances.iter().any(|i| {
+            i.project_path.trim_end_matches('/') == normalized_path && i.title == candidate
+        })
+    };
+    if !has_conflict(base) {
+        return base.to_string();
+    }
+    for n in 2..100 {
+        let candidate = format!("{} ({})", base, n);
+        if !has_conflict(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{} ({})", base, chrono::Utc::now().timestamp())
 }

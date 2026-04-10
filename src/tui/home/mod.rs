@@ -21,9 +21,9 @@ use crate::tmux::AvailableTools;
 use super::creation_poller::{CreationPoller, CreationRequest};
 use super::deletion_poller::DeletionPoller;
 use super::dialogs::{
-    ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, GroupRenameDialog, HookTrustDialog,
-    InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerDialog, RenameDialog,
-    UnifiedDeleteDialog, WelcomeDialog,
+    ChangelogDialog, ConfirmDialog, ForkSessionDialog, GroupDeleteOptionsDialog, GroupRenameDialog,
+    HookTrustDialog, InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerDialog,
+    RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -104,6 +104,7 @@ pub struct HomeView {
     // Dialogs
     pub(super) show_help: bool,
     pub(super) new_dialog: Option<NewSessionDialog>,
+    pub(super) fork_dialog: Option<ForkSessionDialog>,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
@@ -242,6 +243,7 @@ impl HomeView {
             sort_order,
             show_help: false,
             new_dialog: None,
+            fork_dialog: None,
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
@@ -652,6 +654,7 @@ impl HomeView {
     pub fn has_dialog(&self) -> bool {
         self.show_help
             || self.new_dialog.is_some()
+            || self.fork_dialog.is_some()
             || self.confirm_dialog.is_some()
             || self.unified_delete_dialog.is_some()
             || self.group_delete_options_dialog.is_some()
@@ -862,6 +865,24 @@ impl HomeView {
 
     pub fn set_instance_error(&mut self, id: &str, error: Option<String>) {
         self.mutate_instance(id, |inst| inst.last_error = error);
+    }
+
+    /// Clear `fork_pending` on the stored instance after its first successful
+    /// launch (the fork command has been committed to tmux, so subsequent
+    /// restarts must use the normal resume path, not re-fork from the parent).
+    pub fn clear_fork_pending(&mut self, id: &str) {
+        let mut changed = false;
+        self.mutate_instance(id, |inst| {
+            if inst.fork_pending.is_some() {
+                inst.fork_pending = None;
+                changed = true;
+            }
+        });
+        if changed {
+            if let Err(err) = self.save() {
+                tracing::error!("Failed to persist fork_pending clear: {}", err);
+            }
+        }
     }
 
     pub fn select_session_by_id(&mut self, session_id: &str) {

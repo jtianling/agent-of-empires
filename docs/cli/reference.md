@@ -20,6 +20,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session rename`↴](#aoe-session-rename)
 * [`aoe session capture`↴](#aoe-session-capture)
 * [`aoe session current`↴](#aoe-session-current)
+* [`aoe session fork`↴](#aoe-session-fork)
 * [`aoe group`↴](#aoe-group)
 * [`aoe group list`↴](#aoe-group-list)
 * [`aoe group create`↴](#aoe-group-create)
@@ -195,6 +196,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `rename` — Rename a session
 * `capture` — Capture tmux pane output
 * `current` — Auto-detect current session
+* `fork` — Fork a session using the agent's native fork-session command
 
 
 
@@ -309,6 +311,26 @@ Auto-detect current session
 
 * `-q`, `--quiet` — Just session name (for scripting)
 * `--json` — Output as JSON
+
+
+
+## `aoe session fork`
+
+Fork a session using the agent's native fork-session command.
+
+Creates a new session that shares the parent's working directory and config, and whose first launch runs `claude --resume ... --fork-session`, `codex fork ...`, or `opencode --session ... --fork` depending on the parent's tool. Only claude, codex, and opencode support forking.
+
+**Usage:** `aoe session fork [OPTIONS] <IDENTIFIER>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Parent session ID or title
+
+###### **Options:**
+
+* `-t`, `--title <TITLE>` — Title for the forked session (defaults to `<parent>-fork`, de-duplicated)
+* `-g`, `--group <GROUP>` — Group for the forked session (defaults to parent's group)
+* `--no-launch` — Do not launch the forked session immediately
 
 
 

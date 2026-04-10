@@ -85,6 +85,24 @@ pub struct AgentDef {
     pub hook_config: Option<AgentHookConfig>,
     /// Graceful-exit resume support for restart flows.
     pub resume: Option<ResumeConfig>,
+    /// CLI flag template for the agent's native fork-session command, with `{}` as
+    /// a placeholder for the parent agent's session token.
+    ///
+    /// When `Instance::fork_pending` is set and no resume token is present,
+    /// `build_base_tool_command` substitutes the parent token into this template and
+    /// appends it to the agent binary. Examples:
+    /// - Claude:   `--resume {} --fork-session`
+    /// - Codex:    `fork {}`
+    /// - OpenCode: `--session {} --fork`
+    ///
+    /// `None` means the agent does not support forking through AoE.
+    pub fork_template: Option<&'static str>,
+    /// CLI flag template for pre-allocating a session UUID at launch time,
+    /// with `{}` as placeholder for the UUID (e.g. `--session-id {}`).
+    /// When set, AoE generates a UUID before starting the agent and passes
+    /// it via this flag so the conversation identity is known from the start
+    /// (needed for reliable fork without post-hoc session discovery).
+    pub session_id_flag: Option<&'static str>,
     /// Whether this agent sets its own terminal/pane title via OSC 0.
     /// When false, AoE manages the pane title based on detected status.
     pub sets_own_title: bool,
@@ -141,6 +159,8 @@ pub const AGENTS: &[AgentDef] = &[
             resume_flag: "--resume {}",
             timeout_secs: 10,
         }),
+        fork_template: Some("--resume {} --fork-session"),
+        session_id_flag: Some("--session-id {}"),
         sets_own_title: true,
     },
     AgentDef {
@@ -156,6 +176,8 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[],
         hook_config: None,
         resume: None,
+        fork_template: Some("--session {} --fork"),
+        session_id_flag: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -171,6 +193,8 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[],
         hook_config: None,
         resume: None,
+        fork_template: None,
+        session_id_flag: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -193,6 +217,8 @@ pub const AGENTS: &[AgentDef] = &[
             resume_flag: "resume {}",
             timeout_secs: 10,
         }),
+        fork_template: Some("fork {}"),
+        session_id_flag: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -232,6 +258,8 @@ pub const AGENTS: &[AgentDef] = &[
             ],
         }),
         resume: None,
+        fork_template: None,
+        session_id_flag: None,
         sets_own_title: true,
     },
     AgentDef {
@@ -247,6 +275,8 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[],
         hook_config: None,
         resume: None,
+        fork_template: None,
+        session_id_flag: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -265,6 +295,8 @@ pub const AGENTS: &[AgentDef] = &[
             events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
         resume: None,
+        fork_template: None,
+        session_id_flag: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -280,6 +312,8 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("COPILOT_CONFIG_DIR", "/root/.copilot")],
         hook_config: None,
         resume: None,
+        fork_template: None,
+        session_id_flag: None,
         sets_own_title: false,
     },
     AgentDef {
@@ -296,6 +330,8 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("PI_CODING_AGENT_DIR", "/root/.pi/agent")],
         hook_config: None,
         resume: None,
+        fork_template: None,
+        session_id_flag: None,
         sets_own_title: false,
     },
 ];

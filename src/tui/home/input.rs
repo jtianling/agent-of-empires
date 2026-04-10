@@ -9,9 +9,10 @@ use crate::session::config::{load_config, save_config, SortOrder};
 use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
-    ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, GroupRenameDialog,
-    HookTrustAction, InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction,
-    RenameDialog, RenameMode, SendMessageDialog, UnifiedDeleteDialog,
+    ConfirmDialog, DeleteDialogConfig, DialogResult, ForkSessionData, ForkSessionDialog,
+    GroupDeleteOptionsDialog, GroupRenameDialog, HookTrustAction, InfoDialog, NewSessionData,
+    NewSessionDialog, ProfilePickerAction, RenameDialog, RenameMode, SendMessageDialog,
+    UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
@@ -226,6 +227,24 @@ impl HomeView {
                             return self.create_session_with_hooks(data, fallback);
                         }
                     }
+                }
+            }
+            return None;
+        }
+
+        let fork_dialog_result = self
+            .fork_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key));
+
+        if let Some(result) = fork_dialog_result {
+            match result {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.fork_dialog = None;
+                }
+                DialogResult::Submit(data) => {
+                    return self.create_forked_session(data);
                 }
             }
             return None;
@@ -589,6 +608,51 @@ impl HomeView {
                         self.new_dialog = Some(dialog);
                     }
                 }
+            }
+            KeyCode::Char('f') => {
+                let Some(session_id) = self.selected_session.clone() else {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "No Session Selected",
+                        "Select a session to fork.",
+                    ));
+                    return None;
+                };
+
+                let Some(inst) = self.get_instance(&session_id) else {
+                    self.info_dialog =
+                        Some(InfoDialog::new("Error", "Could not find session data."));
+                    return None;
+                };
+
+                let agent = crate::agents::get_agent(&inst.tool);
+                if agent.and_then(|a| a.fork_template).is_none() {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "Fork Not Supported",
+                        &format!(
+                            "Fork is only supported for claude, codex, and opencode.\nSelected session uses: {}",
+                            inst.tool
+                        ),
+                    ));
+                    return None;
+                }
+
+                // Codex needs a resume_token (only available after graceful
+                // restart `r`). Claude can resolve its session from disk,
+                // so no guard needed here for claude.
+                if inst.tool == "codex" && inst.resume_token.is_none() {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "Fork Not Ready",
+                        "Press 'r' (restart) on the parent codex session to capture a resume token, then try forking again.",
+                    ));
+                    return None;
+                }
+
+                self.fork_dialog = Some(ForkSessionDialog::new(
+                    &inst.id,
+                    &inst.title,
+                    &inst.tool,
+                    &inst.group_path,
+                ));
             }
             KeyCode::Char('s') => {
                 // Open settings view with selected session's project path (if any)
@@ -1067,6 +1131,27 @@ impl HomeView {
             Err(e) => {
                 tracing::error!("Failed to create session: {}", e);
                 if let Some(dialog) = &mut self.new_dialog {
+                    dialog.set_error(e.to_string());
+                }
+                None
+            }
+        }
+    }
+
+    /// Build, persist, and schedule the launch of a forked session. The
+    /// existing session-attach flow in `app.rs` will then start the forked
+    /// instance and spin up its right pane in the parent's working directory.
+    fn create_forked_session(&mut self, data: ForkSessionData) -> Option<Action> {
+        let right_pane_tool = data.right_pane_tool.clone();
+        match self.create_forked_session_instance(data) {
+            Ok(session_id) => {
+                self.fork_dialog = None;
+                self.pending_right_pane_tool = right_pane_tool;
+                Some(Action::AttachSession(session_id))
+            }
+            Err(e) => {
+                tracing::error!("Failed to fork session: {}", e);
+                if let Some(dialog) = &mut self.fork_dialog {
                     dialog.set_error(e.to_string());
                 }
                 None

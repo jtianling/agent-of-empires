@@ -13,7 +13,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::Value;
 
-pub use status_file::{cleanup_hook_status_dir, hook_status_dir, read_hook_status};
+pub use status_file::{
+    cleanup_hook_status_dir, hook_status_dir, read_hook_session_id, read_hook_status,
+};
 
 /// Base directory for all AoE hook status files.
 pub(crate) const HOOK_STATUS_BASE: &str = "/tmp/aoe-hooks";
@@ -22,10 +24,19 @@ pub(crate) const HOOK_STATUS_BASE: &str = "/tmp/aoe-hooks";
 /// Any hook command containing this string is considered ours.
 const AOE_HOOK_MARKER: &str = "aoe-hooks";
 
-/// Build the shell command for a hook that writes a status value.
+/// Build the shell command for a hook that writes a status value and,
+/// when available, the agent's session ID (e.g. `$CLAUDE_SESSION_ID`).
 fn hook_command(status: &str) -> String {
+    // Write the status file first, then opportunistically persist the
+    // session ID. `CLAUDE_SESSION_ID` / `CODEX_SESSION_ID` / etc. are
+    // set by the respective agents in their hook execution environment.
     format!(
-        "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; mkdir -p /tmp/aoe-hooks/$AOE_INSTANCE_ID && printf {} > /tmp/aoe-hooks/$AOE_INSTANCE_ID/status'",
+        "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
+         d=/tmp/aoe-hooks/$AOE_INSTANCE_ID; mkdir -p \"$d\"; \
+         printf {} > \"$d/status\"; \
+         for v in CLAUDE_SESSION_ID CODEX_SESSION_ID; do \
+           eval val=\\$$v; [ -n \"$val\" ] && printf \"%s\" \"$val\" > \"$d/session_id\" && break; \
+         done; true'",
         status
     )
 }

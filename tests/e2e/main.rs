@@ -19,6 +19,7 @@ mod harness;
 
 mod cli;
 mod errors;
+mod fork;
 mod new_session;
 mod pane_cwd;
 mod profile_picker;

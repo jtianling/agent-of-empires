@@ -174,3 +174,44 @@ fn test_storage_defaults_to_default_profile() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+#[serial]
+fn test_fork_persistence_round_trip() -> Result<()> {
+    let _temp = setup_temp_home();
+    let storage = Storage::new("default")?;
+
+    // Parent session with a captured resume token (as if the user had
+    // already interacted with Claude long enough for AoE to grab one).
+    let mut parent = Instance::new("Parent", "/home/user/demo");
+    parent.tool = "claude".to_string();
+    parent.resume_token = Some("parent-uuid".to_string());
+
+    let fork = parent
+        .create_fork("Parent-fork".to_string(), None)
+        .expect("fork should build");
+
+    let fork_id = fork.id.clone();
+    let parent_id = parent.id.clone();
+
+    let instances = vec![parent, fork];
+    let group_tree = GroupTree::new_with_groups(&instances, &[]);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    let (loaded, _groups) = storage.load_with_groups()?;
+    let loaded_fork = loaded
+        .iter()
+        .find(|i| i.id == fork_id)
+        .expect("fork persisted");
+    assert_eq!(loaded_fork.title, "Parent-fork");
+    assert_eq!(loaded_fork.tool, "claude");
+    assert_eq!(loaded_fork.project_path, "/home/user/demo");
+    assert_eq!(
+        loaded_fork.parent_session_id.as_deref(),
+        Some(parent_id.as_str())
+    );
+    assert_eq!(loaded_fork.fork_pending.as_deref(), Some("parent-uuid"));
+    // Runtime state must be reset on fork creation.
+    assert!(loaded_fork.resume_token.is_none());
+    Ok(())
+}

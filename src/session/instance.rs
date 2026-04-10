@@ -171,6 +171,18 @@ pub struct Instance {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_token: Option<String>,
+    /// When set, indicates this session is a pending fork of another session.
+    /// The stored value is the parent agent's session token (e.g. Claude/Codex UUID
+    /// or OpenCode `ses_...` id). On first successful launch, `build_base_tool_command`
+    /// uses the agent's `fork_template` with this value, and the field is then cleared
+    /// so subsequent restarts follow the normal resume path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_pending: Option<String>,
+    /// Pre-allocated agent session UUID. When AoE starts a Claude session it
+    /// passes `--session-id <uuid>` so we always know which conversation
+    /// belongs to this instance. Used as the primary source for `fork_token()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
     #[serde(skip)]
     pub pending_resume: Option<PendingResume>,
     #[serde(skip)]
@@ -207,6 +219,8 @@ impl Instance {
             last_start_time: None,
             last_error: None,
             resume_token: None,
+            fork_pending: None,
+            agent_session_id: None,
             pending_resume: None,
             last_spinner_seen: None,
             spike_start: None,
@@ -364,6 +378,22 @@ impl Instance {
             self.execute_on_launch_hooks(hook_cmds);
         }
 
+        // Pre-allocate an agent session UUID for tools that support
+        // `--session-id`. This lets AoE know the conversation identity
+        // from the start (needed for fork, and avoids relying on
+        // post-hoc pane scraping or disk scanning).
+        if self.agent_session_id.is_none()
+            && self.resume_token.is_none()
+            && self.fork_pending.is_none()
+            && !self.has_command_override()
+        {
+            if let Some(agent) = crate::agents::get_agent(&self.tool) {
+                if agent.session_id_flag.is_some() {
+                    self.agent_session_id = Some(Uuid::new_v4().to_string());
+                }
+            }
+        }
+
         let cmd = self.build_agent_command(None);
         tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
@@ -374,6 +404,10 @@ impl Instance {
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
         self.pending_resume = None;
+        // First launch of a forked session has been committed to tmux. The
+        // agent will now spawn its own session id, so we no longer need the
+        // parent's token and subsequent restarts follow the normal resume flow.
+        self.fork_pending = None;
 
         Ok(())
     }
@@ -476,6 +510,9 @@ impl Instance {
     ) -> String {
         let mut cmd = self.get_tool_command().to_string();
         if let Some(token) = resume_token {
+            // A live resume token always wins: once the forked session has spawned
+            // and AoE has captured its own post-fork session id, subsequent restarts
+            // go through the normal resume path.
             if let Some(resume) = agent
                 .and_then(|a| a.resume.as_ref())
                 .filter(|_| !self.has_command_override())
@@ -483,11 +520,237 @@ impl Instance {
                 let resume_flag = resume.resume_flag.replace("{}", token);
                 cmd = format!("{} {}", cmd, resume_flag);
             }
+        } else if let Some(fork_token) = self.fork_pending.as_deref() {
+            // First launch of a forked session: use the agent's native fork command
+            // with the parent's session token as the source. For Claude we also
+            // pre-allocate a new session-id for the fork (like agent-deck does).
+            if let Some(template) = agent
+                .and_then(|a| a.fork_template)
+                .filter(|_| !self.has_command_override())
+            {
+                let fork_flag = template.replace("{}", fork_token);
+                cmd = format!("{} {}", cmd, fork_flag);
+            }
+            if let (Some(new_id), Some(flag)) = (
+                self.agent_session_id.as_deref(),
+                agent.and_then(|a| a.session_id_flag),
+            ) {
+                let id_flag = flag.replace("{}", new_id);
+                cmd = format!("{} {}", cmd, id_flag);
+            }
+        } else if let Some(session_id) = self.agent_session_id.as_deref() {
+            // Fresh launch with pre-allocated session identity.
+            if let Some(flag) = agent
+                .and_then(|a| a.session_id_flag)
+                .filter(|_| !self.has_command_override())
+            {
+                let id_flag = flag.replace("{}", session_id);
+                cmd = format!("{} {}", cmd, id_flag);
+            }
         }
         if !self.extra_args.is_empty() {
             cmd = format!("{} {}", cmd, self.extra_args);
         }
         cmd
+    }
+
+    /// Build a new Instance that will, on its first launch, execute this agent's
+    /// native fork-session command against `self` as the parent. Runtime state
+    /// (status, timestamps, resume token) is cleared; persistent configuration
+    /// (tool, group, worktree, sandbox) is inherited.
+    ///
+    /// The forked session reuses the parent's `project_path` so both the agent
+    /// pane and the optional right shell pane land in the same working directory.
+    /// Inherited worktree metadata is marked `cleanup_on_delete = false` so
+    /// deleting the fork never destroys the parent's worktree.
+    pub fn create_fork(&self, new_title: String, new_group: Option<String>) -> Result<Self> {
+        let fork_token = self.fork_token()?;
+
+        let mut fork = self.clone();
+        fork.id = generate_id();
+        fork.title = new_title;
+        fork.parent_session_id = Some(self.id.clone());
+        fork.fork_pending = Some(fork_token);
+
+        if let Some(group) = new_group {
+            fork.group_path = group;
+        }
+
+        // Clear runtime state — the fork is a fresh process lifecycle.
+        fork.status = Status::Idle;
+        fork.created_at = Utc::now();
+        fork.last_accessed_at = None;
+        fork.resume_token = None;
+        fork.pending_resume = None;
+        // Pre-allocate a new session UUID for the fork if the tool supports it.
+        // This is passed via `--session-id <uuid>` alongside the fork template.
+        fork.agent_session_id = crate::agents::get_agent(&self.tool)
+            .filter(|a| a.session_id_flag.is_some())
+            .map(|_| Uuid::new_v4().to_string());
+        fork.last_error = None;
+        fork.last_error_check = None;
+        fork.last_start_time = None;
+        fork.last_spinner_seen = None;
+        fork.spike_start = None;
+        fork.pre_spike_status = None;
+        fork.acknowledged = false;
+        fork.terminal_info = None;
+
+        // Inherit worktree without taking ownership of cleanup: the parent
+        // still relies on it.
+        if let Some(ref mut wt) = fork.worktree_info {
+            wt.cleanup_on_delete = false;
+        }
+        if let Some(ref mut ws) = fork.workspace_info {
+            ws.cleanup_on_delete = false;
+        }
+
+        // Give the fork its own container name derived from the new id so it
+        // does not collide with the parent's container.
+        if let Some(ref mut sandbox) = fork.sandbox_info {
+            sandbox.container_name = DockerContainer::generate_name(&fork.id);
+            sandbox.container_id = None;
+            sandbox.created_at = None;
+        }
+
+        Ok(fork)
+    }
+
+    /// Resolve the parent agent's session token to be used for forking.
+    /// Returns an error for tools that do not support forking, for instances
+    /// with a user-supplied command override, or for forkable tools that have
+    /// not yet produced a session id AoE can capture.
+    fn fork_token(&self) -> Result<String> {
+        let agent = crate::agents::get_agent(&self.tool)
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", self.tool))?;
+        if agent.fork_template.is_none() {
+            anyhow::bail!(
+                "Fork is not supported for agent '{}'. Supported: claude, codex, opencode.",
+                self.tool
+            );
+        }
+        if self.has_command_override() {
+            anyhow::bail!(
+                "Cannot fork a session with a custom command override (command = {:?})",
+                self.command
+            );
+        }
+
+        match self.tool.as_str() {
+            "claude" => self
+                .agent_session_id
+                .clone()
+                .or_else(|| self.resume_token.clone())
+                .or_else(|| crate::hooks::read_hook_session_id(&self.id))
+                .or_else(|| resolve_claude_session_from_disk(&self.project_path))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No active Claude session found. Start and interact with the parent session, then try again."
+                    )
+                }),
+            "codex" => self
+                .agent_session_id
+                .clone()
+                .or_else(|| self.resume_token.clone())
+                .or_else(|| crate::hooks::read_hook_session_id(&self.id))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No active codex session to fork yet. Press 'r' (restart) on the parent to capture a resume token, then try again."
+                    )
+                }),
+            "opencode" => self.resolve_opencode_session_id(),
+            other => anyhow::bail!("Fork is not supported for agent '{}'", other),
+        }
+    }
+
+    /// Look up the parent opencode session id by querying
+    /// `opencode session list --format json` (either on the host or inside the
+    /// parent's container, depending on whether the parent is sandboxed), then
+    /// picking the most recently updated session whose directory matches
+    /// `self.project_path`.
+    ///
+    /// `resolve_claude_session_from_disk` is a companion free function for Claude.
+    fn resolve_opencode_session_id(&self) -> Result<String> {
+        use std::process::Command;
+
+        let output = if self.is_sandboxed() {
+            let container = DockerContainer::from_session_id(&self.id);
+            if !container.is_running().unwrap_or(false) {
+                anyhow::bail!(
+                    "Cannot fork opencode session: parent container '{}' is not running. \
+                     Start the parent session before forking.",
+                    container.name
+                );
+            }
+            Command::new("docker")
+                .args([
+                    "exec",
+                    &container.name,
+                    "opencode",
+                    "session",
+                    "list",
+                    "--format",
+                    "json",
+                ])
+                .output()
+        } else {
+            Command::new("opencode")
+                .args(["session", "list", "--format", "json"])
+                .current_dir(&self.project_path)
+                .output()
+        };
+
+        let output =
+            output.map_err(|e| anyhow::anyhow!("Failed to run `opencode session list`: {}", e))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "`opencode session list` exited non-zero: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        #[derive(Deserialize)]
+        struct OpenCodeSession {
+            id: String,
+            #[serde(default)]
+            directory: Option<String>,
+            #[serde(default)]
+            path: Option<String>,
+            #[serde(default)]
+            updated: Option<i64>,
+            #[serde(default)]
+            created: Option<i64>,
+        }
+
+        let sessions: Vec<OpenCodeSession> = serde_json::from_slice(&output.stdout)
+            .map_err(|e| anyhow::anyhow!("Failed to parse opencode session list: {}", e))?;
+
+        let target = match std::fs::canonicalize(&self.project_path) {
+            Ok(p) => p,
+            Err(_) => std::path::PathBuf::from(&self.project_path),
+        };
+
+        let best = sessions
+            .into_iter()
+            .filter_map(|s| {
+                let dir = s.directory.clone().or_else(|| s.path.clone())?;
+                let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone().into());
+                if canonical == target {
+                    let ts = s.updated.or(s.created).unwrap_or(0);
+                    Some((ts, s.id))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(ts, _)| *ts)
+            .map(|(_, id)| id);
+
+        best.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No opencode session found for directory {}. Start or interact with opencode in this directory before forking.",
+                self.project_path
+            )
+        })
     }
 
     fn resolve_on_launch_hooks(&self) -> Option<Vec<String>> {
@@ -1100,6 +1363,54 @@ fn format_env_var_prefix(key: &str, value: &str, cmd: &str) -> String {
 ///
 /// Environment variables are exported before `exec` because `exec VAR=val cmd`
 /// is not portable and fails in many shells.
+/// Scan the Claude Code projects directory for the most recently modified
+/// session file (`.jsonl`) whose project hash matches `project_path`. Returns
+/// the UUID portion of the filename (the bare session id) or `None`.
+///
+/// Claude Code stores session data under `~/.claude/projects/<hash>/` where
+/// `<hash>` is the absolute path with `/` replaced by `-`.
+fn resolve_claude_session_from_disk(project_path: &str) -> Option<String> {
+    let canonical = std::fs::canonicalize(project_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(project_path));
+    let path_str = canonical.to_string_lossy();
+    // Claude uses the path with `/` replaced by `-` as the project directory
+    // name (the leading `-` comes from the initial `/`).
+    let project_hash = path_str.replace('/', "-");
+    let claude_dir = dirs::home_dir()?
+        .join(".claude")
+        .join("projects")
+        .join(&project_hash);
+
+    if !claude_dir.is_dir() {
+        return None;
+    }
+
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    if let Ok(entries) = std::fs::read_dir(&claude_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.ends_with(".jsonl") {
+                continue;
+            }
+            let uuid = name_str.trim_end_matches(".jsonl").to_string();
+            // Quick sanity check: Claude session ids are UUID-shaped (contains hyphens).
+            if !uuid.contains('-') {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if best.as_ref().map_or(true, |(t, _)| modified > *t) {
+                        best = Some((modified, uuid));
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(_, id)| id)
+}
+
 fn wrap_command_ignore_suspend(cmd: &str) -> String {
     wrap_command_ignore_suspend_with_env(cmd, &[])
 }
@@ -1841,5 +2152,191 @@ mod tests {
         assert_eq!(second, Status::Idle);
         assert!(inst.spike_start.is_none());
         assert!(inst.pre_spike_status.is_none());
+    }
+
+    // --- Fork session tests ----------------------------------------------
+
+    fn parent_instance(tool: &str, token: Option<&str>) -> Instance {
+        let mut inst = Instance::new("parent", "/tmp/project");
+        inst.tool = tool.to_string();
+        inst.group_path = "work".to_string();
+        inst.extra_args = "--verbose".to_string();
+        inst.yolo_mode = true;
+        inst.resume_token = token.map(|s| s.to_string());
+        inst
+    }
+
+    #[test]
+    fn test_create_fork_inherits_parent_fields() {
+        let parent = parent_instance("claude", Some("abc-123"));
+        let fork = parent
+            .create_fork("my-fork".to_string(), Some("experiments".to_string()))
+            .expect("fork should succeed");
+
+        assert_ne!(fork.id, parent.id);
+        assert_eq!(fork.id.len(), parent.id.len());
+        assert_eq!(fork.title, "my-fork");
+        assert_eq!(fork.project_path, parent.project_path);
+        assert_eq!(fork.tool, parent.tool);
+        assert_eq!(fork.extra_args, parent.extra_args);
+        assert_eq!(fork.yolo_mode, parent.yolo_mode);
+        assert_eq!(fork.group_path, "experiments");
+        assert_eq!(fork.parent_session_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(fork.fork_pending.as_deref(), Some("abc-123"));
+        // Runtime state is reset.
+        assert!(fork.resume_token.is_none());
+        assert!(fork.last_error.is_none());
+        assert_eq!(fork.status, Status::Idle);
+        assert!(!fork.acknowledged);
+    }
+
+    #[test]
+    fn test_create_fork_defaults_to_parent_group() {
+        let parent = parent_instance("codex", Some("xyz"));
+        let fork = parent
+            .create_fork("sibling".to_string(), None)
+            .expect("fork should succeed");
+        assert_eq!(fork.group_path, parent.group_path);
+    }
+
+    #[test]
+    fn test_create_fork_rejects_unsupported_tool() {
+        let parent = parent_instance("gemini", Some("ignored"));
+        let err = parent
+            .create_fork("bad".to_string(), None)
+            .expect_err("gemini does not support forking");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Fork is not supported"),
+            "expected unsupported-tool error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_create_fork_rejects_missing_codex_token() {
+        let parent = parent_instance("codex", None);
+        let err = parent
+            .create_fork("too-early".to_string(), None)
+            .expect_err("codex without a resume token should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No active codex session"),
+            "expected missing-token error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_create_fork_claude_no_token_falls_back_to_disk() {
+        // Claude without resume_token should attempt disk scan.
+        // In the test environment there's no Claude project directory,
+        // so it should fail with a "No active Claude session" error.
+        let parent = parent_instance("claude", None);
+        let err = parent
+            .create_fork("no-disk".to_string(), None)
+            .expect_err("claude without token or disk session should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No active Claude session"),
+            "expected missing-session error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_create_fork_rejects_command_override() {
+        let mut parent = parent_instance("claude", Some("abc"));
+        parent.command = "claude --some-weird-wrapper".to_string();
+        let err = parent
+            .create_fork("nope".to_string(), None)
+            .expect_err("command override should block fork");
+        assert!(err.to_string().contains("custom command override"));
+    }
+
+    #[test]
+    fn test_create_fork_clears_worktree_cleanup_flag() {
+        let mut parent = parent_instance("claude", Some("abc"));
+        parent.worktree_info = Some(WorktreeInfo {
+            branch: "main".to_string(),
+            main_repo_path: "/tmp/project".to_string(),
+            managed_by_aoe: true,
+            created_at: Utc::now(),
+            cleanup_on_delete: true,
+        });
+        let fork = parent.create_fork("f".to_string(), None).unwrap();
+        let wt = fork.worktree_info.expect("worktree inherited");
+        assert!(!wt.cleanup_on_delete);
+        assert_eq!(wt.branch, "main");
+    }
+
+    #[test]
+    fn test_create_fork_generates_new_container_name() {
+        let mut parent = parent_instance("claude", Some("abc"));
+        parent.sandbox_info = Some(SandboxInfo {
+            enabled: true,
+            container_id: Some("parent-container-id".to_string()),
+            image: "ubuntu:latest".to_string(),
+            container_name: DockerContainer::generate_name(&parent.id),
+            created_at: Some(Utc::now()),
+            extra_env: None,
+            custom_instruction: None,
+        });
+        let parent_container_name = parent.sandbox_info.as_ref().unwrap().container_name.clone();
+
+        let fork = parent.create_fork("f".to_string(), None).unwrap();
+        let sandbox = fork.sandbox_info.expect("sandbox inherited");
+        assert_ne!(sandbox.container_name, parent_container_name);
+        assert_eq!(
+            sandbox.container_name,
+            DockerContainer::generate_name(&fork.id)
+        );
+        assert!(sandbox.container_id.is_none());
+    }
+
+    #[test]
+    fn test_build_base_tool_command_uses_fork_template_for_claude() {
+        let parent = parent_instance("claude", Some("parent-uuid"));
+        let fork = parent.create_fork("f".to_string(), None).unwrap();
+        let agent = crate::agents::get_agent("claude");
+        let cmd = fork.build_base_tool_command(agent, None);
+        assert!(
+            cmd.contains("claude --resume parent-uuid --fork-session"),
+            "expected claude fork command, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_base_tool_command_uses_fork_template_for_codex() {
+        let parent = parent_instance("codex", Some("parent-uuid"));
+        let fork = parent.create_fork("f".to_string(), None).unwrap();
+        let agent = crate::agents::get_agent("codex");
+        let cmd = fork.build_base_tool_command(agent, None);
+        assert!(
+            cmd.contains("codex fork parent-uuid"),
+            "expected codex fork command, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_base_tool_command_resume_beats_fork_pending() {
+        // Once AoE has captured a real resume token, fork_pending must not
+        // override it. This guards the second-launch transition.
+        let parent = parent_instance("claude", Some("old-parent-uuid"));
+        let mut fork = parent.create_fork("f".to_string(), None).unwrap();
+        fork.resume_token = Some("new-fork-uuid".to_string());
+        let agent = crate::agents::get_agent("claude");
+        let cmd = fork.build_base_tool_command(agent, Some("new-fork-uuid"));
+        assert!(
+            cmd.contains("--resume new-fork-uuid") && !cmd.contains("--fork-session"),
+            "expected plain resume command, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_instance_defaults_fork_pending_none() {
+        let json = r#"{
+            "id":"abc","title":"t","project_path":"/p","command":"",
+            "created_at":"2020-01-01T00:00:00Z"
+        }"#;
+        let inst: Instance = serde_json::from_str(json).expect("parseable");
+        assert!(inst.fork_pending.is_none());
     }
 }

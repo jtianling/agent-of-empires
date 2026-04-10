@@ -698,6 +698,12 @@ impl App {
                     return Ok(());
                 }
                 self.home.set_instance_error(session_id, None);
+                // Propagate fork_pending clearing from the clone back to the
+                // authoritative instance so subsequent restarts follow the
+                // normal resume path instead of re-forking.
+                if inst.fork_pending.is_none() {
+                    self.home.clear_fork_pending(session_id);
+                }
 
                 if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
                     let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);

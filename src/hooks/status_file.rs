@@ -35,6 +35,19 @@ pub fn read_hook_status(instance_id: &str) -> Option<Status> {
     }
 }
 
+/// Read the agent session ID written by hooks (e.g. `CLAUDE_SESSION_ID`).
+/// Returns `None` if the file doesn't exist or is empty.
+pub fn read_hook_session_id(instance_id: &str) -> Option<String> {
+    let path = hook_status_dir(instance_id).join("session_id");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 /// Remove the hook status directory for a given instance (cleanup on stop/delete).
 pub fn cleanup_hook_status_dir(instance_id: &str) {
     let dir = hook_status_dir(instance_id);
