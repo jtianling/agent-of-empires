@@ -536,16 +536,23 @@ impl HomeView {
                         .collect();
                     let group_directories = self.group_tree.get_group_directories();
                     let current_profile = self.storage.profile().to_string();
+                    // Always use launch_dir (pass None for default_group so
+                    // NewSessionDialog doesn't resolve a group directory as path).
                     let default_group = self.selected_group_context();
-                    self.new_dialog = Some(NewSessionDialog::new(
+                    let mut dialog = NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_titles,
                         existing_groups,
                         group_directories,
-                        default_group,
+                        None,
                         &current_profile,
                         &self.launch_dir,
-                    ));
+                    );
+                    // Pre-fill the group field but keep path as launch_dir
+                    if let Some(group) = default_group {
+                        dialog.set_group(group);
+                    }
+                    self.new_dialog = Some(dialog);
                 }
             }
             KeyCode::Char('N') => {
