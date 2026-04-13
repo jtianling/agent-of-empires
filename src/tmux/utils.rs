@@ -336,9 +336,15 @@ pub fn setup_session_cycle_bindings(profile: &str) {
         shell_escape(CTRL_COMMA_CSI_U_PASSTHROUGH)
     ));
     for (key, dir) in [("h", "-L"), ("j", "-D"), ("k", "-U"), ("l", "-R")] {
-        lines.push(format!("bind-key {} select-pane {}", key, dir));
+        lines.push(format!(
+            "bind-key {} if-shell -F '#{{window_zoomed_flag}}' \"select-pane {} ; resize-pane -Z\" \"select-pane {}\"",
+            key, dir, dir
+        ));
     }
-    lines.push("bind-key -T root C-\\; select-pane -t :.+".to_string());
+    lines.push(
+        "bind-key -T root C-\\; if-shell -F '#{window_zoomed_flag}' \"select-pane -t :.+ ; resize-pane -Z\" \"select-pane -t :.+\""
+            .to_string(),
+    );
     lines.push(format!(
         "bind-key -T root C-q run-shell {}",
         shell_escape(&root_ctrl_q_run_shell_cmd())

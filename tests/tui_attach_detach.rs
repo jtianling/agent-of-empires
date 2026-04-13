@@ -202,3 +202,51 @@ fn test_attach_uses_terminal_backend() {
         "attach_session should not use std::io::stdout() directly"
     );
 }
+
+#[test]
+fn test_zoom_aware_pane_switch_binding_configured() {
+    let source = std::fs::read_to_string("src/tmux/utils.rs").expect("Failed to read utils.rs");
+
+    assert!(
+        source.contains("bind-key -T root C-\\\\; if-shell -F '#{window_zoomed_flag}'"),
+        "C-; binding should branch on tmux window_zoomed_flag"
+    );
+    assert!(
+        source.contains("select-pane -t :.+ ; resize-pane -Z"),
+        "zoom-aware C-; binding should re-zoom after switching panes"
+    );
+}
+
+#[test]
+fn test_attach_session_auto_zooms_narrow_multi_pane_sessions() {
+    let source = std::fs::read_to_string("src/tui/app.rs").expect("Failed to read app.rs");
+
+    let attach_fn_start = source
+        .find("fn attach_session(")
+        .expect("attach_session function not found");
+
+    let attach_fn_section = &source[attach_fn_start..];
+    let attach_fn_end = attach_fn_section
+        .find("\n    fn ")
+        .or_else(|| attach_fn_section.find("\n}\n"))
+        .unwrap_or(attach_fn_section.len());
+
+    let attach_fn_body = &attach_fn_section[..attach_fn_end];
+
+    assert!(
+        attach_fn_body.contains("self.home.is_narrow_layout(width)"),
+        "attach_session should reuse the TUI narrow-layout threshold"
+    );
+    assert!(
+        attach_fn_body.contains("tmux_session.pane_count() > 1"),
+        "attach_session should only auto-zoom multi-pane sessions"
+    );
+    assert!(
+        attach_fn_body.contains("resize-pane\", \"-Z\", \"-t\", &agent_pane_target"),
+        "attach_session should auto-zoom pane 0 before attaching"
+    );
+    assert!(
+        attach_fn_body.contains("format!(\"{session_name}:.0\")"),
+        "attach_session should target the agent pane when auto-zooming"
+    );
+}

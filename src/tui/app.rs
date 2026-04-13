@@ -5,6 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent}
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::prelude::*;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use super::home::HomeView;
@@ -763,6 +764,44 @@ impl App {
 
         let profile = self.home.storage.profile().to_string();
         crate::tmux::utils::setup_session_cycle_bindings(&profile);
+        let is_narrow_terminal = crate::terminal::get_size()
+            .map(|(width, _)| self.home.is_narrow_layout(width))
+            .unwrap_or(false);
+        if tmux_session.pane_count() > 1 {
+            let is_zoomed = Command::new("tmux")
+                .args([
+                    "display-message",
+                    "-t",
+                    &session_name,
+                    "-p",
+                    "#{window_zoomed_flag}",
+                ])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim() == "1")
+                .unwrap_or(false);
+
+            let should_zoom = is_narrow_terminal && !is_zoomed;
+            let should_unzoom = !is_narrow_terminal && is_zoomed;
+
+            if should_zoom || should_unzoom {
+                let target = format!("{session_name}:.0");
+                match Command::new("tmux")
+                    .args(["resize-pane", "-Z", "-t", &target])
+                    .output()
+                {
+                    Ok(output) if !output.status.success() => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!("Failed to toggle zoom before attach: {}", stderr);
+                    }
+                    Err(error) => {
+                        tracing::warn!("Failed to toggle zoom before attach: {}", error);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach())?;
         reapply_tui_title(terminal, self.home.storage.profile());
 
