@@ -21,6 +21,18 @@ Run multiple AI agents in parallel across different branches of your codebase, e
 
 [![Agent of Empires Demo](https://img.youtube.com/vi/Kk8dX_F-P4E/maxresdefault.jpg)](https://www.youtube.com/watch?v=Kk8dX_F-P4E)
 
+## What This Fork Adds
+
+This fork builds on the original AoE with several quality-of-life improvements for power users managing many agents:
+
+- **Session navigation keybindings** -- `Ctrl+.` / `Ctrl+,` to quick-switch between sessions (cycling across groups), number keys `1`-`99` to jump directly to a session from both the TUI and inside tmux, `Ctrl+b b` to toggle back to the previous session (like vim's `Ctrl+^`). Inside tmux: vi-style pane navigation (`Ctrl+b h/j/k/l`), `Ctrl+;` to cycle panes, `Ctrl+Q` to one-key detach. Together these make hopping between agents feel fluid without returning to the TUI list.
+
+- **Notification bar** -- inspired by Agent Deck, the tmux status bar shows real-time status for all sessions (Running / Waiting / Idle) with status icons. Even while attached to one agent, you can glance at the status bar to see if another session is waiting for input. Combined with quick-switch, jumping over auto-acknowledges the Waiting state.
+
+- **Agent restart** -- press `R` to restart the agent pane in-place without destroying and recreating the session. Useful for agents like Claude Code that need a restart to pick up skill config changes. For Claude Code and Codex, a graceful resume-restart persists a resume token so the conversation can continue from where it left off.
+
+- **Narrow-screen layout** -- on narrow terminals (iPhone portrait, Mac split-screen, small tmux panes), the TUI automatically hides the preview panel and shows only the session list at full width. When attaching to a session with split panes, the agent pane auto-zooms for a usable full-screen view; returning to a wide terminal auto-unzooms. Pane-switch keybindings (`Ctrl+b h/j/k/l`, `Ctrl+;`) are zoom-aware, so switching panes while zoomed re-zooms the target pane seamlessly.
+
 ## Features
 
 - **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, and Pi.dev
