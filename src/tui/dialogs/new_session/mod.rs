@@ -543,6 +543,16 @@ impl NewSessionDialog {
             || self.right_pane_needs_yolo()
     }
 
+    fn sync_yolo_for_right_pane(&mut self) {
+        if self.is_terminal_selected() {
+            if self.right_pane_needs_yolo() && !self.yolo_mode {
+                self.yolo_mode = self.saved_yolo_mode.unwrap_or(self.yolo_mode_default);
+            } else if !self.right_pane_needs_yolo() {
+                self.yolo_mode = false;
+            }
+        }
+    }
+
     fn path_field(&self) -> usize {
         1
     }
@@ -969,11 +979,13 @@ impl NewSessionDialog {
             KeyCode::Left if self.focused_field == right_pane_field => {
                 let len = self.available_tools.len() + 1; // +1 for "none"
                 self.right_pane_tool_index = (self.right_pane_tool_index + len - 1) % len;
+                self.sync_yolo_for_right_pane();
                 DialogResult::Continue
             }
             KeyCode::Right | KeyCode::Char(' ') if self.focused_field == right_pane_field => {
                 let len = self.available_tools.len() + 1; // +1 for "none"
                 self.right_pane_tool_index = (self.right_pane_tool_index + 1) % len;
+                self.sync_yolo_for_right_pane();
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
@@ -1346,7 +1358,9 @@ impl NewSessionDialog {
         );
         if tool == "shell" {
             self.saved_yolo_mode = Some(self.yolo_mode);
-            self.yolo_mode = false;
+            if !self.right_pane_needs_yolo() {
+                self.yolo_mode = false;
+            }
             self.worktree_branch = Input::default();
             self.create_new_branch = true;
         } else if let Some(saved) = self.saved_yolo_mode.take() {

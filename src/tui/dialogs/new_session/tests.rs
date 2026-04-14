@@ -1249,6 +1249,48 @@ fn test_has_yolo_with_code_agent_left_and_no_right_pane() {
 }
 
 #[test]
+fn test_yolo_default_restored_when_right_pane_needs_yolo_and_left_is_shell() {
+    let mut dialog = multi_tool_dialog();
+    dialog.available_tools.push("shell");
+    dialog.yolo_mode_default = true;
+    dialog.yolo_mode = true;
+    // Switch left to shell: yolo_mode saved, set false (no right pane yet)
+    dialog.tool_index = 2; // shell
+    dialog.reload_tool_config();
+    assert!(!dialog.yolo_mode);
+    // Now select right pane = claude
+    dialog.right_pane_tool_index = 1;
+    dialog.sync_yolo_for_right_pane();
+    assert!(dialog.yolo_mode);
+}
+
+#[test]
+fn test_yolo_stays_false_when_right_pane_is_none_and_left_is_shell() {
+    let mut dialog = multi_tool_dialog();
+    dialog.available_tools.push("shell");
+    dialog.yolo_mode_default = true;
+    dialog.yolo_mode = true;
+    dialog.tool_index = 2; // shell
+    dialog.reload_tool_config();
+    // Right pane is "none"
+    dialog.right_pane_tool_index = 0;
+    dialog.sync_yolo_for_right_pane();
+    assert!(!dialog.yolo_mode);
+}
+
+#[test]
+fn test_yolo_preserved_when_switching_to_shell_with_right_pane_code_agent() {
+    let mut dialog = multi_tool_dialog();
+    dialog.available_tools.push("shell");
+    dialog.yolo_mode = true;
+    dialog.right_pane_tool_index = 1; // claude
+                                      // Switch left to shell: yolo_mode should stay true since right pane needs it
+    dialog.tool_index = 2;
+    dialog.reload_tool_config();
+    assert!(dialog.yolo_mode);
+}
+
+#[test]
 fn test_reuse_worktree_confirmation_cleared_on_branch_picker_select() {
     let mut dialog = single_tool_dialog();
     dialog.confirm_reuse_worktree = true;
