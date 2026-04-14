@@ -37,7 +37,7 @@ impl NewSessionDialog {
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
-        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
+        let has_yolo = self.has_yolo_field();
         let dialog_width = 80;
 
         // Build constraints dynamically based on visible fields only
@@ -116,7 +116,7 @@ impl NewSessionDialog {
             fi += 1;
             f
         };
-        let yolo_mode_field = if !is_terminal {
+        let yolo_mode_field = if has_yolo {
             let f = fi;
             fi += 1;
             f
@@ -1209,8 +1209,7 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let show_sandbox_options_help = has_sandbox && self.sandbox_enabled;
-        let is_terminal = self.is_terminal_selected();
-        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
+        let has_yolo = self.has_yolo_field();
 
         let dialog_width: u16 = HELP_DIALOG_WIDTH;
         // Base fields: Title, Path, Right Pane, YOLO, Worktree, New Branch, Group + close hint

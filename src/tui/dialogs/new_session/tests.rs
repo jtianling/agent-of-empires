@@ -1212,6 +1212,43 @@ fn test_right_pane_selected_tool_submits() {
 }
 
 #[test]
+fn test_has_yolo_with_shell_left_and_code_agent_right_pane() {
+    let mut dialog = multi_tool_dialog();
+    dialog.available_tools.push("shell");
+    dialog.tool_index = 2; // shell
+    dialog.right_pane_tool_index = 1; // claude
+
+    assert!(dialog.has_yolo_field());
+}
+
+#[test]
+fn test_has_yolo_with_shell_left_and_no_right_pane() {
+    let mut dialog = multi_tool_dialog();
+    dialog.available_tools.push("shell");
+    dialog.tool_index = 2; // shell
+    dialog.right_pane_tool_index = 0; // none
+
+    assert!(!dialog.has_yolo_field());
+}
+
+#[test]
+fn test_has_yolo_with_shell_left_and_shell_right_pane() {
+    let mut dialog = multi_tool_dialog();
+    dialog.available_tools.push("shell");
+    dialog.tool_index = 2; // shell
+    dialog.right_pane_tool_index = 3; // shell
+
+    assert!(!dialog.has_yolo_field());
+}
+
+#[test]
+fn test_has_yolo_with_code_agent_left_and_no_right_pane() {
+    let dialog = single_tool_dialog();
+
+    assert!(dialog.has_yolo_field());
+}
+
+#[test]
 fn test_reuse_worktree_confirmation_cleared_on_branch_picker_select() {
     let mut dialog = single_tool_dialog();
     dialog.confirm_reuse_worktree = true;

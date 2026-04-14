@@ -526,6 +526,23 @@ impl NewSessionDialog {
             .is_some_and(|y| matches!(y, crate::agents::YoloMode::AlwaysYolo))
     }
 
+    pub(super) fn right_pane_needs_yolo(&self) -> bool {
+        if self.right_pane_tool_index == 0 {
+            return false;
+        }
+
+        let tool_name = self.available_tools[self.right_pane_tool_index - 1];
+        tool_name != "shell"
+            && crate::agents::get_agent(tool_name)
+                .and_then(|a| a.yolo.as_ref())
+                .is_some_and(|y| !matches!(y, crate::agents::YoloMode::AlwaysYolo))
+    }
+
+    pub(super) fn has_yolo_field(&self) -> bool {
+        (!self.is_terminal_selected() && !self.selected_tool_always_yolo())
+            || self.right_pane_needs_yolo()
+    }
+
     fn path_field(&self) -> usize {
         1
     }
@@ -770,7 +787,7 @@ impl NewSessionDialog {
             fi += 1;
             f
         };
-        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
+        let has_yolo = self.has_yolo_field();
         let yolo_mode_field = if has_yolo {
             let f = fi;
             fi += 1;
@@ -1341,7 +1358,7 @@ impl NewSessionDialog {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
-        let has_yolo = !is_terminal && !self.selected_tool_always_yolo();
+        let has_yolo = self.has_yolo_field();
         let base = 0;
 
         // Field layout: title, path, [tool], right_pane, [yolo], [worktree],
