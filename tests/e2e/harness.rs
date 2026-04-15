@@ -858,6 +858,12 @@ impl Drop for TuiTestHarness {
             self.kill_session();
         }
 
+        // Sessions spawned by `aoe add --launch` (e.g. fork tests) land on the
+        // default tmux socket, not the harness socket, so kill_session() misses
+        // them. Sweep any session whose pane still lives inside this test's
+        // isolated HOME so orphan `claude` children don't survive the test.
+        kill_inner_aoe_sessions(self.home_dir.path());
+
         // Convert recording to GIF if one was produced.
         if let Some(cast_path) = &self.cast_path {
             // Give asciinema a moment to finalize the file after the session ends.
@@ -865,6 +871,46 @@ impl Drop for TuiTestHarness {
             if cast_path.exists() {
                 convert_cast_to_gif(cast_path);
             }
+        }
+    }
+}
+
+fn kill_inner_aoe_sessions(home_root: &Path) {
+    let Ok(root) = home_root.canonicalize() else {
+        return;
+    };
+
+    let Ok(output) = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_current_path}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut killed = std::collections::HashSet::new();
+    for line in listing.lines() {
+        let Some((session, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let Ok(path) = Path::new(path).canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(&root) {
+            continue;
+        }
+        if killed.insert(session.to_string()) {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", session])
+                .output();
         }
     }
 }
