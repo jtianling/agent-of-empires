@@ -9,16 +9,68 @@
 mod status_file;
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
 
 pub use status_file::{
-    cleanup_hook_status_dir, hook_status_dir, read_hook_session_id, read_hook_status,
+    cleanup_hook_status_dir, hook_status_dir, is_hook_fresh, read_hook_session_id,
+    read_hook_status, read_hook_status_with_mtime,
 };
 
 /// Base directory for all AoE hook status files.
 pub(crate) const HOOK_STATUS_BASE: &str = "/tmp/aoe-hooks";
+
+/// Maximum age of a hook status file before it is treated as stale.
+///
+/// In steady-state the hook writer refreshes `/tmp/aoe-hooks/<id>/status` on
+/// every `PreToolUse` / `UserPromptSubmit` / `Notification` event (typically
+/// every few seconds while an agent is working). A 30s window is long enough
+/// to tolerate single long-running tool calls (the content-detection fallback
+/// still reports Running while the spinner is visible) while being short
+/// enough to recover quickly from missed `Stop` events (Esc, client-side
+/// slash commands, crashes).
+pub(crate) const HOOK_STATUS_FRESHNESS_WINDOW: Duration = Duration::from_secs(30);
+
+/// Fresh hook-status read. Returns `Some((status, age))` only when the hook
+/// file exists, parses to a known status, and its mtime is within the
+/// freshness window. Otherwise returns `None`, which callers should treat
+/// identically to "no hook file present" (fall through to content-based
+/// detection).
+///
+/// `age` is the elapsed time since the file's mtime, useful for
+/// `tracing::debug!` output when the caller logs a stale-hook fallback. When
+/// the mtime is in the future (clock skew), `age` is reported as `Duration::ZERO`.
+pub fn read_fresh_hook_status(instance_id: &str) -> Option<(crate::session::Status, Duration)> {
+    let (status, mtime) = read_hook_status_with_mtime(instance_id)?;
+    if !is_hook_fresh(mtime) {
+        return None;
+    }
+    let age = std::time::SystemTime::now()
+        .duration_since(mtime)
+        .unwrap_or(Duration::ZERO);
+    Some((status, age))
+}
+
+/// Like [`read_fresh_hook_status`], but also returns the age when the file is
+/// present but stale. Used by callers that want to log the stale age before
+/// falling through.
+pub fn read_hook_status_with_freshness(instance_id: &str) -> Option<HookStatusRead> {
+    let (status, mtime) = read_hook_status_with_mtime(instance_id)?;
+    let age = std::time::SystemTime::now()
+        .duration_since(mtime)
+        .unwrap_or(Duration::ZERO);
+    let fresh = is_hook_fresh(mtime);
+    Some(HookStatusRead { status, age, fresh })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HookStatusRead {
+    pub status: crate::session::Status,
+    pub age: Duration,
+    pub fresh: bool,
+}
 
 /// Marker substring used to identify AoE-managed hooks in settings.json.
 /// Any hook command containing this string is considered ours.

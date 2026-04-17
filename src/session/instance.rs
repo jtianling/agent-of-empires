@@ -1141,19 +1141,35 @@ impl Instance {
         // --- Detect status for the primary (AoE-created) agent pane ---
         let mut primary_status: Option<Status> = None;
 
-        // Check hook-based status first (more reliable than tmux pane parsing)
-        if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
-            tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
-            self.clear_spike_state();
-            // Trust hook status over shell detection. Wrapper scripts (e.g.
-            // Devbox, version managers) run agents via a shell process, so
-            // `is_pane_running_shell()` returns true even though the agent is
-            // healthy. Only check if the pane is actually dead.
-            primary_status = Some(if session.is_pane_dead() {
-                Status::Error
-            } else {
-                hook_status
-            });
+        // Check hook-based status first (more reliable than tmux pane parsing).
+        // Only short-circuit when the hook file is fresh: a stale file means
+        // the agent missed a `Stop` event (Esc, client-side slash command,
+        // crash) and we must fall through to content detection instead of
+        // pinning the session to the last hook-reported state.
+        match crate::hooks::read_hook_status_with_freshness(&self.id) {
+            Some(read) if read.fresh => {
+                tracing::trace!("hook status detection '{}': {:?}", self.title, read.status);
+                self.clear_spike_state();
+                // Trust hook status over shell detection. Wrapper scripts (e.g.
+                // Devbox, version managers) run agents via a shell process, so
+                // `is_pane_running_shell()` returns true even though the agent is
+                // healthy. Only check if the pane is actually dead.
+                primary_status = Some(if session.is_pane_dead() {
+                    Status::Error
+                } else {
+                    read.status
+                });
+            }
+            Some(read) => {
+                tracing::debug!(
+                    "hook stale for '{}' (id={}, value={:?}, age={}s); falling through to content detection",
+                    self.title,
+                    self.id,
+                    read.status,
+                    read.age.as_secs()
+                );
+            }
+            None => {}
         }
 
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
@@ -2361,5 +2377,89 @@ mod tests {
         }"#;
         let inst: Instance = serde_json::from_str(json).expect("parseable");
         assert!(inst.fork_pending.is_none());
+    }
+
+    // --- Hook status freshness gating tests ---
+    //
+    // These tests exercise the decision that `update_status_with_options` uses
+    // to choose between trusting the hook file and falling through to
+    // content-based detection. The gate itself lives in
+    // `crate::hooks::read_hook_status_with_freshness`; here we verify that
+    // fresh files produce an authoritative read, stale files fall through,
+    // and missing files are reported as absent.
+    //
+    // We cannot drive the full `update_status_with_options` path in a unit
+    // test because it requires a live tmux session, so the gate is the
+    // smallest unit that captures the behavior change introduced by this
+    // feature.
+
+    fn write_hook_status_for(instance_id: &str, value: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new("/tmp/aoe-hooks").join(instance_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status");
+        std::fs::write(&path, value).unwrap();
+        path
+    }
+
+    fn set_mtime_seconds_ago(path: &std::path::Path, seconds: u64) {
+        // Shell out to `touch -t` which is POSIX and works on macOS and Linux
+        // without adding a new crate dependency for tests.
+        use chrono::{Local, TimeZone};
+        let target = Local::now() - chrono::Duration::seconds(seconds as i64);
+        let stamp = Local
+            .timestamp_opt(target.timestamp(), 0)
+            .single()
+            .unwrap()
+            .format("%Y%m%d%H%M.%S")
+            .to_string();
+        let status = std::process::Command::new("touch")
+            .args(["-t", &stamp, path.to_str().unwrap()])
+            .status()
+            .expect("touch should run");
+        assert!(status.success(), "touch -t failed for {:?}", path);
+    }
+
+    #[test]
+    fn test_update_status_fresh_hook_running_short_circuits() {
+        let id = "test_upd_fresh_hook_running";
+        let path = write_hook_status_for(id, "running");
+        let read = crate::hooks::read_hook_status_with_freshness(id).expect("file present");
+        assert!(read.fresh, "just-written file must be fresh");
+        assert_eq!(read.status, Status::Running);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn test_update_status_stale_hook_running_falls_through() {
+        let id = "test_upd_stale_hook_running";
+        let path = write_hook_status_for(id, "running");
+        set_mtime_seconds_ago(&path, 120);
+        let read = crate::hooks::read_hook_status_with_freshness(id).expect("file present");
+        assert!(!read.fresh, "file older than window must be stale");
+        assert_eq!(read.status, Status::Running);
+        assert!(read.age.as_secs() >= 60, "age should reflect mtime");
+        // The poller is expected to ignore `read.status` when !fresh and let
+        // content detection drive the final result.
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn test_update_status_stale_hook_waiting_falls_through() {
+        let id = "test_upd_stale_hook_waiting";
+        let path = write_hook_status_for(id, "waiting");
+        set_mtime_seconds_ago(&path, 3600);
+        let read = crate::hooks::read_hook_status_with_freshness(id).expect("file present");
+        assert!(!read.fresh);
+        assert_eq!(read.status, Status::Waiting);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn test_update_status_missing_hook_file_is_absent() {
+        // With no hook file at all, the reader reports None so the poller
+        // will proceed to title fast-path / content detection unchanged.
+        assert!(
+            crate::hooks::read_hook_status_with_freshness("test_upd_missing_hook_file").is_none()
+        );
     }
 }

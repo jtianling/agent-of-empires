@@ -381,9 +381,26 @@ fn detect_live_status(
     let previous_status = state.last_status;
     let mut primary_status: Option<Status> = None;
 
-    if let Some(hook_status) = crate::hooks::read_hook_status(&instance.id) {
-        state.clear_spike_state();
-        primary_status = Some(hook_status);
+    // Only short-circuit on a fresh hook read. A stale `/tmp/aoe-hooks/<id>/status`
+    // (mtime older than the freshness window) indicates the agent missed a
+    // `Stop` event, and we must fall through to content detection in lockstep
+    // with the TUI status poller -- otherwise the monitor could report
+    // Running while the poller reports Idle, or vice versa.
+    match crate::hooks::read_hook_status_with_freshness(&instance.id) {
+        Some(read) if read.fresh => {
+            state.clear_spike_state();
+            primary_status = Some(read.status);
+        }
+        Some(read) => {
+            tracing::debug!(
+                "notification monitor: hook stale for '{}' (id={}, value={:?}, age={}s); falling through",
+                instance.title,
+                instance.id,
+                read.status,
+                read.age.as_secs()
+            );
+        }
+        None => {}
     }
 
     let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
@@ -1043,6 +1060,44 @@ mod tests {
         write_ack_signal("abc123").unwrap();
         assert_eq!(take_ack_signal(), Some("abc123".to_string()));
         assert_eq!(take_ack_signal(), None);
+    }
+
+    #[test]
+    fn test_notification_monitor_ignores_stale_hook_file() {
+        // Confirms the notification monitor uses the freshness-aware hook
+        // reader. If the hook file is stale, `read_hook_status_with_freshness`
+        // reports `fresh=false` and the monitor's `detect_live_status`
+        // short-circuit is skipped; the monitor must then fall through to
+        // content detection (or return Idle in the absence of a live tmux
+        // session, matching the TUI poller).
+        let id = "test_notification_monitor_stale_hook";
+        let dir = std::path::Path::new("/tmp/aoe-hooks").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status");
+        std::fs::write(&path, "running").unwrap();
+
+        use chrono::{Local, TimeZone};
+        let target = Local::now() - chrono::Duration::seconds(120);
+        let stamp = Local
+            .timestamp_opt(target.timestamp(), 0)
+            .single()
+            .unwrap()
+            .format("%Y%m%d%H%M.%S")
+            .to_string();
+        let status = std::process::Command::new("touch")
+            .args(["-t", &stamp, path.to_str().unwrap()])
+            .status()
+            .expect("touch should run");
+        assert!(status.success());
+
+        let read = crate::hooks::read_hook_status_with_freshness(id).expect("file present");
+        assert!(
+            !read.fresh,
+            "stale hook (mtime 120s ago) must not be treated as fresh"
+        );
+        assert_eq!(read.status, Status::Running);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

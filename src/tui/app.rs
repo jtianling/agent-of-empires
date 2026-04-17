@@ -625,6 +625,13 @@ impl App {
         // trigger a restart. Only restart when the agent pane itself is dead.
         // Also trust hook status over shell detection (wrapper scripts like
         // Devbox run agents via shell, making is_pane_running_shell unreliable).
+        //
+        // Note: we intentionally do NOT freshness-gate this read. The purpose
+        // here is "does this instance have a hook-based agent that installed
+        // a status file at all?", which is a stable fact even after the
+        // status value itself goes stale. Gating on freshness would cause
+        // spurious restarts on long-idle hook-based agents, which is the
+        // opposite of what this code guards against.
         let hook_tracked = crate::hooks::read_hook_status(&instance.id).is_some();
         let needs_restart = !is_starting
             && (!session_exists

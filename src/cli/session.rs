@@ -353,7 +353,10 @@ async fn capture_session(profile: &str, args: CaptureArgs) -> Result<()> {
         } else {
             raw
         };
-        let status = crate::hooks::read_hook_status(&inst.id)
+        // Use the freshness-gated reader so `aoe session capture` doesn't
+        // report a stale "running" after the agent missed a `Stop` event.
+        let status = crate::hooks::read_fresh_hook_status(&inst.id)
+            .map(|(status, _age)| status)
             .unwrap_or_else(|| tmux_session.detect_status(&inst.tool).unwrap_or_default());
         (content, format!("{:?}", status).to_lowercase())
     };
