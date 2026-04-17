@@ -498,6 +498,13 @@ impl Instance {
                         }
                     }
                 }
+                if self.expects_shell() && env_vars.is_empty() {
+                    let escaped_dir = shell_escape(&self.project_path);
+                    let shell = crate::session::environment::user_posix_shell();
+                    let inner = format!("cd {escaped_dir} && stty susp undef; exec {cmd}");
+                    let escaped_inner = inner.replace('\'', "'\\''");
+                    return Some(format!("{shell} -lc '{escaped_inner}'"));
+                }
                 Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
             }
         }
@@ -1691,6 +1698,22 @@ mod tests {
             cmd,
             format!("{shell} -lc 'stty susp undef; exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'")
         );
+    }
+
+    #[test]
+    fn test_build_agent_command_shell_starts_in_project_path() {
+        let shell = crate::session::environment::user_posix_shell();
+        let mut inst = Instance::new("test", "/tmp/expected path");
+        inst.tool = "shell".to_string();
+        inst.command = shell.clone();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        let escaped_dir = shell_escape("/tmp/expected path");
+        let expected_inner =
+            format!("cd {escaped_dir} && stty susp undef; exec {shell}").replace('\'', "'\\''");
+        let expected = format!("{shell} -lc '{expected_inner}'");
+
+        assert_eq!(cmd, expected);
     }
 
     #[test]
