@@ -14,13 +14,18 @@ capability defines the sync and cleanup behavior and the well-known directory li
 ## Requirements
 
 ### Requirement: Sync agent directories on worktree creation
-When AoE creates a new worktree for a session, the system SHALL check the source working directory for well-known code-agent hidden directories (`.claude`, `.codex`, `.gemini`, `.cursor`, `.aider`, `.continue`). For each directory that exists in the source, is `.gitignore`'d, and does not already exist in the new worktree, the system SHALL copy it into the worktree.
+When AoE creates a new worktree for a session, the system SHALL check the source working directory for well-known code-agent hidden directories (`.claude`, `.codex`, `.gemini`, `.cursor`, `.aider`, `.continue`). For each directory that exists in the source, is NOT tracked by git (either `.gitignore`'d or simply never added to the index), and does not already exist in the new worktree, the system SHALL copy it into the worktree. Symlinks encountered during the copy SHALL be preserved as symlinks rather than dereferenced.
 
 #### Scenario: Agent directory exists and is gitignored
 - **WHEN** the source repo contains `.claude/` and it is listed in `.gitignore`
 - **AND** a new worktree is created via AoE
 - **THEN** the system SHALL copy `.claude/` to the new worktree root
 - **AND** the copied directory SHALL contain the same files as the source
+
+#### Scenario: Agent directory is untracked but not gitignored
+- **WHEN** the source repo contains `.claude/` that is neither tracked by git nor listed in `.gitignore`
+- **AND** a new worktree is created via AoE
+- **THEN** the system SHALL copy `.claude/` to the new worktree root
 
 #### Scenario: Multiple agent directories present
 - **WHEN** the source repo contains `.claude/`, `.codex/`, and `.gemini/`, all `.gitignore`'d
@@ -33,7 +38,7 @@ When AoE creates a new worktree for a session, the system SHALL check the source
 - **THEN** the system SHALL NOT overwrite the existing directory
 
 #### Scenario: Agent directory is tracked by git
-- **WHEN** the source repo contains `.claude/` but it is NOT `.gitignore`'d (it is tracked)
+- **WHEN** the source repo contains `.claude/` but it is tracked by git
 - **AND** a new worktree is created
 - **THEN** the system SHALL NOT copy `.claude/` (git already includes it in the worktree)
 
@@ -42,13 +47,20 @@ When AoE creates a new worktree for a session, the system SHALL check the source
 - **AND** a new worktree is created
 - **THEN** the system SHALL NOT attempt to copy `.codex/`
 
+#### Scenario: Symlink entry inside agent directory is preserved
+- **WHEN** the source repo contains `.agents/skills/ts-foo` as a symlink to `~/.skills-manager/custom/ts-foo`
+- **OR** contains `.claude/skills` as a symlink to `.agents/skills`
+- **AND** a new worktree is created via AoE
+- **THEN** the copied entry in the new worktree SHALL remain a symlink pointing at the same target
+- **AND** the copy SHALL NOT dereference the symlink or abort the rest of the directory copy
+
 #### Scenario: Copy failure is non-fatal
 - **WHEN** copying an agent directory fails (e.g., permission error)
 - **THEN** the system SHALL log a warning and continue with worktree creation
 - **AND** the worktree creation SHALL NOT fail due to the copy error
 
 ### Requirement: Clean up agent directories on worktree deletion
-Before removing an AoE-managed worktree, the system SHALL check for well-known code-agent hidden directories in the worktree. For each directory that is `.gitignore`'d and untracked, the system SHALL delete it before running `git worktree remove`, allowing the removal to succeed without `--force`.
+Before removing an AoE-managed worktree, the system SHALL check for well-known code-agent hidden directories in the worktree. For each directory that is NOT tracked by git in the worktree (either `.gitignore`'d or simply untracked), the system SHALL delete it before running `git worktree remove`, allowing the removal to succeed without `--force`. This mirrors the sync gate so any directory AoE may have copied in is also cleaned up.
 
 #### Scenario: Cleanup gitignored agent dirs before removal
 - **WHEN** an AoE-managed worktree contains `.claude/` that is `.gitignore`'d
@@ -56,8 +68,13 @@ Before removing an AoE-managed worktree, the system SHALL check for well-known c
 - **THEN** the system SHALL delete `.claude/` from the worktree
 - **AND** THEN run `git worktree remove` without `--force`
 
+#### Scenario: Cleanup untracked-but-not-ignored agent dirs before removal
+- **WHEN** an AoE-managed worktree contains `.agents/` that is neither tracked by git nor listed in `.gitignore`
+- **AND** the user deletes the session with worktree cleanup enabled
+- **THEN** the system SHALL delete `.agents/` from the worktree before `git worktree remove`
+
 #### Scenario: Agent directory is tracked - not cleaned up
-- **WHEN** a worktree contains `.claude/` that is tracked by git (not `.gitignore`'d)
+- **WHEN** a worktree contains `.claude/` that is tracked by git
 - **AND** the user deletes the session
 - **THEN** the system SHALL NOT delete `.claude/` before worktree removal
 
@@ -71,12 +88,23 @@ Before removing an AoE-managed worktree, the system SHALL check for well-known c
 - **THEN** the system SHALL log a warning and fall back to `git worktree remove --force`
 
 ### Requirement: Sync agent config files on worktree creation
-When AoE creates a new worktree for a session, the system SHALL check the source working directory for well-known root-level agent config files (`CLAUDE.md`, `AGENTS.md`). For each file that exists in the source, is `.gitignore`'d, and does not already exist in the new worktree, the system SHALL copy it into the worktree root.
+When AoE creates a new worktree for a session, the system SHALL check the source working directory for well-known root-level agent config files (`CLAUDE.md`, `AGENTS.md`). For each file that exists in the source, is NOT tracked by git (either `.gitignore`'d or simply untracked), and does not already exist in the new worktree, the system SHALL copy it into the worktree root. If the source entry is a symlink, the system SHALL preserve it as a symlink rather than copying the dereferenced contents.
 
 #### Scenario: Agent config file exists and is gitignored
 - **WHEN** the source repo contains `CLAUDE.md` and it is listed in `.gitignore`
 - **AND** a new worktree is created via AoE
 - **THEN** the system SHALL copy `CLAUDE.md` to the new worktree root
+
+#### Scenario: Agent config file is untracked but not gitignored
+- **WHEN** the source repo contains `AGENTS.md` that is neither tracked by git nor listed in `.gitignore`
+- **AND** a new worktree is created via AoE
+- **THEN** the system SHALL copy `AGENTS.md` to the new worktree root
+
+#### Scenario: Agent config file is a symlink
+- **WHEN** the source repo contains `CLAUDE.md` as a symlink to `AGENTS.md` (and neither is tracked)
+- **AND** a new worktree is created via AoE
+- **THEN** the copied `CLAUDE.md` in the worktree SHALL remain a symlink with the same link target
+- **AND** the system SHALL NOT materialize the symlink into a regular file containing the dereferenced contents
 
 #### Scenario: Multiple agent config files present
 - **WHEN** the source repo contains both `CLAUDE.md` and `AGENTS.md`, both `.gitignore`'d
@@ -89,7 +117,7 @@ When AoE creates a new worktree for a session, the system SHALL check the source
 - **THEN** the system SHALL NOT overwrite the existing file
 
 #### Scenario: Agent config file is tracked by git
-- **WHEN** the source repo contains `CLAUDE.md` but it is NOT `.gitignore`'d (it is tracked)
+- **WHEN** the source repo contains `CLAUDE.md` but it is tracked by git
 - **AND** a new worktree is created
 - **THEN** the system SHALL NOT copy `CLAUDE.md` (git already includes it in the worktree)
 
@@ -99,13 +127,18 @@ When AoE creates a new worktree for a session, the system SHALL check the source
 - **AND** the worktree creation SHALL NOT fail due to the copy error
 
 ### Requirement: Clean up agent config files on worktree deletion
-Before removing an AoE-managed worktree, the system SHALL check for well-known agent config files in the worktree. For each file that is `.gitignore`'d, the system SHALL delete it before running `git worktree remove`.
+Before removing an AoE-managed worktree, the system SHALL check for well-known agent config files in the worktree. For each file (or symlink) that is NOT tracked by git (either `.gitignore`'d or simply untracked), the system SHALL delete it before running `git worktree remove`. This mirrors the sync gate so any config file AoE may have copied in is also cleaned up.
 
 #### Scenario: Cleanup gitignored agent config files before removal
 - **WHEN** an AoE-managed worktree contains `CLAUDE.md` that is `.gitignore`'d
 - **AND** the user deletes the session with worktree cleanup enabled
 - **THEN** the system SHALL delete `CLAUDE.md` from the worktree
 - **AND** THEN run `git worktree remove`
+
+#### Scenario: Cleanup untracked-but-not-ignored agent config files before removal
+- **WHEN** an AoE-managed worktree contains `AGENTS.md` that is neither tracked by git nor listed in `.gitignore`
+- **AND** the user deletes the session with worktree cleanup enabled
+- **THEN** the system SHALL delete `AGENTS.md` from the worktree before `git worktree remove`
 
 #### Scenario: Agent config file is tracked - not cleaned up
 - **WHEN** a worktree contains `CLAUDE.md` that is tracked by git

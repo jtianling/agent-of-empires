@@ -29,11 +29,12 @@ const AGENT_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 use error::{GitError, Result};
 use template::{resolve_template, TemplateVars};
 
-/// Check if a path is gitignored in the given repo using `git check-ignore -q`.
-/// Returns `true` if the path is ignored, `false` if tracked or not ignored.
-fn is_gitignored(repo_path: &Path, dir_name: &str) -> bool {
+/// Check if a path is tracked by git in the given repo.
+/// Returns `true` if any file under `path` is in git's index/HEAD, `false` otherwise
+/// (including untracked-but-not-ignored, gitignored, and non-existent paths).
+fn is_tracked(repo_path: &Path, path: &str) -> bool {
     std::process::Command::new("git")
-        .args(["check-ignore", "-q", dir_name])
+        .args(["ls-files", "--error-unmatch", "--", path])
         .current_dir(repo_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -43,13 +44,22 @@ fn is_gitignored(repo_path: &Path, dir_name: &str) -> bool {
 }
 
 /// Recursively copy a directory and all its contents.
+///
+/// Symlinks (to files or directories) are preserved as symlinks in the destination
+/// rather than being dereferenced. This matters for agent-config trees like
+/// `.agents/skills/` where entries are symlinks into an external skill store;
+/// following them would either fail (symlink-to-dir via `std::fs::copy`) or detach
+/// the copy from the single source of truth.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let dst_path = dst.join(entry.file_name());
-        if ty.is_dir() {
+        if ty.is_symlink() {
+            let target = std::fs::read_link(entry.path())?;
+            std::os::unix::fs::symlink(&target, &dst_path)?;
+        } else if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst_path)?;
         } else {
             std::fs::copy(entry.path(), &dst_path)?;
@@ -256,7 +266,9 @@ impl GitWorktree {
         Ok(())
     }
 
-    /// Copy `.gitignore`'d agent directories and files from the source repo to a new worktree.
+    /// Copy untracked agent directories and files from the source repo to a new worktree.
+    /// Covers both `.gitignore`'d entries and entries that simply haven't been added to git.
+    /// Tracked entries are skipped because `git worktree add` already populates them.
     /// Failures are logged but do not prevent worktree creation.
     fn sync_agent_config_to_worktree(source_dir: &Path, worktree_dir: &Path) {
         for &dir_name in AGENT_DIRS {
@@ -269,7 +281,7 @@ impl GitWorktree {
             if target_path.exists() {
                 continue;
             }
-            if !is_gitignored(source_dir, dir_name) {
+            if is_tracked(source_dir, dir_name) {
                 continue;
             }
 
@@ -284,17 +296,27 @@ impl GitWorktree {
             let source_path = source_dir.join(file_name);
             let target_path = worktree_dir.join(file_name);
 
-            if !source_path.is_file() {
+            // is_file() follows symlinks; detect real files and symlinks-to-files.
+            let src_meta = std::fs::symlink_metadata(&source_path);
+            let is_symlink = src_meta.as_ref().map(|m| m.is_symlink()).unwrap_or(false);
+            if !source_path.is_file() && !is_symlink {
                 continue;
             }
             if target_path.exists() {
                 continue;
             }
-            if !is_gitignored(source_dir, file_name) {
+            if is_tracked(source_dir, file_name) {
                 continue;
             }
 
-            if let Err(e) = std::fs::copy(&source_path, &target_path) {
+            let copy_result = if is_symlink {
+                std::fs::read_link(&source_path)
+                    .and_then(|target| std::os::unix::fs::symlink(&target, &target_path))
+            } else {
+                std::fs::copy(&source_path, &target_path).map(|_| ())
+            };
+
+            if let Err(e) = copy_result {
                 tracing::warn!("Failed to copy agent file {} to worktree: {}", file_name, e);
             } else {
                 tracing::debug!("Copied agent file {} to worktree", file_name);
@@ -302,7 +324,9 @@ impl GitWorktree {
         }
     }
 
-    /// Remove `.gitignore`'d agent directories and files from a worktree before deletion.
+    /// Remove untracked agent directories and files from a worktree before deletion.
+    /// Mirrors `sync_agent_config_to_worktree`: anything aoe may have copied in (gitignored
+    /// or simply untracked) is removed so `git worktree remove` can succeed without `--force`.
     /// Returns `true` if all cleanups succeeded (or there was nothing to clean).
     pub fn cleanup_agent_config_from_worktree(worktree_dir: &Path) -> bool {
         let mut all_ok = true;
@@ -311,7 +335,7 @@ impl GitWorktree {
             if !dir_path.is_dir() {
                 continue;
             }
-            if !is_gitignored(worktree_dir, dir_name) {
+            if is_tracked(worktree_dir, dir_name) {
                 continue;
             }
             if let Err(e) = std::fs::remove_dir_all(&dir_path) {
@@ -328,10 +352,15 @@ impl GitWorktree {
 
         for &file_name in AGENT_FILES {
             let file_path = worktree_dir.join(file_name);
-            if !file_path.is_file() {
+            let meta = std::fs::symlink_metadata(&file_path);
+            let exists_as_file_or_symlink = meta
+                .as_ref()
+                .map(|m| m.is_file() || m.is_symlink())
+                .unwrap_or(false);
+            if !exists_as_file_or_symlink {
                 continue;
             }
-            if !is_gitignored(worktree_dir, file_name) {
+            if is_tracked(worktree_dir, file_name) {
                 continue;
             }
             if let Err(e) = std::fs::remove_file(&file_path) {
@@ -1417,15 +1446,15 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gitignored_identifies_ignored_paths() {
+    fn test_is_tracked_identifies_tracked_paths() {
         let (_dir, repo_path) = setup_repo_with_agent_dirs();
 
-        assert!(is_gitignored(&repo_path, ".claude"));
-        assert!(is_gitignored(&repo_path, ".codex"));
-        // .gitignore itself is tracked, not ignored
-        assert!(!is_gitignored(&repo_path, ".gitignore"));
-        // Non-existent dirs that aren't in .gitignore
-        assert!(!is_gitignored(&repo_path, ".gemini"));
+        // .gitignore is committed, so tracked
+        assert!(is_tracked(&repo_path, ".gitignore"));
+        // .claude is gitignored (and not in index)
+        assert!(!is_tracked(&repo_path, ".claude"));
+        // Non-existent path is also "not tracked"
+        assert!(!is_tracked(&repo_path, ".gemini"));
     }
 
     #[test]
@@ -1692,6 +1721,113 @@ mod tests {
             std::fs::read_to_string(target_dir.path().join(".agents/config.toml")).unwrap(),
             "[settings]"
         );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_preserves_symlinks() {
+        let src_root = TempDir::new().unwrap();
+        let dst_root = TempDir::new().unwrap();
+
+        // External target that the symlink points to (outside both src and dst).
+        let external = TempDir::new().unwrap();
+        let external_skill = external.path().join("some-skill");
+        std::fs::create_dir(&external_skill).unwrap();
+        std::fs::write(external_skill.join("SKILL.md"), "skill content").unwrap();
+
+        // A regular file, a real subdir, and a symlink-to-external-dir inside src.
+        let src_dir = src_root.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("plain.txt"), "plain").unwrap();
+        let real_sub = src_dir.join("real-sub");
+        std::fs::create_dir(&real_sub).unwrap();
+        std::fs::write(real_sub.join("inner.txt"), "inner").unwrap();
+        std::os::unix::fs::symlink(&external_skill, src_dir.join("linked-skill")).unwrap();
+
+        // Also a symlink-to-file inside src (e.g. CLAUDE.md -> AGENTS.md pattern).
+        std::fs::write(src_dir.join("AGENTS.md"), "# agents").unwrap();
+        std::os::unix::fs::symlink("AGENTS.md", src_dir.join("CLAUDE.md")).unwrap();
+
+        let dst_dir = dst_root.path().join("dst");
+        copy_dir_recursive(&src_dir, &dst_dir).unwrap();
+
+        // Plain file copied.
+        assert_eq!(
+            std::fs::read_to_string(dst_dir.join("plain.txt")).unwrap(),
+            "plain"
+        );
+        // Real subdir recursively copied.
+        assert_eq!(
+            std::fs::read_to_string(dst_dir.join("real-sub/inner.txt")).unwrap(),
+            "inner"
+        );
+        // Symlink-to-dir preserved as a symlink, pointing to the external target.
+        let linked = dst_dir.join("linked-skill");
+        let meta = std::fs::symlink_metadata(&linked).unwrap();
+        assert!(meta.is_symlink(), "linked-skill should be a symlink");
+        assert_eq!(std::fs::read_link(&linked).unwrap(), external_skill);
+        // Reading through it still resolves to the external file.
+        assert_eq!(
+            std::fs::read_to_string(linked.join("SKILL.md")).unwrap(),
+            "skill content"
+        );
+        // Symlink-to-file preserved as a relative symlink.
+        let md = dst_dir.join("CLAUDE.md");
+        let md_meta = std::fs::symlink_metadata(&md).unwrap();
+        assert!(md_meta.is_symlink(), "CLAUDE.md should be a symlink");
+        assert_eq!(std::fs::read_link(&md).unwrap(), PathBuf::from("AGENTS.md"));
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), "# agents");
+    }
+
+    #[test]
+    fn test_sync_agent_files_copies_untracked_not_ignored() {
+        // Source has CLAUDE.md that is NEITHER tracked NOR gitignored — the real-world
+        // case where a user keeps agent instructions next to the repo but never commits them.
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+
+        // .gitignore exists and is committed, but it does NOT list CLAUDE.md/AGENTS.md.
+        std::fs::write(repo_path.join(".gitignore"), "node_modules\n").unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(".gitignore")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Add .gitignore", &tree, &[&head])
+                .unwrap();
+        }
+
+        std::fs::write(repo_path.join("AGENTS.md"), "# agents").unwrap();
+        // CLAUDE.md as a symlink to AGENTS.md, mirroring how some projects set up the pair.
+        std::os::unix::fs::symlink("AGENTS.md", repo_path.join("CLAUDE.md")).unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        // AGENTS.md is untracked-but-not-ignored; should still be synced.
+        assert!(target_dir.path().join("AGENTS.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(target_dir.path().join("AGENTS.md")).unwrap(),
+            "# agents"
+        );
+        // CLAUDE.md symlink should be preserved as a symlink in the worktree.
+        let copied_claude = target_dir.path().join("CLAUDE.md");
+        let meta = std::fs::symlink_metadata(&copied_claude).unwrap();
+        assert!(meta.is_symlink(), "CLAUDE.md should remain a symlink");
+        assert_eq!(
+            std::fs::read_link(&copied_claude).unwrap(),
+            PathBuf::from("AGENTS.md")
+        );
+
+        drop(dir);
     }
 
     /// Sets up a bare repo whose parent directory contains a spurious `.git/` directory
