@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -122,6 +123,8 @@ impl TuiTestHarness {
     /// Create a new harness with an isolated `$HOME` and a fake `claude` stub
     /// so tool detection succeeds.
     pub fn new(test_name: &str) -> Self {
+        reap_stale_aoe_test_sessions();
+
         let home_dir = TempDir::new().expect("failed to create temp home");
         let stub_dir = TempDir::new().expect("failed to create stub dir");
 
@@ -876,9 +879,7 @@ impl Drop for TuiTestHarness {
 }
 
 fn kill_inner_aoe_sessions(home_root: &Path) {
-    let Ok(root) = home_root.canonicalize() else {
-        return;
-    };
+    let canonical_root = home_root.canonicalize().ok();
 
     let Ok(output) = Command::new("tmux")
         .args([
@@ -901,10 +902,24 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
         let Some((session, path)) = line.split_once('\t') else {
             continue;
         };
-        let Ok(path) = Path::new(path).canonicalize() else {
-            continue;
+        // When the pane cwd can still be canonicalized, match against the
+        // canonical HOME root. If it cannot (directory already deleted), fall
+        // back to raw string-prefix matching against both the raw and
+        // canonical HOME — a dead cwd inside our HOME is the strongest leak
+        // signal, but we still require a prefix match so unrelated sessions
+        // are never killed.
+        let under_root = match Path::new(path).canonicalize() {
+            Ok(resolved) => canonical_root
+                .as_ref()
+                .is_some_and(|root| resolved.starts_with(root)),
+            Err(_) => {
+                let raw = home_root.to_string_lossy();
+                let canon = canonical_root.as_deref().map(Path::to_string_lossy);
+                path.starts_with(raw.as_ref())
+                    || canon.as_deref().is_some_and(|c| path.starts_with(c))
+            }
         };
-        if !path.starts_with(&root) {
+        if !under_root {
             continue;
         }
         if killed.insert(session.to_string()) {
@@ -913,4 +928,63 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
                 .output();
         }
     }
+}
+
+/// Clean up tmux sessions leaked by prior test binaries that were killed
+/// before `Drop` could run (SIGKILL, CI timeout, Ctrl+\).
+///
+/// Only touches sessions whose name starts with `aoe_` AND whose pane cwd
+/// both looks like a platform temp dir AND no longer exists on disk. That
+/// two-factor match keeps us from ever killing sessions a user created.
+///
+/// Runs at most once per test binary via `Once`.
+fn reap_stale_aoe_test_sessions() {
+    static REAP: Once = Once::new();
+    REAP.call_once(|| {
+        let Ok(output) = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{pane_current_path}",
+            ])
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let mut to_kill = std::collections::HashSet::new();
+        for line in listing.lines() {
+            let Some((session, path)) = line.split_once('\t') else {
+                continue;
+            };
+            if !session.starts_with("aoe_") {
+                continue;
+            }
+            // Platform temp-dir fingerprint: macOS uses /var/folders/.../T/,
+            // Linux uses /tmp/. A real user session would not be rooted here.
+            let looks_temp = path.contains("/var/folders/")
+                || path.starts_with("/tmp/")
+                || path.starts_with("/private/tmp/")
+                || path.starts_with("/private/var/folders/");
+            if !looks_temp {
+                continue;
+            }
+            // Must be dead on disk. `exists()` follows symlinks; an existing
+            // path means either a live test or a path a user cares about.
+            if Path::new(path).exists() {
+                continue;
+            }
+            to_kill.insert(session.to_string());
+        }
+        for session in to_kill {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &session])
+                .output();
+        }
+    });
 }
