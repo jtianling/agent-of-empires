@@ -311,7 +311,7 @@ impl RenameDialog {
     }
 
     fn render_session(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_width = 50;
+        let dialog_width = super::responsive_width(area, 120);
         let dialog_area = super::centered_rect(area, dialog_width, 15);
 
         frame.render_widget(Clear, dialog_area);
@@ -382,7 +382,7 @@ impl RenameDialog {
     }
 
     fn render_group(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_width = 50;
+        let dialog_width = super::responsive_width(area, 120);
         let dialog_area = super::centered_rect(area, dialog_width, 13);
 
         frame.render_widget(Clear, dialog_area);

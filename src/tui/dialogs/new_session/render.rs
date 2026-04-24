@@ -38,7 +38,7 @@ impl NewSessionDialog {
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
         let has_yolo = self.has_yolo_field();
-        let dialog_width = 80;
+        let dialog_width = crate::tui::dialogs::responsive_width(area, 120);
 
         // Build constraints dynamically based on visible fields only
         let mut constraints = Vec::new();
@@ -63,7 +63,7 @@ impl NewSessionDialog {
         constraints.push(Constraint::Length(2)); // Group (always, at the bottom)
 
         // For errors, calculate how many lines we need based on the text length.
-        // Inner width = dialog_width - 2 (border) - 2 (margin) = 76
+        // Inner width tracks the responsive dialog width minus border and margin.
         let error_lines: u16 = if let Some(error) = &self.error_message {
             let inner_width = (dialog_width - 4) as usize;
             let error_text = format!("✗ Error: {}", error);
@@ -632,7 +632,7 @@ impl NewSessionDialog {
     }
 
     fn render_sandbox_config(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_width: u16 = 72;
+        let dialog_width = crate::tui::dialogs::responsive_width(area, 120);
 
         // Sandbox config fields: image, env, inherited
         let env_list_height: u16 = if self.env_list_expanded {
@@ -718,7 +718,7 @@ impl NewSessionDialog {
     }
 
     fn render_tool_config(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_width: u16 = 72;
+        let dialog_width = crate::tui::dialogs::responsive_width(area, 120);
 
         let constraints = vec![
             Constraint::Length(2), // Command Override
@@ -817,7 +817,7 @@ impl NewSessionDialog {
     }
 
     fn render_worktree_config(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_width: u16 = 72;
+        let dialog_width = crate::tui::dialogs::responsive_width(area, 120);
 
         let repos_height: u16 = if self.workspace_repos_expanded {
             (2 + self.workspace_repos.len() as u16).clamp(4, 8)

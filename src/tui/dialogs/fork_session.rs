@@ -154,7 +154,7 @@ impl ForkSessionDialog {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_width = 56;
+        let dialog_width = super::responsive_width(area, 120);
         let dialog_height = 15;
         let dialog_area = super::centered_rect(area, dialog_width, dialog_height);
 
