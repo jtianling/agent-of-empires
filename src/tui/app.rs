@@ -814,6 +814,26 @@ impl App {
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
+
+        // One-shot inner-agent discovery for shell sessions. When the user
+        // manually launches an agent (e.g. `claude`) inside a shell pane, we
+        // want the status indicator to reflect that agent's real state
+        // instead of the shell stub's always-`?`. We detect once per detach,
+        // storing the result on the in-memory instance only (never
+        // persisted). For every other tool this path is a no-op.
+        if instance.tool == "shell" {
+            let detected = crate::tmux::get_cached_pane_info(&session_name)
+                .as_ref()
+                .and_then(crate::tmux::status_detection::detect_agent_type_from_pane);
+            let normalized = match detected {
+                Some("shell") | None => None,
+                Some(agent) => Some(agent.to_string()),
+            };
+            self.home.mutate_instance(session_id, |inst| {
+                inst.detected_inner_agent = normalized;
+            });
+        }
+
         self.home.reload()?;
         if !self.try_restore_selection_from_client_context() {
             self.home.select_session_by_id(session_id);

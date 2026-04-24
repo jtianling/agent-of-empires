@@ -193,6 +193,15 @@ pub struct Instance {
     pub pre_spike_status: Option<Status>,
     #[serde(skip)]
     pub acknowledged: bool,
+    /// Runtime-only: when `tool == "shell"` and the user detaches from the
+    /// session with an agent (claude/codex/gemini/...) running in the primary
+    /// pane, this field caches the detected agent name. The status poller
+    /// uses it to dispatch to that agent's content detector instead of the
+    /// shell stub. Cleared to `None` when detection returns `shell` or
+    /// unknown. Never persisted to disk: on aoe restart every session starts
+    /// with `None` and the next detach cycle repopulates it.
+    #[serde(skip, default)]
+    pub detected_inner_agent: Option<String>,
 }
 
 impl Instance {
@@ -226,6 +235,7 @@ impl Instance {
             spike_start: None,
             pre_spike_status: None,
             acknowledged: false,
+            detected_inner_agent: None,
         }
     }
 
@@ -1185,18 +1195,42 @@ impl Instance {
         }
 
         if primary_status.is_none() {
+            // When this is a shell session and a previous detach cached an
+            // inner agent (e.g. user ran `claude` inside the shell and
+            // detached), dispatch to that agent's content detector instead
+            // of the shell stub. The capture uses the same cached 50-line
+            // capture path as `session.detect_status` to avoid a double
+            // capture on the same poll cycle.
+            let inner_agent = if self.tool == "shell" {
+                self.detected_inner_agent.clone()
+            } else {
+                None
+            };
+
             let mut detected = if options.allow_capture {
-                match session.detect_status(&self.tool) {
-                    Ok(status) => status,
-                    Err(_) => Status::Idle,
+                match inner_agent.as_deref() {
+                    Some(agent) => match session.capture_pane_cached(50) {
+                        Ok(content) => {
+                            let fg_pid = session.get_foreground_pid();
+                            tmux::status_detection::detect_status_from_content(
+                                &content, agent, fg_pid,
+                            )
+                        }
+                        Err(_) => Status::Idle,
+                    },
+                    None => match session.detect_status(&self.tool) {
+                        Ok(status) => status,
+                        Err(_) => Status::Idle,
+                    },
                 }
             } else {
                 options.reused_status.unwrap_or(previous_status)
             };
             tracing::trace!(
-                "status detection '{}' (tool={}, custom_cmd={}, allow_capture={}): {:?}",
+                "status detection '{}' (tool={}, inner_agent={:?}, custom_cmd={}, allow_capture={}): {:?}",
                 self.title,
                 self.tool,
+                inner_agent,
                 self.has_custom_command(),
                 options.allow_capture,
                 detected
@@ -1211,11 +1245,22 @@ impl Instance {
                 detected = self.apply_spinner_grace_period(detected, previous_status, now);
             }
 
-            // Apply shell/dead heuristics for single-pane sessions
+            // Apply shell/dead heuristics for single-pane sessions.
+            // When `detected_inner_agent` is Some, we trust the detected
+            // agent's content detector: a concrete `Idle` from (e.g.)
+            // claude must surface as `Idle`, not be rewritten to `Unknown`
+            // by the shell-tool heuristic.
             let is_single_pane = session.pane_count() <= 1;
             let is_shell_stale =
                 || is_single_pane && !self.expects_shell() && session.is_pane_running_shell();
             detected = match detected {
+                Status::Idle if inner_agent.is_some() => {
+                    if session.is_pane_dead() {
+                        Status::Error
+                    } else {
+                        Status::Idle
+                    }
+                }
                 Status::Idle if self.has_custom_command() => {
                     if session.is_pane_dead() || is_shell_stale() {
                         Status::Error
@@ -2461,5 +2506,182 @@ mod tests {
         assert!(
             crate::hooks::read_hook_status_with_freshness("test_upd_missing_hook_file").is_none()
         );
+    }
+
+    // --- detected_inner_agent tests ----------------------------------------
+    //
+    // These cover the shell-session-in-memory inner-agent discovery field.
+    // The end-to-end status dispatch path requires a live tmux session so
+    // the full `update_status_with_options` is exercised in e2e tests; here
+    // we focus on the pure in-process decisions that gate behavior on the
+    // field's value.
+
+    #[test]
+    fn test_detected_inner_agent_default_is_none() {
+        let inst = Instance::new("test", "/tmp/test");
+        assert!(inst.detected_inner_agent.is_none());
+    }
+
+    /// Simulates the attach-return path's normalization logic. The real
+    /// writer in `src/tui/app.rs::attach_session` uses the same rule:
+    /// `Some("shell") | None` → `None`, `Some(x)` → `Some(x.to_string())`.
+    fn normalize_detected_agent(detected: Option<&str>) -> Option<String> {
+        match detected {
+            Some("shell") | None => None,
+            Some(agent) => Some(agent.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_detected_inner_agent_normalization_clears_on_shell_or_none() {
+        assert_eq!(normalize_detected_agent(Some("shell")), None);
+        assert_eq!(normalize_detected_agent(None), None);
+    }
+
+    #[test]
+    fn test_detected_inner_agent_normalization_stores_known_agents() {
+        assert_eq!(
+            normalize_detected_agent(Some("claude")),
+            Some("claude".to_string())
+        );
+        assert_eq!(
+            normalize_detected_agent(Some("codex")),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detected_inner_agent_not_serialized() {
+        // Field MUST be `#[serde(skip)]` so a round trip to disk drops it.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.detected_inner_agent = Some("claude".to_string());
+        let json = serde_json::to_string(&inst).expect("serialize");
+        assert!(
+            !json.contains("detected_inner_agent"),
+            "field leaked into serialized JSON: {json}"
+        );
+        let restored: Instance = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            restored.detected_inner_agent.is_none(),
+            "deserialize must produce None, got {:?}",
+            restored.detected_inner_agent
+        );
+    }
+
+    /// Captures the dispatch rule used by `update_status_with_options`: when
+    /// `tool == "shell"` and `detected_inner_agent = Some(X)`, content
+    /// detection routes through `detect_status_from_content(_, X, _)`. This
+    /// verifies the routing plus concrete running/idle fixtures for claude.
+    #[test]
+    fn test_detect_dispatch_uses_inner_agent_for_claude_running() {
+        let inst = {
+            let mut i = Instance::new("test", "/tmp/test");
+            i.tool = "shell".to_string();
+            i.detected_inner_agent = Some("claude".to_string());
+            i
+        };
+        let agent = inst.detected_inner_agent.as_deref().expect("set above");
+        let content = "Some output\n\u{280b} Working on task...\n";
+        let status =
+            crate::tmux::status_detection::detect_status_from_content(content, agent, None);
+        assert_eq!(status, Status::Running);
+    }
+
+    #[test]
+    fn test_detect_dispatch_uses_inner_agent_for_claude_idle() {
+        let inst = {
+            let mut i = Instance::new("test", "/tmp/test");
+            i.tool = "shell".to_string();
+            i.detected_inner_agent = Some("claude".to_string());
+            i
+        };
+        let agent = inst.detected_inner_agent.as_deref().expect("set above");
+        let content = "Done.\n\n\u{276f} \n";
+        let status =
+            crate::tmux::status_detection::detect_status_from_content(content, agent, None);
+        assert_eq!(status, Status::Idle);
+    }
+
+    /// Isolates the post-detection status rewrite. Task 3.3 requires that
+    /// a concrete `Idle` from a real agent detector (when the session has
+    /// `detected_inner_agent = Some(_)`) surface as `Idle`, NOT be
+    /// rewritten to `Unknown` by the shell/custom-command heuristic.
+    fn apply_idle_rewrite(
+        detected: Status,
+        inner_agent_set: bool,
+        has_custom_command: bool,
+        pane_dead: bool,
+        shell_stale: bool,
+    ) -> Status {
+        match detected {
+            Status::Idle if inner_agent_set => {
+                if pane_dead {
+                    Status::Error
+                } else {
+                    Status::Idle
+                }
+            }
+            Status::Idle if has_custom_command => {
+                if pane_dead || shell_stale {
+                    Status::Error
+                } else {
+                    Status::Unknown
+                }
+            }
+            Status::Idle if pane_dead || shell_stale => Status::Error,
+            other => other,
+        }
+    }
+
+    #[test]
+    fn test_idle_rewrite_preserves_idle_for_detected_agent() {
+        assert_eq!(
+            apply_idle_rewrite(Status::Idle, true, true, false, false),
+            Status::Idle,
+        );
+    }
+
+    #[test]
+    fn test_idle_rewrite_dead_pane_with_detected_agent_becomes_error() {
+        assert_eq!(
+            apply_idle_rewrite(Status::Idle, true, true, true, false),
+            Status::Error,
+        );
+    }
+
+    #[test]
+    fn test_idle_rewrite_shell_without_detected_agent_becomes_unknown() {
+        // Current shell-session default: `has_custom_command` true, no
+        // detected inner agent, alive pane, not shell-stale → Unknown.
+        assert_eq!(
+            apply_idle_rewrite(Status::Idle, false, true, false, false),
+            Status::Unknown,
+        );
+    }
+
+    #[test]
+    fn test_idle_rewrite_agent_running_passes_through() {
+        // Non-Idle statuses are untouched regardless of flags.
+        assert_eq!(
+            apply_idle_rewrite(Status::Running, true, true, false, false),
+            Status::Running,
+        );
+        assert_eq!(
+            apply_idle_rewrite(Status::Waiting, false, true, false, false),
+            Status::Waiting,
+        );
+    }
+
+    #[test]
+    fn test_detected_inner_agent_not_mutated_by_update_status_short_circuit() {
+        // The polling path must never write to `detected_inner_agent`.
+        // Here we drive `update_status_with_options` down its early-exit
+        // branch (Stopped status) and confirm the field is preserved.
+        let mut inst = Instance::new("test_no_mutate_on_stopped", "/tmp/test");
+        inst.tool = "shell".to_string();
+        inst.detected_inner_agent = Some("claude".to_string());
+        inst.status = Status::Stopped;
+        inst.update_status_with_options(StatusUpdateOptions::default());
+        assert_eq!(inst.detected_inner_agent.as_deref(), Some("claude"));
     }
 }

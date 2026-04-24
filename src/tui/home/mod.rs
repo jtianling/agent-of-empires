@@ -314,6 +314,7 @@ impl HomeView {
                 inst.spike_start = prev.spike_start;
                 inst.pre_spike_status = prev.pre_spike_status;
                 inst.acknowledged = prev.acknowledged;
+                inst.detected_inner_agent = prev.detected_inner_agent.clone();
             }
         }
 
