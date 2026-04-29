@@ -821,7 +821,13 @@ impl App {
         // instead of the shell stub's always-`?`. We detect once per detach,
         // storing the result on the in-memory instance only (never
         // persisted). For every other tool this path is a no-op.
+        //
+        // The pane-info cache is refreshed explicitly here: attach typically
+        // exceeds the 2s cache TTL, so the cached entry is stale (or missing)
+        // and would yield None for the foreground process the user just
+        // launched.
         if instance.tool == "shell" {
+            crate::tmux::refresh_pane_info_cache();
             let detected = crate::tmux::get_cached_pane_info(&session_name)
                 .as_ref()
                 .and_then(crate::tmux::status_detection::detect_agent_type_from_pane);
