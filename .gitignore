@@ -54,6 +54,7 @@ sdd-*/
 
 # Personal/local files
 *.screenstudio/
+skillsmgr-deploy.json
 
 debug.log
 website/.next/
