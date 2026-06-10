@@ -123,6 +123,14 @@ impl NewSessionDialog {
         } else {
             usize::MAX
         };
+        let has_cross_agent_team = self.has_cross_agent_team_field();
+        let cross_agent_team_field = if has_cross_agent_team {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
         let worktree_field = if !is_terminal {
             let f = fi;
             fi += 1;
@@ -289,7 +297,7 @@ impl NewSessionDialog {
                 Style::default().fg(theme.dimmed)
             };
 
-            let yolo_line = Line::from(vec![
+            let mut yolo_spans = vec![
                 Span::styled("YOLO Mode:", yolo_label_style),
                 Span::raw(" "),
                 Span::styled(yolo_checkbox, yolo_checkbox_style),
@@ -301,8 +309,29 @@ impl NewSessionDialog {
                         Style::default().fg(theme.dimmed)
                     },
                 ),
-            ]);
-            frame.render_widget(Paragraph::new(yolo_line), chunks[ci]);
+            ];
+
+            // Cross Agent Team checkbox, rendered to the right of YOLO Mode.
+            if has_cross_agent_team {
+                let is_cat_focused = self.focused_field == cross_agent_team_field;
+                let cat_label_style = if is_cat_focused {
+                    Style::default().fg(theme.accent).underlined()
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                let cat_checkbox = if self.cross_agent_team { "[x]" } else { "[ ]" };
+                let cat_checkbox_style = if self.cross_agent_team {
+                    Style::default().fg(theme.accent).bold()
+                } else {
+                    Style::default().fg(theme.dimmed)
+                };
+                yolo_spans.push(Span::raw("    "));
+                yolo_spans.push(Span::styled("Cross Agent Team:", cat_label_style));
+                yolo_spans.push(Span::raw(" "));
+                yolo_spans.push(Span::styled(cat_checkbox, cat_checkbox_style));
+            }
+
+            frame.render_widget(Paragraph::new(Line::from(yolo_spans)), chunks[ci]);
             ci += 1;
         }
 
@@ -1210,6 +1239,7 @@ impl NewSessionDialog {
         let has_sandbox = self.docker_available;
         let show_sandbox_options_help = has_sandbox && self.sandbox_enabled;
         let has_yolo = self.has_yolo_field();
+        let has_cross_agent_team = self.has_cross_agent_team_field();
 
         let dialog_width: u16 = HELP_DIALOG_WIDTH;
         // Base fields: Title, Path, Right Pane, YOLO, Worktree, New Branch, Group + close hint
@@ -1247,7 +1277,10 @@ impl NewSessionDialog {
             if idx == 5 && !has_yolo {
                 continue; // YOLO (hidden for terminal and AlwaysYolo agents)
             }
-            // idx 6 (Worktree), 7 (New Branch) always shown
+            if idx == 6 && !has_cross_agent_team {
+                continue; // Cross Agent Team (claude-only, non-sandbox)
+            }
+            // idx 7 (Worktree) always shown
             if idx == 8 && !has_sandbox {
                 continue; // Sandbox
             }

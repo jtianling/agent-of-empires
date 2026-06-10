@@ -116,7 +116,7 @@ pub struct AppStateConfig {
 }
 
 /// Session-related configuration defaults
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
     /// Default coding tool for new sessions (claude, opencode, vibe, codex)
     /// If not set or tool is unavailable, falls back to first available tool
@@ -127,6 +127,15 @@ pub struct SessionConfig {
     #[serde(default)]
     pub yolo_mode_default: bool,
 
+    /// Enable Cross Agent Team mode by default for new claude sessions
+    #[serde(default)]
+    pub cross_agent_team_default: bool,
+
+    /// Development-channels string appended after
+    /// `--dangerously-load-development-channels` for Cross Agent Team sessions
+    #[serde(default = "default_cross_agent_team_channel")]
+    pub cross_agent_team_channel: String,
+
     /// Per-agent extra arguments appended after the binary (e.g., opencode = "--port 8080")
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub agent_extra_args: HashMap<String, String>,
@@ -134,6 +143,23 @@ pub struct SessionConfig {
     /// Per-agent command override replacing the binary entirely (e.g., claude = "happy cli claude")
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub agent_command_override: HashMap<String, String>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            default_tool: None,
+            yolo_mode_default: false,
+            cross_agent_team_default: false,
+            cross_agent_team_channel: default_cross_agent_team_channel(),
+            agent_extra_args: HashMap::new(),
+            agent_command_override: HashMap::new(),
+        }
+    }
+}
+
+fn default_cross_agent_team_channel() -> String {
+    "server:cross-agent-teams-channel".to_string()
 }
 
 /// Diff view configuration

@@ -52,6 +52,30 @@ pub struct PendingResume {
     pub timeout: Duration,
 }
 
+/// Screen markers that identify Claude's startup confirmation prompts. Each
+/// default-highlights the safe-to-proceed option, so a single Enter confirms.
+const AUTO_CONFIRM_MARKERS: &[&str] = &[
+    "Loading development channels",
+    "I am using this for local development",
+    "Quick safety check",
+    "trust this folder",
+];
+
+/// Total budget for the auto-confirm background loop.
+const AUTO_CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
+/// Delay after sending Enter before polling again, so the next screen can render.
+const AUTO_CONFIRM_SEND_INTERVAL: Duration = Duration::from_millis(700);
+/// Poll cadence while waiting for a confirmation screen to appear.
+const AUTO_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Once at least one Enter has been sent, stop after this long with no marker
+/// on screen (Claude has moved past the confirmation prompts).
+const AUTO_CONFIRM_DONE_GRACE: Duration = Duration::from_millis(1500);
+
+/// Whether the captured pane content shows one of Claude's confirmation screens.
+fn is_auto_confirm_screen(output: &str) -> bool {
+    AUTO_CONFIRM_MARKERS.iter().any(|m| output.contains(m))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StatusUpdateOptions {
     pub allow_capture: bool,
@@ -136,6 +160,14 @@ pub struct Instance {
     pub tool: String,
     #[serde(default)]
     pub yolo_mode: bool,
+    /// When set (claude, non-sandboxed only), launches with the xats
+    /// development-channels flag and auto-confirms Claude's startup screens.
+    #[serde(default)]
+    pub cross_agent_team: bool,
+    /// Development-channels string appended after
+    /// `--dangerously-load-development-channels` when `cross_agent_team` is set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cross_agent_team_channel: String,
     #[serde(default)]
     pub status: Status,
     pub created_at: DateTime<Utc>,
@@ -216,6 +248,8 @@ impl Instance {
             extra_args: String::new(),
             tool: "claude".to_string(),
             yolo_mode: false,
+            cross_agent_team: false,
+            cross_agent_team_channel: String::new(),
             status: Status::Idle,
             created_at: Utc::now(),
             last_accessed_at: None,
@@ -260,6 +294,67 @@ impl Instance {
 
     pub fn is_yolo_mode(&self) -> bool {
         self.yolo_mode
+    }
+
+    /// Whether this instance launches in Cross Agent Team mode (claude only).
+    pub fn is_cross_agent_team(&self) -> bool {
+        self.cross_agent_team && self.tool == "claude"
+    }
+
+    /// Spawn a detached background thread that auto-confirms Claude's startup
+    /// screens by polling the agent pane and sending Enter when a recognized
+    /// confirmation prompt is shown. Runs independently of the TUI loop, so it
+    /// keeps working while the user is attached to the tmux session. No-ops when
+    /// the session is not in Cross Agent Team mode.
+    fn spawn_auto_confirm(&self) {
+        if !self.is_cross_agent_team() {
+            return;
+        }
+        let id = self.id.clone();
+        let title = self.title.clone();
+        std::thread::spawn(move || {
+            let Ok(session) = tmux::Session::new(&id, &title) else {
+                return;
+            };
+            let start = Instant::now();
+            let mut sent = 0u32;
+            let mut last_marker_seen = Instant::now();
+            while start.elapsed() < AUTO_CONFIRM_TIMEOUT {
+                let output = session.capture_pane(80).unwrap_or_default();
+                if is_auto_confirm_screen(&output) {
+                    last_marker_seen = Instant::now();
+                    if let Err(err) = session.send_keys_to_agent_pane(&["Enter"]) {
+                        tracing::warn!("auto-confirm send failed: {}", err);
+                        return;
+                    }
+                    sent += 1;
+                    std::thread::sleep(AUTO_CONFIRM_SEND_INTERVAL);
+                } else {
+                    if sent >= 1 && last_marker_seen.elapsed() >= AUTO_CONFIRM_DONE_GRACE {
+                        return;
+                    }
+                    std::thread::sleep(AUTO_CONFIRM_POLL_INTERVAL);
+                }
+            }
+        });
+    }
+
+    /// The `--dangerously-load-development-channels <channel>` flag for Cross
+    /// Agent Team launches, or `None` when the mode is off. Falls back to the
+    /// default channel when the stored channel is empty.
+    fn cross_agent_team_flag(&self) -> Option<String> {
+        if !self.is_cross_agent_team() {
+            return None;
+        }
+        let channel = if self.cross_agent_team_channel.is_empty() {
+            "server:cross-agent-teams-channel"
+        } else {
+            self.cross_agent_team_channel.as_str()
+        };
+        Some(format!(
+            "--dangerously-load-development-channels {}",
+            channel
+        ))
     }
 
     fn has_custom_command(&self) -> bool {
@@ -408,6 +503,8 @@ impl Instance {
         tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
 
+        self.spawn_auto_confirm();
+
         // Apply all configured tmux options (status bar, mouse, etc.)
         self.apply_tmux_options(&Self::current_profile());
 
@@ -486,6 +583,9 @@ impl Instance {
                             }
                         }
                     }
+                    if let Some(flag) = self.cross_agent_team_flag() {
+                        cmd = format!("{} {}", cmd, flag);
+                    }
                     wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
                 })
             } else {
@@ -507,6 +607,9 @@ impl Instance {
                             crate::agents::YoloMode::AlwaysYolo => {}
                         }
                     }
+                }
+                if let Some(flag) = self.cross_agent_team_flag() {
+                    cmd = format!("{} {}", cmd, flag);
                 }
                 if self.expects_shell() && env_vars.is_empty() {
                     let escaped_dir = shell_escape(&self.project_path);
@@ -834,6 +937,8 @@ impl Instance {
 
         session.kill_agent_pane_process_tree();
         session.respawn_agent_pane(&cmd, &self.project_path)?;
+
+        self.spawn_auto_confirm();
 
         self.apply_tmux_options(&Self::current_profile());
 
@@ -1758,6 +1863,126 @@ mod tests {
         assert_eq!(
             cmd,
             format!("{shell} -lc 'stty susp undef; exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'")
+        );
+    }
+
+    #[test]
+    fn test_cross_agent_team_flag_appended_when_enabled() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            cmd.contains(
+                "--dangerously-load-development-channels server:cross-agent-teams-channel"
+            ),
+            "expected dev-channels flag, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_cross_agent_team_flag_absent_when_disabled() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = false;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            !cmd.contains("--dangerously-load-development-channels"),
+            "did not expect dev-channels flag, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_cross_agent_team_coexists_with_yolo() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.yolo_mode = true;
+        inst.cross_agent_team = true;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            cmd.contains("--dangerously-skip-permissions"),
+            "expected yolo flag, got {cmd}"
+        );
+        assert!(
+            cmd.contains(
+                "--dangerously-load-development-channels server:cross-agent-teams-channel"
+            ),
+            "expected dev-channels flag, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_cross_agent_team_custom_channel() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+        inst.cross_agent_team_channel = "server:my-channel".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            cmd.contains("--dangerously-load-development-channels server:my-channel"),
+            "expected custom channel, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_cross_agent_team_no_token_injection() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            !cmd.contains("CROSS_AGENT_TEAMS_MCP_TOKEN"),
+            "token must be inherited from environment, not injected: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_is_auto_confirm_screen_dev_channels() {
+        let screen = "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n    2. Exit";
+        assert!(is_auto_confirm_screen(screen));
+    }
+
+    #[test]
+    fn test_is_auto_confirm_screen_trust_folder() {
+        let screen = " Quick safety check: Is this a project you created or one you trust?\n ❯ 1. Yes, I trust this folder";
+        assert!(is_auto_confirm_screen(screen));
+    }
+
+    #[test]
+    fn test_is_auto_confirm_screen_negative() {
+        let screen = "Welcome to Claude Code\n> how can I help?";
+        assert!(!is_auto_confirm_screen(screen));
+    }
+
+    #[test]
+    fn test_spawn_auto_confirm_noop_for_non_cross_agent_team() {
+        // Must not panic or spawn work when the mode is off.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = false;
+        inst.spawn_auto_confirm();
+
+        // Also a no-op for non-claude even if the flag is set.
+        inst.tool = "codex".to_string();
+        inst.cross_agent_team = true;
+        inst.spawn_auto_confirm();
+    }
+
+    #[test]
+    fn test_cross_agent_team_ignored_for_non_claude() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.cross_agent_team = true;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            !cmd.contains("--dangerously-load-development-channels"),
+            "dev-channels flag should be claude-only, got {cmd}"
         );
     }
 

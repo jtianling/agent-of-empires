@@ -71,6 +71,8 @@ pub enum FieldKey {
     Mouse,
     // Session
     DefaultTool,
+    CrossAgentTeamDefault,
+    CrossAgentTeamChannel,
     AgentExtraArgs,
     AgentCommandOverride,
     // Sound
@@ -772,6 +774,18 @@ fn build_session_fields(
         session.and_then(|s| s.yolo_mode_default),
     );
 
+    let (cross_agent_team_default, cat_default_override) = resolve_value(
+        scope,
+        global.session.cross_agent_team_default,
+        session.and_then(|s| s.cross_agent_team_default),
+    );
+
+    let (cross_agent_team_channel, cat_channel_override) = resolve_value(
+        scope,
+        global.session.cross_agent_team_channel.clone(),
+        session.and_then(|s| s.cross_agent_team_channel.clone()),
+    );
+
     // Agent extra args: HashMap -> Vec<String> of "key=value" items for List field
     let (extra_args_map, extra_args_override) = resolve_value(
         scope,
@@ -855,6 +869,31 @@ fn build_session_fields(
             inherited_display: inherited_if(
                 yolo_override,
                 FieldValue::Bool(global.session.yolo_mode_default),
+            ),
+        },
+        SettingField {
+            key: FieldKey::CrossAgentTeamDefault,
+            label: "Cross Agent Team Default",
+            description: "Enable Cross Agent Team mode by default for new claude sessions",
+            value: FieldValue::Bool(cross_agent_team_default),
+            category: SettingsCategory::Session,
+            has_override: cat_default_override,
+            inherited_display: inherited_if(
+                cat_default_override,
+                FieldValue::Bool(global.session.cross_agent_team_default),
+            ),
+        },
+        SettingField {
+            key: FieldKey::CrossAgentTeamChannel,
+            label: "Cross Agent Team Channel",
+            description:
+                "Channel appended after --dangerously-load-development-channels for Cross Agent Team",
+            value: FieldValue::Text(cross_agent_team_channel),
+            category: SettingsCategory::Session,
+            has_override: cat_channel_override,
+            inherited_display: inherited_if(
+                cat_channel_override,
+                FieldValue::Text(global.session.cross_agent_team_channel.clone()),
             ),
         },
         SettingField {
@@ -1166,6 +1205,12 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
             config.session.default_tool =
                 crate::agents::name_from_settings_index(*selected).map(|s| s.to_string());
         }
+        (FieldKey::CrossAgentTeamDefault, FieldValue::Bool(v)) => {
+            config.session.cross_agent_team_default = *v
+        }
+        (FieldKey::CrossAgentTeamChannel, FieldValue::Text(v)) => {
+            config.session.cross_agent_team_channel = v.clone()
+        }
         (FieldKey::AgentExtraArgs, FieldValue::List(v)) => {
             config.session.agent_extra_args = parse_key_value_list(v);
         }
@@ -1342,6 +1387,18 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
         }
         (FieldKey::YoloModeDefault, FieldValue::Bool(v)) => {
             set_profile_override(*v, &mut config.session, |s, val| s.yolo_mode_default = val);
+        }
+        (FieldKey::CrossAgentTeamDefault, FieldValue::Bool(v)) => {
+            set_profile_override(*v, &mut config.session, |s, val| {
+                s.cross_agent_team_default = val
+            });
+        }
+        (FieldKey::CrossAgentTeamChannel, FieldValue::Text(v)) => {
+            use crate::session::SessionConfigOverride;
+            let s = config
+                .session
+                .get_or_insert_with(SessionConfigOverride::default);
+            s.cross_agent_team_channel = Some(v.clone());
         }
         (FieldKey::AgentExtraArgs, FieldValue::List(v)) => {
             let map = parse_key_value_list(v);

@@ -97,10 +97,13 @@ fn test_tab_cycles_fields_single_tool() {
     assert_eq!(dialog.focused_field, 3); // yolo mode
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // worktree branch
+    assert_eq!(dialog.focused_field, 4); // cross agent team
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // group
+    assert_eq!(dialog.focused_field, 5); // worktree branch
+
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, 6); // group
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -124,13 +127,16 @@ fn test_tab_cycles_fields_single_tool_with_worktree() {
     assert_eq!(dialog.focused_field, 3); // yolo mode
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // worktree branch
+    assert_eq!(dialog.focused_field, 4); // cross agent team
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // new branch checkbox (now visible)
+    assert_eq!(dialog.focused_field, 5); // worktree branch
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // group
+    assert_eq!(dialog.focused_field, 6); // new branch checkbox (now visible)
+
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, 7); // group
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -154,10 +160,13 @@ fn test_tab_cycles_fields_multi_tool() {
     assert_eq!(dialog.focused_field, 4); // yolo mode
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // worktree branch
+    assert_eq!(dialog.focused_field, 5); // cross agent team
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // group
+    assert_eq!(dialog.focused_field, 6); // worktree branch
+
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, 7); // group
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start (no new_branch without worktree)
@@ -169,10 +178,13 @@ fn test_backtab_cycles_fields_reverse() {
     assert_eq!(dialog.focused_field, 0); // title
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 5); // group (last field without worktree/docker)
+    assert_eq!(dialog.focused_field, 6); // group (last field without worktree/docker)
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 4); // worktree branch
+    assert_eq!(dialog.focused_field, 5); // worktree branch
+
+    dialog.handle_key(shift_key(KeyCode::BackTab));
+    assert_eq!(dialog.focused_field, 4); // cross agent team
 
     dialog.handle_key(shift_key(KeyCode::BackTab));
     assert_eq!(dialog.focused_field, 3); // yolo mode
@@ -431,7 +443,7 @@ fn test_ctrl_a_jumps_to_start_of_path() {
 #[test]
 fn test_char_input_to_group() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 5; // group (single tool: title=0, path=1, right_pane=2, yolo=3, worktree=4, group=5)
+    dialog.focused_field = 6; // group (single tool: title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4, worktree=5, group=6)
     dialog.handle_key(key(KeyCode::Char('w')));
     dialog.handle_key(key(KeyCode::Char('o')));
     dialog.handle_key(key(KeyCode::Char('r')));
@@ -555,8 +567,8 @@ fn test_new_branch_checkbox_default_true() {
 fn test_new_branch_checkbox_toggle() {
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature-branch".to_string());
-    // new_branch checkbox: title=0, path=1, right_pane=2, yolo=3, worktree=4, new_branch=5
-    dialog.focused_field = 5;
+    // new_branch checkbox: title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4, worktree=5, new_branch=6
+    dialog.focused_field = 6;
     assert!(dialog.create_new_branch);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -570,7 +582,7 @@ fn test_new_branch_checkbox_toggle() {
 fn test_submit_respects_create_new_branch() {
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature-branch".to_string());
-    dialog.focused_field = 5; // new_branch
+    dialog.focused_field = 6; // new_branch
     dialog.handle_key(key(KeyCode::Char(' '))); // Toggle off
 
     let result = dialog.handle_key(key(KeyCode::Enter));
@@ -587,13 +599,14 @@ fn test_new_branch_field_hidden_without_worktree() {
     let mut dialog = single_tool_dialog();
     assert_eq!(dialog.focused_field, 0);
 
-    // Tab through: title(0) -> path(1) -> right_pane(2) -> yolo(3) -> worktree(4) -> group(5) -> wrap to 0
+    // Tab: title(0) -> path(1) -> right_pane(2) -> yolo(3) -> cross_agent_team(4) -> worktree(5) -> group(6) -> wrap
     dialog.handle_key(key(KeyCode::Tab)); // 1 (path)
     dialog.handle_key(key(KeyCode::Tab)); // 2 (right pane)
     dialog.handle_key(key(KeyCode::Tab)); // 3 (yolo)
-    dialog.handle_key(key(KeyCode::Tab)); // 4 (worktree)
-    dialog.handle_key(key(KeyCode::Tab)); // 5 (group)
-    assert_eq!(dialog.focused_field, 5);
+    dialog.handle_key(key(KeyCode::Tab)); // 4 (cross agent team)
+    dialog.handle_key(key(KeyCode::Tab)); // 5 (worktree)
+    dialog.handle_key(key(KeyCode::Tab)); // 6 (group)
+    assert_eq!(dialog.focused_field, 6);
     dialog.handle_key(key(KeyCode::Tab)); // Should wrap to 0
     assert_eq!(dialog.focused_field, 0);
 }
@@ -640,14 +653,16 @@ fn test_tab_skips_sandbox_when_disabled() {
     dialog.docker_available = true;
     dialog.sandbox_enabled = false;
 
-    // title(0), path(1), tool(2), right_pane(3), yolo(4), worktree(5), sandbox(6), group(7)
-    for _ in 0..6 {
+    // claude + docker + no sandbox shows cross_agent_team:
+    // title(0), path(1), tool(2), right_pane(3), yolo(4), cross_agent_team(5),
+    // worktree(6), sandbox(7), group(8)
+    for _ in 0..7 {
         dialog.handle_key(key(KeyCode::Tab));
     }
-    assert_eq!(dialog.focused_field, 6); // sandbox field
+    assert_eq!(dialog.focused_field, 7); // sandbox field
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 7); // group field
+    assert_eq!(dialog.focused_field, 8); // group field
 
     dialog.handle_key(key(KeyCode::Tab));
     assert_eq!(dialog.focused_field, 0); // wrap to start
@@ -1146,8 +1161,8 @@ fn test_reuse_worktree_flag_false_when_not_confirmed() {
 #[test]
 fn test_reuse_worktree_confirmation_cleared_on_text_input() {
     let mut dialog = single_tool_dialog();
-    // worktree field: title=0, path=1, right_pane=2, yolo=3, worktree=4
-    dialog.focused_field = 4;
+    // worktree field: title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4, worktree=5
+    dialog.focused_field = 5;
     dialog.confirm_reuse_worktree = true;
     dialog.error_message = Some("Worktree exists".to_string());
 
@@ -1303,4 +1318,78 @@ fn test_reuse_worktree_confirmation_cleared_on_branch_picker_select() {
 
     assert!(!dialog.confirm_reuse_worktree);
     assert_eq!(dialog.worktree_branch.value(), "main");
+}
+
+#[test]
+fn test_cross_agent_team_field_visible_for_claude() {
+    let dialog = single_tool_dialog();
+    assert!(dialog.has_cross_agent_team_field());
+}
+
+#[test]
+fn test_cross_agent_team_field_hidden_for_non_claude() {
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["opencode", "claude"], TEST_PATH.to_string());
+    dialog.tool_index = 0; // opencode
+    assert!(!dialog.has_cross_agent_team_field());
+    dialog.tool_index = 1; // claude
+    assert!(dialog.has_cross_agent_team_field());
+}
+
+#[test]
+fn test_cross_agent_team_field_hidden_when_sandbox() {
+    let mut dialog = single_tool_dialog();
+    dialog.docker_available = true;
+    dialog.sandbox_enabled = true;
+    assert!(!dialog.has_cross_agent_team_field());
+    dialog.sandbox_enabled = false;
+    assert!(dialog.has_cross_agent_team_field());
+}
+
+#[test]
+fn test_cross_agent_team_default_from_config() {
+    let mut global = Config::default();
+    global.session.cross_agent_team_default = true;
+    global.session.cross_agent_team_channel = "server:custom-channel".to_string();
+
+    let dialog =
+        NewSessionDialog::new_with_config(vec!["claude"], "/tmp/project".to_string(), global);
+
+    assert!(dialog.cross_agent_team);
+    assert_eq!(dialog.cross_agent_team_channel, "server:custom-channel");
+}
+
+#[test]
+fn test_cross_agent_team_toggle_and_submit() {
+    let mut dialog = single_tool_dialog();
+    // title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4
+    dialog.focused_field = 4;
+    assert!(!dialog.cross_agent_team);
+
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(dialog.cross_agent_team);
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    match result {
+        DialogResult::Submit(data) => {
+            assert!(data.cross_agent_team);
+        }
+        _ => panic!("Expected Submit"),
+    }
+}
+
+#[test]
+fn test_cross_agent_team_not_submitted_for_non_claude() {
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["opencode", "claude"], TEST_PATH.to_string());
+    dialog.tool_index = 0; // opencode
+    dialog.cross_agent_team = true; // even if somehow set
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    match result {
+        DialogResult::Submit(data) => {
+            assert!(!data.cross_agent_team);
+        }
+        _ => panic!("Expected Submit"),
+    }
 }

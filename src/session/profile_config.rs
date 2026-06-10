@@ -150,6 +150,12 @@ pub struct SessionConfigOverride {
     pub yolo_mode_default: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_agent_team_default: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_agent_team_channel: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_extra_args: Option<HashMap<String, String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,6 +313,12 @@ pub fn apply_session_overrides(
     }
     if let Some(yolo_mode_default) = source.yolo_mode_default {
         target.yolo_mode_default = yolo_mode_default;
+    }
+    if let Some(cross_agent_team_default) = source.cross_agent_team_default {
+        target.cross_agent_team_default = cross_agent_team_default;
+    }
+    if let Some(ref channel) = source.cross_agent_team_channel {
+        target.cross_agent_team_channel = channel.clone();
     }
     if let Some(ref args) = source.agent_extra_args {
         target.agent_extra_args = args.clone();

@@ -60,6 +60,11 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
             "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
     },
     FieldHelp {
+        name: "Cross Agent Team",
+        description:
+            "Launch claude with xats development channels and auto-confirm startup screens",
+    },
+    FieldHelp {
         name: "Worktree",
         description:
             "Branch name for git worktree (Ctrl+P to configure branch mode and extra repos)",
@@ -96,6 +101,10 @@ pub struct NewSessionData {
     /// The sandbox image to use (always populated from the input field).
     pub sandbox_image: String,
     pub yolo_mode: bool,
+    /// Whether to launch in Cross Agent Team mode (claude only, non-sandboxed).
+    pub cross_agent_team: bool,
+    /// Development-channels string for Cross Agent Team launches.
+    pub cross_agent_team_channel: String,
     /// Additional environment entries for the container.
     /// `KEY` = pass through from host, `KEY=VALUE` = set explicitly.
     pub extra_env: Vec<String>,
@@ -130,6 +139,8 @@ pub struct NewSessionDialog {
     pub(super) docker_available: bool,
     pub(super) yolo_mode: bool,
     pub(super) yolo_mode_default: bool,
+    pub(super) cross_agent_team: bool,
+    pub(super) cross_agent_team_channel: String,
     /// Additional repo paths for multi-repo workspace
     pub(super) workspace_repos: Vec<String>,
     /// Whether the workspace repos list is expanded (editing mode)
@@ -349,6 +360,8 @@ impl NewSessionDialog {
         // Apply sandbox defaults from config
         let sandbox_enabled = docker_available && config.sandbox.enabled_by_default;
         let yolo_mode = config.session.yolo_mode_default;
+        let cross_agent_team = config.session.cross_agent_team_default;
+        let cross_agent_team_channel = config.session.cross_agent_team_channel.clone();
 
         // Load extra args and command override for the default tool
         let selected_tool = available_tools
@@ -411,6 +424,8 @@ impl NewSessionDialog {
             docker_available,
             yolo_mode,
             yolo_mode_default: yolo_mode,
+            cross_agent_team,
+            cross_agent_team_channel,
             extra_env,
             env_list_expanded: false,
             env_selected_index: 0,
@@ -543,6 +558,15 @@ impl NewSessionDialog {
             || self.right_pane_needs_yolo()
     }
 
+    /// Cross Agent Team is claude-only and unavailable while Sandbox is enabled
+    /// (the development-channels server is a local-only service).
+    pub(super) fn has_cross_agent_team_field(&self) -> bool {
+        self.available_tools
+            .get(self.tool_index)
+            .is_some_and(|&t| t == "claude")
+            && !self.sandbox_enabled
+    }
+
     fn sync_yolo_for_right_pane(&mut self) {
         if self.is_terminal_selected() {
             if self.right_pane_needs_yolo() && !self.yolo_mode {
@@ -602,6 +626,8 @@ impl NewSessionDialog {
             docker_available: false,
             yolo_mode: false,
             yolo_mode_default: false,
+            cross_agent_team: config.session.cross_agent_team_default,
+            cross_agent_team_channel: config.session.cross_agent_team_channel.clone(),
             extra_env: Vec::new(),
             env_list_expanded: false,
             env_selected_index: 0,
@@ -632,66 +658,7 @@ impl NewSessionDialog {
 
     #[cfg(test)]
     pub(super) fn new_with_tools(tools: Vec<&'static str>, path: String) -> Self {
-        Self {
-            profile: "default".to_string(),
-            title: Input::default(),
-            path: Input::new(path),
-            group: Input::default(),
-            tool_index: 0,
-            right_pane_tool_index: 0,
-            focused_field: 0,
-            available_tools: tools,
-            existing_titles: Vec::new(),
-            existing_groups: Vec::new(),
-            group_directories: HashMap::new(),
-            path_user_edited: false,
-            group_picker: ListPicker::new("Select Group"),
-            branch_picker: ListPicker::new("Select Branch"),
-            dir_picker: DirPicker::new(),
-            worktree_branch: Input::default(),
-            create_new_branch: true,
-            workspace_repos: Vec::new(),
-            workspace_repos_expanded: false,
-            workspace_repo_selected_index: 0,
-            workspace_repo_editing_input: None,
-            workspace_repo_adding_new: false,
-            workspace_repo_ghost: None,
-            workspace_repo_dir_picker_active: false,
-            worktree_config_mode: false,
-            worktree_config_focused_field: 0,
-            sandbox_enabled: false,
-            sandbox_image: Input::new(
-                containers::get_container_runtime().effective_default_image(),
-            ),
-            docker_available: false,
-            yolo_mode: false,
-            yolo_mode_default: false,
-            extra_env: Vec::new(),
-            env_list_expanded: false,
-            env_selected_index: 0,
-            env_editing_input: None,
-            env_adding_new: false,
-            inherited_settings: Vec::new(),
-            sandbox_config_mode: false,
-            sandbox_focused_field: 0,
-            tool_config_mode: false,
-            tool_config_focused_field: 0,
-            extra_args: Input::default(),
-            command_override: Input::default(),
-            error_message: None,
-            show_help: false,
-            loading: false,
-            spinner_frame: 0,
-            has_hooks: false,
-            current_hook: None,
-            hook_output: Vec::new(),
-            path_invalid_flash_until: None,
-            path_ghost: None,
-            group_ghost: None,
-            confirm_create_dir: None,
-            confirm_reuse_worktree: false,
-            saved_yolo_mode: None,
-        }
+        Self::new_with_config(tools, path, Config::default())
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -799,6 +766,14 @@ impl NewSessionDialog {
         };
         let has_yolo = self.has_yolo_field();
         let yolo_mode_field = if has_yolo {
+            let f = fi;
+            fi += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let has_cross_agent_team = self.has_cross_agent_team_field();
+        let cross_agent_team_field = if has_cross_agent_team {
             let f = fi;
             fi += 1;
             f
@@ -995,6 +970,12 @@ impl NewSessionDialog {
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if self.focused_field == cross_agent_team_field =>
+            {
+                self.cross_agent_team = !self.cross_agent_team;
+                DialogResult::Continue
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.focused_field == new_branch_field =>
             {
                 self.create_new_branch = !self.create_new_branch;
@@ -1006,6 +987,7 @@ impl NewSessionDialog {
                     && self.focused_field != new_branch_field
                     && self.focused_field != sandbox_field
                     && self.focused_field != yolo_mode_field
+                    && self.focused_field != cross_agent_team_field
                 {
                     self.current_input_mut()
                         .handle_event(&crossterm::event::Event::Key(key));
@@ -1373,15 +1355,19 @@ impl NewSessionDialog {
         let has_worktree = !self.worktree_branch.value().is_empty();
         let is_terminal = self.is_terminal_selected();
         let has_yolo = self.has_yolo_field();
+        let has_cross_agent_team = self.has_cross_agent_team_field();
         let base = 0;
 
-        // Field layout: title, path, [tool], right_pane, [yolo], [worktree],
-        //   [new_branch], [sandbox], group
+        // Field layout: title, path, [tool], right_pane, [yolo], [cross_agent_team],
+        //   [worktree], [new_branch], [sandbox], group
         let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
         fi += 1; // right_pane (always visible)
         let worktree_field = if !is_terminal {
             if has_yolo {
                 fi += 1; // yolo
+            }
+            if has_cross_agent_team {
+                fi += 1; // cross agent team
             }
             let f = fi;
             fi += 1;
@@ -1477,6 +1463,8 @@ impl NewSessionDialog {
             sandbox: self.sandbox_enabled,
             sandbox_image: self.sandbox_image.value().trim().to_string(),
             yolo_mode: self.yolo_mode || self.selected_tool_always_yolo(),
+            cross_agent_team: self.cross_agent_team && self.has_cross_agent_team_field(),
+            cross_agent_team_channel: self.cross_agent_team_channel.clone(),
             extra_env: if self.sandbox_enabled {
                 self.extra_env.clone()
             } else {

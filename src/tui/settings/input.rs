@@ -620,6 +620,16 @@ impl SettingsView {
                     s.yolo_mode_default = None;
                 }
             }
+            FieldKey::CrossAgentTeamDefault => {
+                if let Some(ref mut s) = config.session {
+                    s.cross_agent_team_default = None;
+                }
+            }
+            FieldKey::CrossAgentTeamChannel => {
+                if let Some(ref mut s) = config.session {
+                    s.cross_agent_team_channel = None;
+                }
+            }
             FieldKey::AgentExtraArgs => {
                 if let Some(ref mut s) = config.session {
                     s.agent_extra_args = None;
