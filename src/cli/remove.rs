@@ -131,6 +131,11 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
                 }
             }
 
+            // Capture the session's pane ids before killing it so the durable
+            // store can purge their volatile capture rows.
+            let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+            let pane_ids = crate::db::reconcile::session_pane_ids(&session_name);
+
             // Kill tmux session if it exists
             if let Ok(tmux_session) = crate::tmux::Session::new(&inst.id, &inst.title) {
                 if tmux_session.exists() {
@@ -142,6 +147,9 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
                     }
                 }
             }
+
+            // Purge the session's durable + volatile store records.
+            crate::db::purge_session_records(profile, &inst.id, &pane_ids);
 
             // Container cleanup (if config allows and user didn't request --keep-container)
             if let Some(sandbox) = &inst.sandbox_info {

@@ -17,11 +17,14 @@
 
 mod harness;
 
+mod agent_session_store;
 mod cli;
 mod errors;
 mod fork;
+mod multi_agent_session;
 mod new_session;
 mod pane_cwd;
+mod pane_session_capture;
 mod profile_picker;
 mod sandbox;
 mod session_rename;

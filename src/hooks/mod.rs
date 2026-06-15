@@ -76,32 +76,65 @@ pub struct HookStatusRead {
 /// Any hook command containing this string is considered ours.
 const AOE_HOOK_MARKER: &str = "aoe-hooks";
 
-/// Build the shell command for a hook that writes a status value and,
-/// when available, the agent's session ID (e.g. `$CLAUDE_SESSION_ID`).
-fn hook_command(status: &str) -> String {
-    // Write the status file first, then opportunistically persist the
-    // session ID. `CLAUDE_SESSION_ID` / `CODEX_SESSION_ID` / etc. are
-    // set by the respective agents in their hook execution environment.
+/// Build the shell command for a hook.
+///
+/// Two independent side effects:
+/// 1. Status-file write (gated on `$AOE_INSTANCE_ID`) feeds `status-detection`.
+/// 2. Pane capture (gated on `$TMUX_PANE`) pipes the hook's stdin JSON to
+///    `<aoe_bin> __record-pane`, which reads `.session_id`/`.cwd` and upserts a
+///    `pane_live` row keyed by the pane id. This works for hand-launched agents
+///    too (no `$AOE_INSTANCE_ID` required) and always exits 0.
+///
+/// `aoe_bin` is the absolute path to the running `aoe` binary, baked in at
+/// install time so the hook works regardless of `$PATH`. `agent` is the agent
+/// name (e.g. `claude`) passed through to the capture subcommand.
+fn hook_command(status: &str, aoe_bin: &str, agent: &str) -> String {
+    // The whole command is delimited by single quotes (`sh -c '...'`), so embed
+    // the binary path and agent as double-quoted segments, escaping shell
+    // metacharacters that would otherwise expand inside double quotes.
+    let bin = double_quote_in_single(aoe_bin);
+    let agent = double_quote_in_single(agent);
+    // Capture is best-effort: `|| true` ensures the hook never fails the agent
+    // even if the binary path is wrong. The status write does not need stdin.
     format!(
-        "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
+        "sh -c 'if [ -n \"$TMUX_PANE\" ]; then {bin} __record-pane --agent {agent} || true; fi; \
+         [ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
          d=/tmp/aoe-hooks/$AOE_INSTANCE_ID; mkdir -p \"$d\"; \
-         printf {} > \"$d/status\"; \
-         for v in CLAUDE_SESSION_ID CODEX_SESSION_ID; do \
-           eval val=\\$$v; [ -n \"$val\" ] && printf \"%s\" \"$val\" > \"$d/session_id\" && break; \
-         done; true'",
-        status
+         printf {status} > \"$d/status\"; true'"
     )
+}
+
+/// Produce a `"..."` double-quoted token for safe embedding inside the
+/// single-quoted `sh -c '...'` body. Escapes the metacharacters that retain
+/// meaning inside double quotes (`\`, `"`, `$`, backtick).
+fn double_quote_in_single(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    format!("\"{escaped}\"")
 }
 
 fn is_aoe_hook_command(cmd: &str) -> bool {
     cmd.contains(AOE_HOOK_MARKER)
 }
 
+/// Resolve the absolute path to the running `aoe` binary, baked into hook
+/// commands at install time so they work regardless of `$PATH`. Falls back to
+/// the bare name if resolution fails.
+fn aoe_binary_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "aoe".to_string())
+}
+
 /// Build the AoE hooks JSON structure from agent-defined events.
 ///
 /// Events with `status: None` (lifecycle-only) are skipped since shell
 /// one-liners can only write a status string.
-fn build_aoe_hooks(events: &[crate::agents::HookEvent]) -> Value {
+fn build_aoe_hooks(events: &[crate::agents::HookEvent], aoe_bin: &str, agent: &str) -> Value {
     let mut hooks_obj = serde_json::Map::new();
     for event in events {
         let Some(status) = event.status else {
@@ -115,7 +148,7 @@ fn build_aoe_hooks(events: &[crate::agents::HookEvent]) -> Value {
             "hooks".to_string(),
             Value::Array(vec![serde_json::json!({
                 "type": "command",
-                "command": hook_command(status)
+                "command": hook_command(status, aoe_bin, agent)
             })]),
         );
         hooks_obj.insert(
@@ -147,8 +180,14 @@ fn remove_aoe_entries(matchers: &mut Vec<Value>) {
 /// Merges AoE hook entries into the existing hooks configuration, preserving
 /// any user-defined hooks. Existing AoE hooks are replaced (idempotent).
 ///
-/// If the file doesn't exist, it will be created with just the hooks.
-pub fn install_hooks(settings_path: &Path, events: &[crate::agents::HookEvent]) -> Result<()> {
+/// `agent` is the agent name (e.g. `claude`), baked into the capture branch of
+/// each hook command. If the file doesn't exist, it will be created with just
+/// the hooks.
+pub fn install_hooks(
+    settings_path: &Path,
+    events: &[crate::agents::HookEvent],
+    agent: &str,
+) -> Result<()> {
     let mut settings: Value = if settings_path.exists() {
         let content = std::fs::read_to_string(settings_path)?;
         serde_json::from_str(&content).unwrap_or_else(|e| {
@@ -159,7 +198,7 @@ pub fn install_hooks(settings_path: &Path, events: &[crate::agents::HookEvent]) 
         serde_json::json!({})
     };
 
-    let aoe_hooks = build_aoe_hooks(events);
+    let aoe_hooks = build_aoe_hooks(events, &aoe_binary_path(), agent);
 
     if !settings.get("hooks").is_some_and(|h| h.is_object()) {
         settings
@@ -314,7 +353,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let settings_path = tmp.path().join(".claude").join("settings.json");
 
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -348,7 +387,7 @@ mod tests {
         )
         .unwrap();
 
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -372,8 +411,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let settings_path = tmp.path().join("settings.json");
 
-        install_hooks(&settings_path, claude_events()).unwrap();
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -399,7 +438,7 @@ mod tests {
         )
         .unwrap();
 
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -409,21 +448,70 @@ mod tests {
 
     #[test]
     fn test_hook_command_format() {
-        let cmd = hook_command("running");
+        let cmd = hook_command("running", "/usr/local/bin/aoe", "claude");
         assert!(cmd.contains(AOE_HOOK_MARKER));
         assert!(cmd.contains("printf running"));
     }
 
     #[test]
     fn test_hook_command_contains_instance_id_guard() {
-        let cmd = hook_command("idle");
+        let cmd = hook_command("idle", "/usr/local/bin/aoe", "claude");
         assert!(cmd.contains("AOE_INSTANCE_ID"));
         assert!(cmd.contains("printf idle"));
     }
 
     #[test]
+    fn test_hook_command_has_tmux_pane_capture_branch() {
+        let cmd = hook_command("running", "/abs/path/aoe", "claude");
+        // Capture is gated on $TMUX_PANE and shells out to __record-pane.
+        assert!(
+            cmd.contains("$TMUX_PANE"),
+            "missing TMUX_PANE gate: {}",
+            cmd
+        );
+        assert!(
+            cmd.contains("__record-pane"),
+            "missing capture call: {}",
+            cmd
+        );
+        assert!(cmd.contains("--agent"), "missing agent flag: {}", cmd);
+    }
+
+    #[test]
+    fn test_hook_command_bakes_absolute_binary_path() {
+        let cmd = hook_command("running", "/abs/path/aoe", "claude");
+        assert!(
+            cmd.contains("/abs/path/aoe"),
+            "absolute binary path must be baked in: {}",
+            cmd
+        );
+    }
+
+    #[test]
+    fn test_hook_command_reads_session_id_from_stdin_not_env() {
+        // The capture path reads stdin JSON via __record-pane; the legacy
+        // CLAUDE_SESSION_ID / CODEX_SESSION_ID env-capture line must be gone.
+        let cmd = hook_command("running", "/abs/path/aoe", "claude");
+        assert!(
+            !cmd.contains("CLAUDE_SESSION_ID"),
+            "legacy env capture must be removed: {}",
+            cmd
+        );
+        assert!(
+            !cmd.contains("CODEX_SESSION_ID"),
+            "legacy env capture must be removed: {}",
+            cmd
+        );
+        assert!(
+            !cmd.contains("session_id\""),
+            "no per-instance session_id file write: {}",
+            cmd
+        );
+    }
+
+    #[test]
     fn test_notification_hook_has_matcher() {
-        let hooks = build_aoe_hooks(claude_events());
+        let hooks = build_aoe_hooks(claude_events(), "/usr/local/bin/aoe", "claude");
         let notification = hooks["Notification"].as_array().unwrap();
         assert_eq!(notification.len(), 1);
         let matcher = notification[0]["matcher"].as_str().unwrap();
@@ -434,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_stop_hook_writes_idle() {
-        let hooks = build_aoe_hooks(claude_events());
+        let hooks = build_aoe_hooks(claude_events(), "/usr/local/bin/aoe", "claude");
         let stop = hooks["Stop"].as_array().unwrap();
         let cmd = stop[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(
@@ -446,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_elicitation_result_hook_writes_running() {
-        let hooks = build_aoe_hooks(claude_events());
+        let hooks = build_aoe_hooks(claude_events(), "/usr/local/bin/aoe", "claude");
         let er = hooks["ElicitationResult"].as_array().unwrap();
         assert_eq!(er.len(), 1);
         let cmd = er[0]["hooks"][0]["command"].as_str().unwrap();
@@ -459,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_hooks_are_synchronous() {
-        let hooks = build_aoe_hooks(claude_events());
+        let hooks = build_aoe_hooks(claude_events(), "/usr/local/bin/aoe", "claude");
         for (_, matchers) in hooks.as_object().unwrap() {
             for matcher in matchers.as_array().unwrap() {
                 for hook in matcher["hooks"].as_array().unwrap() {
@@ -478,7 +566,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let settings_path = tmp.path().join("settings.json");
 
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -518,7 +606,7 @@ mod tests {
         )
         .unwrap();
 
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
         let modified = uninstall_hooks(&settings_path).unwrap();
         assert!(modified);
 
@@ -601,7 +689,7 @@ mod tests {
         )
         .unwrap();
 
-        install_hooks(&settings_path, claude_events()).unwrap();
+        install_hooks(&settings_path, claude_events(), "claude").unwrap();
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();

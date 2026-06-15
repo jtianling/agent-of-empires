@@ -574,6 +574,46 @@ last_seen_version = "{}"
         &self.session_name
     }
 
+    /// Resize an aoe-managed session's window so a test can create many panes.
+    /// Sets `window-size manual` so a detached session keeps the explicit size
+    /// instead of collapsing to the default 80x24 (which fails multi-pane
+    /// splits with "no space for new pane").
+    pub fn resize_window(&self, target: &str, x: u32, y: u32) {
+        let _ = self.tmux_command(&["set-option", "-t", target, "window-size", "manual"]);
+        let output = self
+            .tmux_command(&[
+                "resize-window",
+                "-t",
+                target,
+                "-x",
+                &x.to_string(),
+                "-y",
+                &y.to_string(),
+            ])
+            .expect("failed to run tmux resize-window");
+        assert!(
+            output.status.success(),
+            "resize-window failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Split a session's window and return the new pane id. Re-tiles the layout
+    /// after the split so repeated splits keep room for more panes.
+    pub fn split_window_get_pane(&self, target: &str) -> String {
+        let output = self
+            .tmux_command(&["split-window", "-t", target, "-d", "-P", "-F", "#{pane_id}"])
+            .expect("failed to run tmux split-window");
+        assert!(
+            output.status.success(),
+            "split-window failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let _ = self.tmux_command(&["select-layout", "-t", target, "tiled"]);
+        pane_id
+    }
+
     pub fn tmux_show_option(&self, target: &str, option: &str) -> String {
         let output = self
             .tmux_command(&["show-options", "-t", target, "-v", option])

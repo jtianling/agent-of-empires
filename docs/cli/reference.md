@@ -21,6 +21,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session capture`↴](#aoe-session-capture)
 * [`aoe session current`↴](#aoe-session-current)
 * [`aoe session fork`↴](#aoe-session-fork)
+* [`aoe session add-agent-pane`↴](#aoe-session-add-agent-pane)
 * [`aoe group`↴](#aoe-group)
 * [`aoe group list`↴](#aoe-group-list)
 * [`aoe group create`↴](#aoe-group-create)
@@ -197,6 +198,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `capture` — Capture tmux pane output
 * `current` — Auto-detect current session
 * `fork` — Fork a session using the agent's native fork-session command
+* `add-agent-pane` — Add an agent pane to a running session
 
 
 
@@ -331,6 +333,20 @@ Creates a new session that shares the parent's working directory and config, and
 * `-t`, `--title <TITLE>` — Title for the forked session (defaults to `<parent>-fork`, de-duplicated)
 * `-g`, `--group <GROUP>` — Group for the forked session (defaults to parent's group)
 * `--no-launch` — Do not launch the forked session immediately
+
+
+
+## `aoe session add-agent-pane`
+
+Add an agent pane to a running session.
+
+Splits the session's tmux window and launches the session's agent in the new pane. The agent is adopted into a slot by the reconciler. Respects the four-slot (four-pane) cap and refuses when the session is full.
+
+**Usage:** `aoe session add-agent-pane <IDENTIFIER>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Session ID or title
 
 
 

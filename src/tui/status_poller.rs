@@ -24,6 +24,11 @@ use crate::session::{
 
 const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Minimum interval between durable-store reconcile passes. Short enough that
+/// captures are snapshotted within a second or so of arriving, long enough to
+/// avoid spamming `tmux list-panes` on every poll tick.
+const RECONCILE_INTERVAL: Duration = Duration::from_millis(750);
+
 /// Adaptive polling intervals (in cycles). 0 = never poll.
 const TIER_HOT: u64 = 1;
 const TIER_WARM: u64 = 5;
@@ -60,12 +65,12 @@ pub struct StatusPoller {
 }
 
 impl StatusPoller {
-    pub fn new() -> Self {
+    pub fn new(profile: String) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<Vec<Instance>>();
         let (result_tx, result_rx) = mpsc::channel::<Vec<StatusUpdate>>();
 
         let handle = thread::spawn(move || {
-            Self::polling_loop(request_rx, result_tx);
+            Self::polling_loop(request_rx, result_tx, profile);
         });
 
         Self {
@@ -78,6 +83,7 @@ impl StatusPoller {
     fn polling_loop(
         request_rx: mpsc::Receiver<Vec<Instance>>,
         result_tx: mpsc::Sender<Vec<StatusUpdate>>,
+        profile: String,
     ) {
         let container_check_interval = Duration::from_secs(5);
         // Initialize to the past so the first check runs immediately
@@ -93,9 +99,18 @@ impl StatusPoller {
         // which is divisible by all tier intervals -- ensuring every session is
         // polled on the very first cycle.
         let mut cycle_count: u64 = TIER_COLD - 1;
+        // Throttle the durable-store reconciler independently of the per-instance
+        // polling tiers: it must snapshot captures for every session (including
+        // idle ones) but should not spam tmux on every tick.
+        let mut last_reconcile = Instant::now() - RECONCILE_INTERVAL;
 
         while let Ok(instances) = request_rx.recv() {
             cycle_count = cycle_count.wrapping_add(1);
+
+            if last_reconcile.elapsed() >= RECONCILE_INTERVAL {
+                crate::db::reconcile::reconcile_all(&profile, &instances);
+                last_reconcile = Instant::now();
+            }
 
             // Pre-scan: check if any instance would actually be polled this cycle.
             // If not, skip the batch subprocess calls entirely.
@@ -296,12 +311,6 @@ fn decide_activity_gate(
             && !activity_changed
             && !full_check_due
             && !spike_pending,
-    }
-}
-
-impl Default for StatusPoller {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
