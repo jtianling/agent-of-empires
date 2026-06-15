@@ -28,6 +28,10 @@ pub struct InstanceParams {
     /// The sandbox image to use. Required when sandbox is true.
     pub sandbox_image: String,
     pub yolo_mode: bool,
+    /// Whether to launch in Cross Agent Team mode (claude only, non-sandboxed).
+    pub cross_agent_team: bool,
+    /// Development-channels string for Cross Agent Team launches.
+    pub cross_agent_team_channel: String,
     /// Additional environment entries for the container.
     /// `KEY` = pass through from host, `KEY=VALUE` = set explicitly.
     pub extra_env: Vec<String>,
@@ -361,6 +365,10 @@ pub fn build_instance(
     instance.worktree_info = worktree_info;
     instance.workspace_info = workspace_info;
     instance.yolo_mode = params.yolo_mode;
+    instance.cross_agent_team = params.cross_agent_team && !params.sandbox;
+    if instance.cross_agent_team {
+        instance.cross_agent_team_channel = params.cross_agent_team_channel.clone();
+    }
 
     // Apply agent_command_override and agent_extra_args from resolved config.
     // Per-session values from params take priority over config.

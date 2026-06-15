@@ -110,6 +110,8 @@ impl CreationPoller {
             sandbox: data.sandbox,
             sandbox_image: data.sandbox_image,
             yolo_mode: data.yolo_mode,
+            cross_agent_team: data.cross_agent_team,
+            cross_agent_team_channel: data.cross_agent_team_channel,
             extra_env: data.extra_env,
             extra_args: data.extra_args,
             command_override: data.command_override,
