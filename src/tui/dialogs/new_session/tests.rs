@@ -1379,6 +1379,49 @@ fn test_cross_agent_team_toggle_and_submit() {
 }
 
 #[test]
+fn test_left_right_navigates_between_yolo_and_cross_agent_team() {
+    let mut dialog = single_tool_dialog();
+    // title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4
+    dialog.focused_field = 3; // yolo
+
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dialog.focused_field, 4,
+        "Right moves focus yolo -> cross agent teams"
+    );
+
+    dialog.handle_key(key(KeyCode::Left));
+    assert_eq!(
+        dialog.focused_field, 3,
+        "Left moves focus cross agent teams -> yolo"
+    );
+
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(dialog.focused_field, 4);
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dialog.focused_field, 3,
+        "Right from cross agent teams returns to yolo"
+    );
+}
+
+#[test]
+fn test_space_toggles_not_navigates_on_yolo_row() {
+    let mut dialog = single_tool_dialog();
+    dialog.focused_field = 3; // yolo
+    let yolo_before = dialog.yolo_mode;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert_eq!(dialog.focused_field, 3, "Space does not move focus");
+    assert_ne!(dialog.yolo_mode, yolo_before, "Space toggles yolo");
+
+    dialog.focused_field = 4; // cross agent teams
+    assert!(!dialog.cross_agent_team);
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert_eq!(dialog.focused_field, 4, "Space does not move focus");
+    assert!(dialog.cross_agent_team, "Space toggles cross agent teams");
+}
+
+#[test]
 fn test_cross_agent_team_not_submitted_for_non_claude() {
     let mut dialog =
         NewSessionDialog::new_with_tools(vec!["opencode", "claude"], TEST_PATH.to_string());

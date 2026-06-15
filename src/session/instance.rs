@@ -61,19 +61,49 @@ const AUTO_CONFIRM_MARKERS: &[&str] = &[
     "trust this folder",
 ];
 
-/// Total budget for the auto-confirm background loop.
-const AUTO_CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
+/// Max time to wait for Claude's confirmation screens before giving up and
+/// attaching anyway (claude shows the dev-channels gate within ~1-2s).
+const AUTO_CONFIRM_TIMEOUT: Duration = Duration::from_secs(12);
 /// Delay after sending Enter before polling again, so the next screen can render.
-const AUTO_CONFIRM_SEND_INTERVAL: Duration = Duration::from_millis(700);
+const AUTO_CONFIRM_SEND_INTERVAL: Duration = Duration::from_millis(600);
 /// Poll cadence while waiting for a confirmation screen to appear.
-const AUTO_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const AUTO_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Once at least one Enter has been sent, stop after this long with no marker
 /// on screen (Claude has moved past the confirmation prompts).
-const AUTO_CONFIRM_DONE_GRACE: Duration = Duration::from_millis(1500);
+const AUTO_CONFIRM_DONE_GRACE: Duration = Duration::from_millis(1200);
+
+/// Strip ANSI/CSI escape sequences (e.g. SGR color codes) from captured pane
+/// content. Claude colors the warning title per-word, so `tmux capture-pane -e`
+/// interleaves escape codes between words ("Loading\x1b[0m development...");
+/// stripping them restores contiguous text for substring matching.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI sequence: ESC '[' params... final-byte (e.g. 'm'). Drop through
+            // the final alphabetic byte. Other escapes: just drop the ESC.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// Whether the captured pane content shows one of Claude's confirmation screens.
+/// Strips ANSI escapes first so per-word coloring does not break matching.
 fn is_auto_confirm_screen(output: &str) -> bool {
-    AUTO_CONFIRM_MARKERS.iter().any(|m| output.contains(m))
+    let plain = strip_ansi(output);
+    AUTO_CONFIRM_MARKERS.iter().any(|m| plain.contains(m))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -301,42 +331,41 @@ impl Instance {
         self.cross_agent_team && self.tool == "claude"
     }
 
-    /// Spawn a detached background thread that auto-confirms Claude's startup
-    /// screens by polling the agent pane and sending Enter when a recognized
-    /// confirmation prompt is shown. Runs independently of the TUI loop, so it
-    /// keeps working while the user is attached to the tmux session. No-ops when
-    /// the session is not in Cross Agent Team mode.
-    fn spawn_auto_confirm(&self) {
+    /// Auto-confirm Claude's startup screens (dev-channels warning and the
+    /// workspace-trust prompt) by polling the agent pane and sending Enter while
+    /// a recognized confirmation marker is shown. Runs SYNCHRONOUSLY before the
+    /// caller attaches: at this point the pane exists and Claude renders into the
+    /// tmux virtual terminal even with no client attached, and there is no
+    /// concurrent `tmux attach` to contend with the capture/send subprocesses
+    /// (a background thread would stall once attach starts). No-ops when the
+    /// session is not in Cross Agent Team mode.
+    fn run_auto_confirm(&self) {
         if !self.is_cross_agent_team() {
             return;
         }
-        let id = self.id.clone();
-        let title = self.title.clone();
-        std::thread::spawn(move || {
-            let Ok(session) = tmux::Session::new(&id, &title) else {
-                return;
-            };
-            let start = Instant::now();
-            let mut sent = 0u32;
-            let mut last_marker_seen = Instant::now();
-            while start.elapsed() < AUTO_CONFIRM_TIMEOUT {
-                let output = session.capture_pane(80).unwrap_or_default();
-                if is_auto_confirm_screen(&output) {
-                    last_marker_seen = Instant::now();
-                    if let Err(err) = session.send_keys_to_agent_pane(&["Enter"]) {
-                        tracing::warn!("auto-confirm send failed: {}", err);
-                        return;
-                    }
-                    sent += 1;
-                    std::thread::sleep(AUTO_CONFIRM_SEND_INTERVAL);
-                } else {
-                    if sent >= 1 && last_marker_seen.elapsed() >= AUTO_CONFIRM_DONE_GRACE {
-                        return;
-                    }
-                    std::thread::sleep(AUTO_CONFIRM_POLL_INTERVAL);
+        let Ok(session) = self.tmux_session() else {
+            return;
+        };
+        let start = Instant::now();
+        let mut sent = 0u32;
+        let mut last_marker_seen = Instant::now();
+        while start.elapsed() < AUTO_CONFIRM_TIMEOUT {
+            let output = session.capture_pane(80).unwrap_or_default();
+            if is_auto_confirm_screen(&output) {
+                last_marker_seen = Instant::now();
+                if let Err(err) = session.send_keys_to_agent_pane(&["Enter"]) {
+                    tracing::warn!("auto-confirm send failed: {}", err);
+                    return;
                 }
+                sent += 1;
+                std::thread::sleep(AUTO_CONFIRM_SEND_INTERVAL);
+            } else {
+                if sent >= 1 && last_marker_seen.elapsed() >= AUTO_CONFIRM_DONE_GRACE {
+                    return;
+                }
+                std::thread::sleep(AUTO_CONFIRM_POLL_INTERVAL);
             }
-        });
+        }
     }
 
     /// The `--dangerously-load-development-channels <channel>` flag for Cross
@@ -503,7 +532,7 @@ impl Instance {
         tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
 
-        self.spawn_auto_confirm();
+        self.run_auto_confirm();
 
         // Apply all configured tmux options (status bar, mouse, etc.)
         self.apply_tmux_options(&Self::current_profile());
@@ -938,7 +967,7 @@ impl Instance {
         session.kill_agent_pane_process_tree();
         session.respawn_agent_pane(&cmd, &self.project_path)?;
 
-        self.spawn_auto_confirm();
+        self.run_auto_confirm();
 
         self.apply_tmux_options(&Self::current_profile());
 
@@ -1960,17 +1989,38 @@ mod tests {
     }
 
     #[test]
-    fn test_spawn_auto_confirm_noop_for_non_cross_agent_team() {
+    fn test_is_auto_confirm_screen_with_ansi_per_word_coloring() {
+        // Claude colors the warning title per word; `tmux capture-pane -e`
+        // interleaves SGR codes, splitting the phrase. Stripping must restore it.
+        let screen = "\u{1b}[39m  \u{1b}[1m\u{1b}[38;5;211mWARNING:\u{1b}[0m \u{1b}[1m\u{1b}[38;5;211mLoading\u{1b}[0m \u{1b}[1m\u{1b}[38;5;211mdevelopment\u{1b}[0m \u{1b}[1m\u{1b}[38;5;211mchannels\u{1b}[0m";
+        assert!(
+            !screen.contains("Loading development channels"),
+            "raw -e capture should not contain the contiguous phrase"
+        );
+        assert!(
+            is_auto_confirm_screen(screen),
+            "after stripping ANSI the phrase must match"
+        );
+    }
+
+    #[test]
+    fn test_strip_ansi_basic() {
+        assert_eq!(strip_ansi("\u{1b}[1mhi\u{1b}[0m there"), "hi there");
+        assert_eq!(strip_ansi("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_run_auto_confirm_noop_for_non_cross_agent_team() {
         // Must not panic or spawn work when the mode is off.
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         inst.cross_agent_team = false;
-        inst.spawn_auto_confirm();
+        inst.run_auto_confirm();
 
         // Also a no-op for non-claude even if the flag is set.
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
-        inst.spawn_auto_confirm();
+        inst.run_auto_confirm();
     }
 
     #[test]

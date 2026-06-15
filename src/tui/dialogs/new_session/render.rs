@@ -326,7 +326,7 @@ impl NewSessionDialog {
                     Style::default().fg(theme.dimmed)
                 };
                 yolo_spans.push(Span::raw("    "));
-                yolo_spans.push(Span::styled("Cross Agent Team:", cat_label_style));
+                yolo_spans.push(Span::styled("Cross Agent Teams:", cat_label_style));
                 yolo_spans.push(Span::raw(" "));
                 yolo_spans.push(Span::styled(cat_checkbox, cat_checkbox_style));
             }

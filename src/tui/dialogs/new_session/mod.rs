@@ -60,7 +60,7 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
             "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
     },
     FieldHelp {
-        name: "Cross Agent Team",
+        name: "Cross Agent Teams",
         description:
             "Launch claude with xats development channels and auto-confirm startup screens",
     },
@@ -963,16 +963,29 @@ impl NewSessionDialog {
                 self.sync_yolo_for_right_pane();
                 DialogResult::Continue
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if self.focused_field == yolo_mode_field =>
-            {
+            KeyCode::Char(' ') if self.focused_field == yolo_mode_field => {
                 self.yolo_mode = !self.yolo_mode;
                 DialogResult::Continue
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if self.focused_field == cross_agent_team_field =>
-            {
+            KeyCode::Char(' ') if self.focused_field == cross_agent_team_field => {
                 self.cross_agent_team = !self.cross_agent_team;
+                DialogResult::Continue
+            }
+            // Left/Right move focus between the YOLO Mode and Cross Agent Teams
+            // checkboxes (rendered on the same row). Falls back to toggling YOLO
+            // when the Cross Agent Teams checkbox is not shown.
+            KeyCode::Left | KeyCode::Right
+                if self.focused_field == yolo_mode_field && has_cross_agent_team =>
+            {
+                self.focused_field = cross_agent_team_field;
+                DialogResult::Continue
+            }
+            KeyCode::Left | KeyCode::Right if self.focused_field == cross_agent_team_field => {
+                self.focused_field = yolo_mode_field;
+                DialogResult::Continue
+            }
+            KeyCode::Left | KeyCode::Right if self.focused_field == yolo_mode_field => {
+                self.yolo_mode = !self.yolo_mode;
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
