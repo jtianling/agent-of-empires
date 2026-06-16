@@ -147,6 +147,7 @@ impl HomeView {
                 let request = DeletionRequest {
                     session_id: id.clone(),
                     instance: inst.clone(),
+                    profile: self.storage.profile().to_string(),
                     delete_worktree: options.delete_worktree,
                     delete_branch: options.delete_branch,
                     delete_sandbox: options.delete_sandbox,
@@ -212,6 +213,7 @@ impl HomeView {
                     let request = DeletionRequest {
                         session_id: session_id.clone(),
                         instance: inst.clone(),
+                        profile: self.storage.profile().to_string(),
                         delete_worktree,
                         delete_branch,
                         delete_sandbox,

@@ -39,6 +39,13 @@ pub enum SessionCommands {
     /// `codex fork ...`, or `opencode --session ... --fork` depending on the
     /// parent's tool. Only claude, codex, and opencode support forking.
     Fork(ForkArgs),
+
+    /// Add an agent pane to a running session.
+    ///
+    /// Splits the session's tmux window and launches the session's agent in the
+    /// new pane. The agent is adopted into a slot by the reconciler. Respects
+    /// the four-slot (four-pane) cap and refuses when the session is full.
+    AddAgentPane(SessionIdArgs),
 }
 
 #[derive(Args)]
@@ -153,7 +160,52 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
         SessionCommands::Fork(args) => fork_session(profile, args).await,
+        SessionCommands::AddAgentPane(args) => add_agent_pane(profile, args).await,
     }
+}
+
+/// Maximum number of agent panes tracked per session (slots 0..3).
+const MAX_AGENT_PANES: usize = 4;
+
+async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (instances, _) = storage.load_with_groups()?;
+
+    let inst = super::resolve_session(&args.identifier, &instances)?;
+    let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+
+    let tmux_session = crate::tmux::Session::new(&inst.id, &inst.title)?;
+    if !tmux_session.exists() {
+        bail!(
+            "Session is not running: {}. Start it first with `aoe session start`.",
+            inst.title
+        );
+    }
+
+    // Enforce the four-slot cap by current pane count.
+    let pane_count = crate::db::reconcile::session_pane_ids(&session_name).len();
+    if pane_count >= MAX_AGENT_PANES {
+        bail!(
+            "Session '{}' already has {} agent panes (max {}). Cannot add another.",
+            inst.title,
+            pane_count,
+            MAX_AGENT_PANES
+        );
+    }
+
+    let command = inst
+        .build_agent_command(None)
+        .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", inst.tool))?;
+
+    crate::tmux::split_window_right(&session_name, &inst.project_path, &command)?;
+
+    println!(
+        "✓ Added agent pane to session: {} (pane {} of {})",
+        inst.title,
+        pane_count + 1,
+        MAX_AGENT_PANES
+    );
+    Ok(())
 }
 
 async fn start_session(profile: &str, args: SessionIdArgs) -> Result<()> {
@@ -577,4 +629,17 @@ fn dedupe_fork_title(instances: &[crate::session::Instance], base: &str, path: &
         }
     }
     format!("{} ({})", base, chrono::Utc::now().timestamp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_AGENT_PANES;
+    use crate::db::MAX_SLOT;
+
+    #[test]
+    fn add_agent_pane_cap_matches_slot_range() {
+        // The add-agent-pane cap and the store's slot range (0..=MAX_SLOT) must
+        // agree so the action never creates a pane that has no slot to occupy.
+        assert_eq!(MAX_AGENT_PANES as i64, MAX_SLOT + 1);
+    }
 }

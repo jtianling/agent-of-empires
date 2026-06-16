@@ -6,6 +6,7 @@ pub mod group;
 pub mod init;
 pub mod list;
 pub mod profile;
+pub mod record_pane;
 pub mod remove;
 pub mod send;
 pub mod session;

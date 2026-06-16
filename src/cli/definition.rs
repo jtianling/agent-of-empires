@@ -11,6 +11,7 @@ use super::group::GroupCommands;
 use super::init::InitArgs;
 use super::list::ListArgs;
 use super::profile::ProfileCommands;
+use super::record_pane::RecordPaneArgs;
 use super::remove::RemoveArgs;
 use super::send::SendArgs;
 use super::session::SessionCommands;
@@ -100,6 +101,10 @@ pub enum Commands {
 
     /// Uninstall Agent of Empires
     Uninstall(UninstallArgs),
+
+    /// Internal: capture a pane's native session id from a hook (hidden).
+    #[command(name = "__record-pane", hide = true)]
+    RecordPane(RecordPaneArgs),
 
     /// Generate shell completions
     Completion {

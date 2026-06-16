@@ -56,6 +56,14 @@ async fn main() -> Result<()> {
         Some(Commands::Sounds { command }) => return cli::sounds::run(command).await,
         Some(Commands::Uninstall(args)) => return cli::uninstall::run(args).await,
         Some(Commands::Profile { command }) => return cli::profile::run(command).await,
+        // The capture subcommand runs from agent hooks on every event. It must
+        // be fast, must not run migrations, and must never error the agent: it
+        // opens the store with a defensive schema apply and always exits 0.
+        Some(Commands::RecordPane(args)) => {
+            let profile = session::resolve_profile(cli.profile);
+            cli::record_pane::run(&profile, args);
+            return Ok(());
+        }
         _ => {}
     }
 

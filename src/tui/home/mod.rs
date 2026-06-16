@@ -239,6 +239,10 @@ impl HomeView {
         let stable_session_index_cache =
             Self::build_stable_session_index_cache(&instances, &groups, sort_order);
 
+        // Captured before `storage` is moved into the struct; the status poller
+        // reconciler needs the active profile to open the per-profile store.
+        let poller_profile = storage.profile().to_string();
+
         let mut view = Self {
             storage,
             instances,
@@ -278,7 +282,7 @@ impl HomeView {
             search_match_index: 0,
             available_tools,
             launch_dir,
-            status_poller: StatusPoller::new(),
+            status_poller: StatusPoller::new(poller_profile),
             pending_status_refresh: false,
             skip_stale_errors: HashSet::new(),
             deletion_poller: DeletionPoller::new(),

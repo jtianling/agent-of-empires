@@ -748,7 +748,9 @@ pub(crate) fn build_container_config(
                 if mount.host_rel == config_dir_name.to_string_lossy() {
                     let sandbox_dir = home.join(mount.host_rel).join(SANDBOX_SUBDIR);
                     let settings_file = sandbox_dir.join("settings.json");
-                    if let Err(e) = crate::hooks::install_hooks(&settings_file, hook_cfg.events) {
+                    if let Err(e) =
+                        crate::hooks::install_hooks(&settings_file, hook_cfg.events, tool)
+                    {
                         tracing::warn!("Failed to install hooks in sandbox settings: {}", e);
                     }
                     break;

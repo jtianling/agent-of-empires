@@ -12,6 +12,7 @@ use crate::session::Instance;
 pub struct DeletionRequest {
     pub session_id: String,
     pub instance: Instance,
+    pub profile: String,
     pub delete_worktree: bool,
     pub delete_branch: bool,
     pub delete_sandbox: bool,
@@ -196,11 +197,20 @@ impl DeletionPoller {
             }
         }
 
+        // Capture the session's pane ids before killing it so the durable
+        // store can purge their volatile capture rows.
+        let session_name =
+            crate::tmux::Session::generate_name(&request.instance.id, &request.instance.title);
+        let pane_ids = crate::db::reconcile::session_pane_ids(&session_name);
+
         // Tmux kill - non-fatal if session already gone
         let _ = request.instance.kill();
 
         // Clean up hook status files
         crate::hooks::cleanup_hook_status_dir(&request.instance.id);
+
+        // Purge the session's durable + volatile store records.
+        crate::db::purge_session_records(&request.profile, &request.instance.id, &pane_ids);
 
         DeletionResult {
             session_id: request.session_id.clone(),
@@ -243,6 +253,7 @@ mod tests {
         let request = DeletionRequest {
             session_id: instance.id.clone(),
             instance,
+            profile: "default".to_string(),
             delete_worktree: false,
             delete_branch: false,
             delete_sandbox: false,
@@ -262,6 +273,7 @@ mod tests {
         let request = DeletionRequest {
             session_id: instance.id.clone(),
             instance,
+            profile: "default".to_string(),
             delete_worktree: true,
             delete_branch: false,
             delete_sandbox: false,
@@ -283,6 +295,7 @@ mod tests {
         poller.request_deletion(DeletionRequest {
             session_id: session_id.clone(),
             instance,
+            profile: "default".to_string(),
             delete_worktree: false,
             delete_branch: false,
             delete_sandbox: false,
@@ -318,6 +331,7 @@ mod tests {
         let request = DeletionRequest {
             session_id: custom_id.clone(),
             instance,
+            profile: "default".to_string(),
             delete_worktree: false,
             delete_branch: false,
             delete_sandbox: false,

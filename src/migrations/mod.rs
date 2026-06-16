@@ -13,13 +13,14 @@ mod v002_seed_sandbox_from_volumes;
 mod v003_yolo_mode_config;
 mod v004_unified_environment;
 mod v005_remove_dynamic_tab_title;
+mod v006_agent_session_store;
 
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 5;
+const CURRENT_VERSION: u32 = 6;
 const VERSION_FILE: &str = ".schema_version";
 
 struct Migration {
@@ -53,6 +54,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "remove_dynamic_tab_title",
         run: v005_remove_dynamic_tab_title::run,
+    },
+    Migration {
+        version: 6,
+        name: "agent_session_store",
+        run: v006_agent_session_store::run,
     },
 ];
 
