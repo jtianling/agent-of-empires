@@ -38,20 +38,6 @@ pub enum Status {
     Deleting,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RestartPhase {
-    SendingExitKeys { next_group_index: usize },
-    WaitingForExit,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingResume {
-    pub phase: RestartPhase,
-    pub config: &'static crate::agents::ResumeConfig,
-    pub started_at: Instant,
-    pub timeout: Duration,
-}
-
 /// Screen markers that identify Claude's startup confirmation prompts. Each
 /// default-highlights the safe-to-proceed option, so a single Enter confirms.
 const AUTO_CONFIRM_MARKERS: &[&str] = &[
@@ -245,8 +231,11 @@ pub struct Instance {
     /// belongs to this instance. Used as the primary source for `fork_token()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
+    /// Runtime-only flag: set while a multi-pane `R` restart is in flight so a
+    /// second `R` press on the same instance is ignored. Cleared once every
+    /// tracked pane has been respawned. Never persisted.
     #[serde(skip)]
-    pub pending_resume: Option<PendingResume>,
+    pub restart_in_flight: bool,
     #[serde(skip)]
     pub last_spinner_seen: Option<Instant>,
     #[serde(skip)]
@@ -294,7 +283,7 @@ impl Instance {
             resume_token: None,
             fork_pending: None,
             agent_session_id: None,
-            pending_resume: None,
+            restart_in_flight: false,
             last_spinner_seen: None,
             spike_start: None,
             pre_spike_status: None,
@@ -400,13 +389,6 @@ impl Instance {
         crate::agents::get_agent(&self.tool)
             .map(|a| self.command != a.binary)
             .unwrap_or(true)
-    }
-
-    pub fn can_gracefully_restart(&self) -> bool {
-        !self.is_sandboxed()
-            && !self.has_command_override()
-            && self.pending_resume.is_none()
-            && crate::agents::get_agent(&self.tool).is_some_and(|agent| agent.resume.is_some())
     }
 
     pub fn expects_shell(&self) -> bool {
@@ -541,7 +523,7 @@ impl Instance {
 
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
-        self.pending_resume = None;
+        self.restart_in_flight = false;
         // First launch of a forked session has been committed to tmux. The
         // agent will now spawn its own session id, so we no longer need the
         // parent's token and subsequent restarts follow the normal resume flow.
@@ -732,7 +714,7 @@ impl Instance {
         fork.created_at = Utc::now();
         fork.last_accessed_at = None;
         fork.resume_token = None;
-        fork.pending_resume = None;
+        fork.restart_in_flight = false;
         // Pre-allocate a new session UUID for the fork if the tool supports it.
         // This is passed via `--session-id <uuid>` alongside the fork template.
         fork.agent_session_id = crate::agents::get_agent(&self.tool)
@@ -976,134 +958,55 @@ impl Instance {
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
         self.clear_resume_token();
-        self.pending_resume = None;
 
         Ok(())
     }
 
-    pub fn initiate_graceful_restart(&mut self) -> Result<bool> {
-        if !self.can_gracefully_restart() {
-            return Ok(false);
-        }
-
-        let Some(config) =
-            crate::agents::get_agent(&self.tool).and_then(|agent| agent.resume.as_ref())
-        else {
-            return Ok(false);
-        };
-
-        let Some(first_group) = config.exit_sequence.first() else {
-            return Ok(false);
-        };
-
-        let session = self.tmux_session()?;
-        if !session.exists() {
-            return Ok(false);
-        }
-
-        // If the agent pane is already dead, skip graceful restart. The pane
-        // output is stale, so only a previously persisted token is safe to use.
-        if session.is_pane_dead() {
-            if let Some(token) = self.resolved_resume_token(None) {
-                self.respawn_agent_pane_with_resume(Some(token.as_str()))?;
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-
-        session.send_keys_to_agent_pane(first_group)?;
+    /// Resume every tracked agent pane of this instance from the persisted
+    /// `agent_slot` store. Each pane is killed and respawned with the resume
+    /// command built from its own `native_session_id`; a pane that cannot resume
+    /// degrades to a fresh restart of that pane only and does not abort the
+    /// remaining panes. Returns the per-pane outcomes (one per slot). When the
+    /// instance has no tracked slots the caller falls back to the single-pane
+    /// `respawn_agent_pane` behavior.
+    pub fn resume_all_tracked_panes(
+        &mut self,
+        slots: &[crate::db::AgentSlot],
+    ) -> Vec<PaneResumeOutcome> {
         self.status = Status::Restarting;
         self.last_error = None;
-        self.pending_resume = Some(PendingResume {
-            phase: if config.exit_sequence.len() > 1 {
-                RestartPhase::SendingExitKeys {
-                    next_group_index: 1,
-                }
-            } else {
-                RestartPhase::WaitingForExit
-            },
-            config,
-            started_at: Instant::now(),
-            timeout: Duration::from_secs(config.timeout_secs),
-        });
 
-        Ok(true)
-    }
-
-    pub fn tick_pending_resume(&mut self) -> Option<crate::tui::Action> {
-        let pending = self.pending_resume.clone()?;
-
-        match pending.phase {
-            RestartPhase::SendingExitKeys { next_group_index } => {
-                let session = self.tmux_session().ok()?;
-                let Some(keys) = pending.config.exit_sequence.get(next_group_index) else {
-                    self.mutate_pending_resume_phase(RestartPhase::WaitingForExit);
-                    return None;
-                };
-
-                if let Err(err) = session.send_keys_to_agent_pane(keys) {
-                    tracing::warn!("Failed to send graceful restart keys: {}", err);
-                    return self.fallback_to_fresh_restart();
-                }
-
-                let next_phase = if next_group_index + 1 < pending.config.exit_sequence.len() {
-                    RestartPhase::SendingExitKeys {
-                        next_group_index: next_group_index + 1,
-                    }
-                } else {
-                    RestartPhase::WaitingForExit
-                };
-                self.mutate_pending_resume_phase(next_phase);
-                None
-            }
-            RestartPhase::WaitingForExit => {
-                let Ok(session) = self.tmux_session() else {
-                    return self.fallback_to_fresh_restart();
-                };
-
-                if session.is_pane_dead() {
-                    let output = session.capture_pane_cached(100).unwrap_or_default();
-                    let resume_token =
-                        match extract_resume_token(&output, pending.config.resume_pattern) {
-                            Some(token) if !is_valid_resume_token(&token) => {
-                                tracing::warn!(
-                                    "Ignoring invalid resume token extracted for '{}': {:?}",
-                                    self.title,
-                                    token
-                                );
-                                return self.fallback_to_fresh_restart();
-                            }
-                            token => token,
-                        };
-                    let action = crate::tui::Action::AttachSession(self.id.clone());
-                    if let Err(err) = self.respawn_agent_pane_with_resume(resume_token.as_deref()) {
-                        tracing::warn!("Failed to respawn agent pane after graceful exit: {}", err);
-                        self.last_error = Some(err.to_string());
-                        self.status = Status::Error;
-                        self.pending_resume = None;
-                        return None;
-                    }
-                    return Some(action);
-                }
-
-                if pending.started_at.elapsed() >= pending.timeout {
-                    tracing::warn!(
-                        "Graceful restart timed out for '{}' after {:?}",
-                        self.title,
-                        pending.timeout
-                    );
-                    return self.fallback_to_fresh_restart();
-                }
-
-                None
-            }
+        if let Some(ref hook_cmds) = self.resolve_on_launch_hooks() {
+            self.execute_on_launch_hooks(hook_cmds);
         }
-    }
 
-    fn mutate_pending_resume_phase(&mut self, phase: RestartPhase) {
-        if let Some(pending) = &mut self.pending_resume {
-            pending.phase = phase;
+        let mut outcomes = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let outcome = resume_launch_pane(
+                &slot.agent,
+                &slot.native_session_id,
+                &slot.tmux_pane,
+                &slot.cwd,
+            );
+            if let PaneResumeOutcome::Error(ref err) = outcome {
+                tracing::warn!(
+                    "Failed to resume pane {} (slot {}) for '{}': {}",
+                    slot.tmux_pane,
+                    slot.slot,
+                    self.title,
+                    err
+                );
+            }
+            outcomes.push(outcome);
         }
+
+        self.run_auto_confirm();
+        self.apply_tmux_options(&Self::current_profile());
+
+        self.status = Status::Starting;
+        self.last_start_time = Some(Instant::now());
+
+        outcomes
     }
 
     fn clear_resume_token(&mut self) {
@@ -1114,19 +1017,6 @@ impl Instance {
         resume_token
             .map(std::string::ToString::to_string)
             .or_else(|| self.resume_token.clone())
-    }
-
-    fn fallback_to_fresh_restart(&mut self) -> Option<crate::tui::Action> {
-        self.resume_token = None;
-        let action = crate::tui::Action::AttachSession(self.id.clone());
-        if let Err(err) = self.respawn_agent_pane_with_resume(None) {
-            tracing::warn!("Failed to fall back to fresh restart: {}", err);
-            self.last_error = Some(err.to_string());
-            self.status = Status::Error;
-            self.pending_resume = None;
-            return None;
-        }
-        Some(action)
     }
 
     fn apply_tmux_options(&self, profile: &str) {
@@ -1638,6 +1528,89 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
     )
 }
 
+/// Outcome of resuming a single tracked pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneResumeOutcome {
+    /// Pane respawned with a resume command built from the persisted id.
+    Resumed,
+    /// Pane respawned fresh (no resume flag): empty id, agent without
+    /// `ResumeConfig`, or unknown agent.
+    DegradedToFresh,
+    /// Respawn failed; the error message is recorded for the caller.
+    Error(String),
+}
+
+/// Whether a string is safe to use as a bare command token (binary name) in a
+/// tmux respawn command. tmux runs the respawn argument through a shell, so a
+/// recorded value with shell metacharacters must never be executed.
+fn is_safe_command_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Build the launch command for one tracked pane from its recorded agent and
+/// persisted native session id. Returns `Some((command, resumed))` where
+/// `resumed` is true only when a resume flag was appended. A known agent that
+/// lacks a `ResumeConfig`, has an empty/invalid `native_session_id`, degrades to
+/// a fresh command (just the binary). Returns `None` when no safe command can be
+/// built (an unknown agent whose recorded name is not a safe command token), so
+/// the caller can surface a per-pane error instead of executing it.
+///
+/// The persisted id and unknown-agent name are validated because the command is
+/// ultimately run through a shell by `tmux respawn-pane`; an unvalidated value
+/// with shell metacharacters would otherwise be a command-injection vector.
+fn build_pane_resume_command(agent: &str, native_session_id: &str) -> Option<(String, bool)> {
+    let Some(def) = crate::agents::get_agent(agent) else {
+        // Unknown agent: only the recorded name can act as the binary, and only
+        // if it is a safe command token; otherwise refuse to build a command.
+        return is_safe_command_token(agent).then(|| (agent.to_string(), false));
+    };
+
+    match def.resume.as_ref() {
+        Some(resume) if is_valid_resume_token(native_session_id) => {
+            let resume_flag = resume.resume_flag.replace("{}", native_session_id);
+            Some((format!("{} {}", def.binary, resume_flag), true))
+        }
+        _ => Some((def.binary.to_string(), false)),
+    }
+}
+
+/// Reusable per-pane resume-launch core (shared with w04 cold-start recovery).
+///
+/// Given a tracked pane's recorded agent, its persisted `native_session_id`, its
+/// `tmux_pane` target, and its `cwd`, kill the pane's process tree and respawn it
+/// with the resume command built from `ResumeConfig.resume_flag`. A pane with no
+/// usable resume id (empty/invalid id, no `ResumeConfig`, or a known-but-unknown
+/// agent name) degrades to a fresh restart of that one pane. A pane whose agent
+/// name is unknown and not a safe command token, or whose tmux respawn fails, is
+/// returned as [`PaneResumeOutcome::Error`] so the caller can isolate per-pane
+/// failures.
+pub fn resume_launch_pane(
+    agent: &str,
+    native_session_id: &str,
+    tmux_pane: &str,
+    cwd: &str,
+) -> PaneResumeOutcome {
+    // Build (and validate) the command before killing the pane, so a pane we
+    // cannot safely respawn is left running rather than killed and abandoned.
+    let Some((command, resumed)) = build_pane_resume_command(agent, native_session_id) else {
+        return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
+    };
+
+    tmux::kill_pane_process_tree_target(tmux_pane);
+
+    if let Err(err) = tmux::respawn_pane_target(tmux_pane, &command, cwd) {
+        return PaneResumeOutcome::Error(err.to_string());
+    }
+
+    if resumed {
+        PaneResumeOutcome::Resumed
+    } else {
+        PaneResumeOutcome::DegradedToFresh
+    }
+}
+
 pub(crate) fn extract_resume_token(output: &str, pattern: &str) -> Option<String> {
     Regex::new(pattern)
         .ok()?
@@ -2082,17 +2055,59 @@ mod tests {
     }
 
     #[test]
-    fn test_graceful_restart_skipped_for_custom_commands_and_agents_without_resume() {
-        let mut custom = Instance::new("custom", "/tmp/test");
-        custom.tool = "claude".to_string();
-        custom.command = "wrapper".to_string();
-        assert!(!custom.initiate_graceful_restart().unwrap());
-        assert!(custom.pending_resume.is_none());
+    fn test_build_pane_resume_command_claude_appends_resume_flag() {
+        let (cmd, resumed) =
+            build_pane_resume_command("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11").unwrap();
+        assert!(resumed);
+        assert_eq!(cmd, "claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11");
+    }
 
-        let mut no_resume = Instance::new("no-resume", "/tmp/test");
-        no_resume.tool = "opencode".to_string();
-        assert!(!no_resume.initiate_graceful_restart().unwrap());
-        assert!(no_resume.pending_resume.is_none());
+    #[test]
+    fn test_build_pane_resume_command_codex_uses_resume_subcommand() {
+        let (cmd, resumed) =
+            build_pane_resume_command("codex", "019d1af9-a899-7df1-8f7d-a244126e5ded").unwrap();
+        assert!(resumed);
+        assert_eq!(cmd, "codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded");
+    }
+
+    #[test]
+    fn test_build_pane_resume_command_empty_id_restarts_fresh() {
+        let (cmd, resumed) = build_pane_resume_command("claude", "").unwrap();
+        assert!(!resumed);
+        assert_eq!(cmd, "claude");
+        assert!(!cmd.contains("--resume"));
+    }
+
+    #[test]
+    fn test_build_pane_resume_command_invalid_id_restarts_fresh() {
+        // A persisted id with shell metacharacters must never be substituted
+        // into the command; it degrades to a fresh restart instead.
+        let (cmd, resumed) = build_pane_resume_command("claude", "abc; rm -rf ~").unwrap();
+        assert!(!resumed);
+        assert_eq!(cmd, "claude");
+        assert!(!cmd.contains("rm -rf"));
+    }
+
+    #[test]
+    fn test_build_pane_resume_command_agent_without_resume_config_restarts_fresh() {
+        // gemini has no ResumeConfig -> fresh binary even with a persisted id.
+        let (cmd, resumed) = build_pane_resume_command("gemini", "gemini-sess-0").unwrap();
+        assert!(!resumed);
+        assert_eq!(cmd, crate::agents::get_agent("gemini").unwrap().binary);
+        assert!(!cmd.contains("resume"));
+    }
+
+    #[test]
+    fn test_build_pane_resume_command_unknown_safe_agent_uses_recorded_name_fresh() {
+        let (cmd, resumed) = build_pane_resume_command("mystery", "some-id").unwrap();
+        assert!(!resumed);
+        assert_eq!(cmd, "mystery");
+    }
+
+    #[test]
+    fn test_build_pane_resume_command_unsafe_unknown_agent_is_rejected() {
+        // An unknown agent name with shell metacharacters must not be executed.
+        assert!(build_pane_resume_command("evil; rm -rf ~", "some-id").is_none());
     }
 
     // Tests for Status enum
@@ -2316,11 +2331,11 @@ mod tests {
     }
 
     #[test]
-    fn test_can_gracefully_restart_allows_extra_args_without_command_override() {
+    fn test_extra_args_without_command_override_is_not_a_command_override() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         inst.extra_args = "--model sonnet".to_string();
-        assert!(inst.can_gracefully_restart());
+        assert!(!inst.has_command_override());
     }
 
     #[test]
@@ -2368,20 +2383,12 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_resume_is_runtime_only() {
+    fn test_restart_in_flight_is_runtime_only() {
         let mut inst = Instance::new("Test", "/tmp/test");
-        let resume = crate::agents::get_agent("claude")
-            .and_then(|agent| agent.resume.as_ref())
-            .unwrap();
-        inst.pending_resume = Some(PendingResume {
-            phase: RestartPhase::WaitingForExit,
-            config: resume,
-            started_at: Instant::now(),
-            timeout: Duration::from_secs(10),
-        });
+        inst.restart_in_flight = true;
 
         let json = serde_json::to_string(&inst).unwrap();
-        assert!(!json.contains("pending_resume"));
+        assert!(!json.contains("restart_in_flight"));
     }
 
     #[test]
@@ -2425,7 +2432,6 @@ mod tests {
 
         // The tmux-backed dead-pane restart is covered at runtime. This unit
         // test covers the stored-token selection used by that branch.
-        assert!(inst.can_gracefully_restart());
         assert_eq!(
             inst.resolved_resume_token(None).as_deref(),
             Some("019d1af9-a899-7df1-8f7d-a244126e5ded")

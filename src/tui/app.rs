@@ -259,31 +259,6 @@ impl App {
                 refresh_needed = true;
             }
 
-            let restarting_ids: Vec<String> = self
-                .home
-                .instances
-                .iter()
-                .filter(|inst| inst.status == crate::session::Status::Restarting)
-                .map(|inst| inst.id.clone())
-                .collect();
-            let mut restart_actions = Vec::new();
-            for id in restarting_ids {
-                let mut action = None;
-                self.home.mutate_instance(&id, |inst| {
-                    action = inst.tick_pending_resume();
-                });
-                if let Some(action) = action {
-                    restart_actions.push(action);
-                }
-            }
-            if !restart_actions.is_empty() {
-                refresh_needed = true;
-            }
-            for action in restart_actions {
-                self.execute_action(action, terminal)?;
-                refresh_needed = true;
-            }
-
             // Periodic refreshes (only when no input pending)
 
             // Request status refresh every interval (non-blocking)
@@ -493,7 +468,8 @@ impl App {
             }
             Action::RespawnAgentPane(id) => {
                 if let Some(inst) = self.home.get_instance(&id).cloned() {
-                    if inst.pending_resume.is_some() {
+                    // Ignore a second R while a multi-pane restart is in flight.
+                    if inst.restart_in_flight {
                         return Ok(());
                     }
 
@@ -509,53 +485,75 @@ impl App {
                         return self.attach_session(&id, terminal);
                     }
 
-                    if inst.can_gracefully_restart() {
-                        let mut initiate_result = Ok(false);
-                        let mut attach_after_graceful_restart = false;
+                    let profile = self.home.storage.profile().to_string();
+                    // Distinguish "no tracked panes" from "could not read the
+                    // store". A read failure is not an empty slot set: degrade to
+                    // a primary-pane restart but surface the failure instead of
+                    // silently narrowing the restart scope.
+                    let (slots, slot_read_error) =
+                        match crate::db::Store::open_with_schema(&profile)
+                            .and_then(|store| store.read_slots_for_instance(&id))
+                        {
+                            Ok(slots) => (slots, None),
+                            Err(e) => {
+                                tracing::error!("Failed to read agent slots for '{}': {}", id, e);
+                                (
+                                    Vec::new(),
+                                    Some(format!(
+                                    "Could not read tracked panes: {e}; restarted primary pane only"
+                                )),
+                                )
+                            }
+                        };
+
+                    if slots.is_empty() {
+                        // No tracked panes (or unreadable store): restart the
+                        // primary @aoe_agent_pane with the single-pane behavior.
+                        let mut respawn_result = Ok(());
                         self.home.mutate_instance(&id, |inst| {
-                            initiate_result = inst.initiate_graceful_restart();
-                            attach_after_graceful_restart = inst.pending_resume.is_none();
+                            respawn_result = inst.respawn_agent_pane();
                         });
 
-                        match initiate_result {
-                            Ok(true) => {
-                                self.home.set_instance_error(&id, None);
-                                if attach_after_graceful_restart {
-                                    if let Err(err) = self.home.save() {
-                                        tracing::error!(
-                                            "Failed to save after graceful restart: {}",
-                                            err
-                                        );
-                                    }
-                                    crate::tmux::refresh_session_cache();
-                                    self.attach_session(&id, terminal)?;
-                                }
-                                return Ok(());
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                tracing::error!("Failed to initiate graceful restart: {}", e);
-                                self.home.set_instance_error(&id, Some(e.to_string()));
-                                self.home
-                                    .set_instance_status(&id, crate::session::Status::Error);
-                                return Ok(());
-                            }
+                        if let Err(e) = respawn_result {
+                            tracing::error!("Failed to respawn agent pane: {}", e);
+                            self.home.set_instance_error(&id, Some(e.to_string()));
+                            self.home
+                                .set_instance_status(&id, crate::session::Status::Error);
+                            return Ok(());
+                        }
+                        self.home.set_instance_error(&id, slot_read_error);
+                    } else {
+                        // Fan out to every tracked pane, each resumed from its
+                        // own persisted native_session_id. Per-pane failures are
+                        // recorded but do not abort sibling restarts.
+                        let mut outcomes = Vec::new();
+                        self.home.mutate_instance(&id, |inst| {
+                            inst.restart_in_flight = true;
+                            outcomes = inst.resume_all_tracked_panes(&slots);
+                            inst.restart_in_flight = false;
+                        });
+
+                        let errors: Vec<String> = outcomes
+                            .iter()
+                            .filter_map(|o| match o {
+                                crate::session::PaneResumeOutcome::Error(e) => Some(e.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if errors.is_empty() {
+                            self.home.set_instance_error(&id, None);
+                        } else {
+                            self.home.set_instance_error(
+                                &id,
+                                Some(format!(
+                                    "{} pane(s) failed to restart: {}",
+                                    errors.len(),
+                                    errors.join("; ")
+                                )),
+                            );
                         }
                     }
 
-                    let mut respawn_result = Ok(());
-                    self.home.mutate_instance(&id, |inst| {
-                        respawn_result = inst.respawn_agent_pane();
-                    });
-
-                    if let Err(e) = respawn_result {
-                        tracing::error!("Failed to respawn agent pane: {}", e);
-                        self.home.set_instance_error(&id, Some(e.to_string()));
-                        self.home
-                            .set_instance_status(&id, crate::session::Status::Error);
-                        return Ok(());
-                    }
-                    self.home.set_instance_error(&id, None);
                     if let Err(err) = self.home.save() {
                         tracing::error!("Failed to save after respawning agent pane: {}", err);
                     }
@@ -793,9 +791,9 @@ impl App {
             let should_unzoom = !is_narrow_terminal && is_zoomed;
 
             if should_zoom || should_unzoom {
-                let target = format!("{session_name}:.0");
+                let agent_pane_target = format!("{session_name}:.0");
                 match Command::new("tmux")
-                    .args(["resize-pane", "-Z", "-t", &target])
+                    .args(["resize-pane", "-Z", "-t", &agent_pane_target])
                     .output()
                 {
                     Ok(output) if !output.status.success() => {

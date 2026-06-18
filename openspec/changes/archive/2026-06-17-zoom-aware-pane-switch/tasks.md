@@ -8,4 +8,4 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure no regressions
+- [x] 3.1 Run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure no regressions

@@ -22,6 +22,7 @@ mod cli;
 mod errors;
 mod fork;
 mod multi_agent_session;
+mod multi_pane_restart;
 mod new_session;
 mod pane_cwd;
 mod pane_session_capture;

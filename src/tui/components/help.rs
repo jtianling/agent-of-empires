@@ -37,7 +37,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("N", "New from selection"),
                 ("f", "Fork session (claude/codex/opencode)"),
                 ("x", "Stop session"),
-                ("R", "Restart agent pane"),
+                ("R", "Restart agent panes (resume tracked)"),
                 ("d", "Delete session/group"),
                 ("r", "Rename session"),
                 ("J/K", "Move item (Manual sort)"),

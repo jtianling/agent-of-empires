@@ -247,25 +247,7 @@ impl Session {
 
     pub fn respawn_agent_pane(&self, command: &str, working_dir: &str) -> Result<()> {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
-
-        let output = Command::new("tmux")
-            .args([
-                "respawn-pane",
-                "-k",
-                "-c",
-                working_dir,
-                "-t",
-                &target,
-                command,
-            ])
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to respawn agent pane: {}", stderr);
-        }
-
-        Ok(())
+        respawn_pane_target(&target, command, working_dir)
     }
 
     /// Send a message to the agent, handling multi-line text with Shift+Enter
@@ -308,31 +290,13 @@ impl Session {
     }
 
     pub fn send_keys_to_agent_pane(&self, keys: &[&str]) -> Result<()> {
-        if keys.is_empty() {
-            return Ok(());
-        }
-
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
-        let output = Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&target)
-            .args(keys)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to send keys to agent pane: {}", stderr);
-        }
-
-        Ok(())
+        send_keys_to_pane_target(&target, keys)
     }
 
     pub fn kill_agent_pane_process_tree(&self) {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
-        if let Some(pid) = process::get_pane_pid(&target) {
-            process::kill_process_tree(pid);
-        }
+        kill_pane_process_tree_target(&target);
     }
 
     pub fn get_pane_pid(&self) -> Option<u32> {
@@ -408,6 +372,50 @@ fn clear_cached_capture(session_name: &str) {
             entries.remove(session_name);
         }
     }
+}
+
+/// Respawn an explicit tmux pane target (e.g. `%37`) with `command`, killing
+/// the current pane process first (`respawn-pane -k`) and running in `working_dir`.
+pub fn respawn_pane_target(pane: &str, command: &str, working_dir: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["respawn-pane", "-k", "-c", working_dir, "-t", pane, command])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to respawn pane {}: {}", pane, stderr);
+    }
+
+    Ok(())
+}
+
+/// Kill the process tree rooted at an explicit tmux pane target. Does nothing if
+/// the pane has no resolvable pid (already gone).
+pub fn kill_pane_process_tree_target(pane: &str) {
+    if let Some(pid) = process::get_pane_pid(pane) {
+        process::kill_process_tree(pid);
+    }
+}
+
+/// Send raw key strings to an explicit tmux pane target. No-op for empty input.
+pub fn send_keys_to_pane_target(pane: &str, keys: &[&str]) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let output = Command::new("tmux")
+        .arg("send-keys")
+        .arg("-t")
+        .arg(pane)
+        .args(keys)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to send keys to pane {}: {}", pane, stderr);
+    }
+
+    Ok(())
 }
 
 /// Split an existing session's window horizontally and run a command in the new
@@ -758,6 +766,72 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &session_name])
             .output();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_respawn_pane_target_respawns_given_pane() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let session_name = format!("aoe_test_respawn_target_{}", std::process::id());
+        let output = Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session_name,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sleep 30",
+            ])
+            .output()
+            .expect("tmux new-session");
+        assert!(output.status.success());
+
+        let pane_id = Command::new("tmux")
+            .args(["display-message", "-t", &session_name, "-p", "#{pane_id}"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .expect("pane id");
+
+        respawn_pane_target(&pane_id, "sleep 99", "/tmp").expect("respawn target");
+
+        let start_cmd = Command::new("tmux")
+            .args([
+                "display-message",
+                "-t",
+                &pane_id,
+                "-p",
+                "#{pane_start_command}",
+            ])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        assert!(
+            start_cmd.contains("sleep 99"),
+            "respawned pane should run the new command, got {:?}",
+            start_cmd
+        );
+
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &session_name])
+            .output();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_send_keys_to_pane_target_empty_is_noop() {
+        // Empty key list returns Ok without invoking tmux against a real pane.
+        assert!(send_keys_to_pane_target("%nonexistent", &[]).is_ok());
     }
 
     #[test]

@@ -610,6 +610,11 @@ last_seen_version = "{}"
             String::from_utf8_lossy(&output.stderr)
         );
         let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Mirror how AoE creates managed agent panes (`split_window_right`):
+        // `remain-on-exit on` keeps the pane present after its process tree is
+        // killed, so the multi-pane `R` restart can respawn it in place. Without
+        // this a plain split pane closes on kill and the respawn cannot target it.
+        let _ = self.tmux_command(&["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"]);
         let _ = self.tmux_command(&["select-layout", "-t", target, "tiled"]);
         pane_id
     }

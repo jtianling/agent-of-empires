@@ -313,7 +313,7 @@ impl HomeView {
                 inst.last_error = prev.last_error.clone();
                 inst.last_error_check = prev.last_error_check;
                 inst.last_start_time = prev.last_start_time;
-                inst.pending_resume = prev.pending_resume.clone();
+                inst.restart_in_flight = prev.restart_in_flight;
                 inst.last_spinner_seen = prev.last_spinner_seen;
                 inst.spike_start = prev.spike_start;
                 inst.pre_spike_status = prev.pre_spike_status;
