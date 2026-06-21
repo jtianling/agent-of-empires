@@ -1,28 +1,4 @@
-# pane-session-capture Specification
-
-## Purpose
-TBD - created by archiving change agent-session-recording. Update Purpose after archive.
-## Requirements
-### Requirement: Hook captures native session id keyed by tmux pane
-The installed agent status hook SHALL, in addition to its existing status-file write, capture the agent's native session id into the SQLite store keyed by `$TMUX_PANE`. The native session id SHALL be read from the hook's **stdin JSON** (`.session_id`), not from a `$CLAUDE_SESSION_ID` (or similar) environment variable. The capture SHALL also record the working directory (`.cwd` from stdin or `$PWD`). The legacy environment-variable session-id capture SHALL be removed.
-
-#### Scenario: Claude session id captured from stdin
-- **WHEN** a Claude agent fires a hook event inside a tmux pane
-- **AND** the hook stdin JSON contains `session_id`
-- **THEN** the store SHALL hold a `pane_live` row for that pane's `$TMUX_PANE`
-- **AND** the row's `native_session_id` SHALL equal the stdin `session_id`
-- **AND** the row's `cwd` SHALL equal the agent's working directory
-
-#### Scenario: Hand-launched agent without AOE_INSTANCE_ID is still captured
-- **WHEN** a user manually runs an agent inside a shell pane (no `$AOE_INSTANCE_ID` in the environment)
-- **AND** the pane has a `$TMUX_PANE` value
-- **THEN** the hook SHALL still write the `pane_live` capture row
-- **AND** the capture SHALL NOT depend on `$AOE_INSTANCE_ID`
-
-#### Scenario: Capture no-ops outside tmux
-- **WHEN** an agent fires a hook event but `$TMUX_PANE` is empty (not running inside tmux)
-- **THEN** the hook SHALL NOT write a capture row
-- **AND** the hook SHALL exit successfully without error
+## MODIFIED Requirements
 
 ### Requirement: Reconciler snapshots pane captures into durable slots
 The system SHALL run a reconciler that snapshots pane captures into durable slots, driven from at least two attach-independent sources: the existing TUI status-poller tick AND the long-lived notification-monitor process (`aoe tmux monitor-notifications`). The reconciler SHALL continue to advance `agent_slot` while the TUI is attached to a session -- that is, while the status poller is not ticking because the main loop is blocked on `tmux attach-session`. For each managed session, the reconciler SHALL enumerate the session's tmux panes, resolve each pane's capture via `pane_live` keyed by `$TMUX_PANE`, and upsert a durable `agent_slot` record `(instance_id, slot, agent, native_session_id, cwd, tmux_pane, last_seen_at)`. The primary `@aoe_agent_pane` SHALL be slot 0. Assignment SHALL be sticky: a pane that already owns a slot keeps it, so a newly appearing pane SHALL NOT evict an already-tracked pane. New panes SHALL fill remaining free slots in ascending pane-index order, capped at 4 panes per session. The reconciler is idempotent, so running it from multiple drivers SHALL NOT create duplicate or conflicting rows. The notification-monitor driver SHALL be throttled by a minimum interval so it does not query tmux on every short poll cycle.
@@ -59,4 +35,3 @@ The system SHALL run a reconciler that snapshots pane captures into durable slot
 - **WHEN** a managed session's agent has an active capture
 - **THEN** the reconciler SHALL snapshot it into `agent_slot` during normal runs (before any teardown)
 - **AND** the durable record SHALL therefore be available even after the tmux session no longer exists
-

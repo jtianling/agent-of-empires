@@ -18,6 +18,7 @@
 mod harness;
 
 mod agent_session_store;
+mod attach_reconcile;
 mod cli;
 mod errors;
 mod fork;

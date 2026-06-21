@@ -58,6 +58,13 @@ const POLL_INTERVAL_RUNNING: Duration = Duration::from_secs(1);
 const POLL_INTERVAL_WAITING: Duration = Duration::from_secs(2);
 const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(3);
 
+/// Minimum interval between durable-store reconcile passes driven from this
+/// long-lived monitor process. Mirrors the TUI status poller's interval. This
+/// driver keeps `agent_slot` advancing while the TUI is attached to a session
+/// (the poller is blocked on `tmux attach-session` and stops ticking), so the
+/// resume/recovery data source does not go stale during normal attached use.
+const RECONCILE_INTERVAL: Duration = Duration::from_millis(750);
+
 #[derive(Debug, Clone)]
 struct MonitorSessionState {
     last_window_activity: i64,
@@ -671,6 +678,8 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
     let startup_deadline = Instant::now() + Duration::from_secs(2);
     let mut states = HashMap::<String, MonitorSessionState>::new();
     let mut last_profile_sessions = Vec::new();
+    // Start in the past so the first loop iteration reconciles immediately.
+    let mut last_reconcile = Instant::now() - RECONCILE_INTERVAL;
 
     loop {
         match get_server_option(&pid_option) {
@@ -706,6 +715,22 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
         };
         if !profile_sessions.is_empty() {
             last_profile_sessions = profile_sessions;
+        }
+
+        // Reconcile durable agent_slot records independently of the TUI status
+        // poller. The poller only ticks while the user is on the home view; this
+        // long-lived process keeps reconciling while attached to a session.
+        // Best-effort and idempotent (the home-view driver may also run it).
+        if last_reconcile.elapsed() >= RECONCILE_INTERVAL {
+            match Storage::new(profile).and_then(|storage| storage.load_with_groups()) {
+                Ok((instances, _groups)) => {
+                    crate::db::reconcile::reconcile_all(profile, &instances);
+                }
+                Err(err) => {
+                    tracing::debug!("monitor reconcile: failed to load instances: {}", err);
+                }
+            }
+            last_reconcile = Instant::now();
         }
 
         if get_server_option(&pid_option).as_deref() != Some(pid.as_str()) {
