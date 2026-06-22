@@ -19,6 +19,27 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
+// tmux socket isolation
+// ---------------------------------------------------------------------------
+
+/// Dedicated `TMUX_TMPDIR` for e2e tests.
+///
+/// `aoe` never passes `-S` to tmux: it picks the socket from `$TMUX` when set,
+/// otherwise falls back to the default socket under `$TMUX_TMPDIR` (or `/tmp`).
+/// The `aoe add --launch` / `session fork` / `session attach` paths run as bare
+/// CLI subprocesses with no inherited `$TMUX`, so without this their sessions
+/// land on the user's *global* default socket -- mingling with, and getting
+/// reaped alongside, the user's real sessions. Pointing every aoe subprocess and
+/// every socket-less cleanup command at an e2e-only directory keeps those
+/// fallback sessions on a private socket that can never collide with real ones,
+/// while still being a single shared location the leak sweeps can scan.
+fn e2e_tmux_tmpdir() -> PathBuf {
+    let dir = std::env::temp_dir().join("aoe-e2e-tmux");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+// ---------------------------------------------------------------------------
 // tmux availability guard
 // ---------------------------------------------------------------------------
 
@@ -248,6 +269,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
             .output()
             .expect("failed to run tmux new-session");
 
@@ -390,7 +412,8 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
-            .env("AGENT_OF_EMPIRES_PROFILE", "default");
+            .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX_TMPDIR", e2e_tmux_tmpdir());
 
         if let Some(tmux_env) = tmux_env {
             command.env("TMUX", tmux_env);
@@ -516,6 +539,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
             .output()
             .expect("failed to run aoe CLI")
     }
@@ -531,6 +555,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
             .env("TMUX", format!("{},1,0", self.socket_path.display()))
             .output()
             .expect("failed to run aoe CLI inside tmux")
@@ -545,6 +570,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
             .env("TMUX", tmux_env)
             .output()
             .expect("failed to run aoe CLI with custom TMUX env")
@@ -927,6 +953,7 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
     let canonical_root = home_root.canonicalize().ok();
 
     let Ok(output) = Command::new("tmux")
+        .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
         .args([
             "list-panes",
             "-a",
@@ -969,6 +996,7 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
         }
         if killed.insert(session.to_string()) {
             let _ = Command::new("tmux")
+                .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
                 .args(["kill-session", "-t", session])
                 .output();
         }
@@ -987,6 +1015,7 @@ fn reap_stale_aoe_test_sessions() {
     static REAP: Once = Once::new();
     REAP.call_once(|| {
         let Ok(output) = Command::new("tmux")
+            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
             .args([
                 "list-panes",
                 "-a",
@@ -1028,6 +1057,7 @@ fn reap_stale_aoe_test_sessions() {
         }
         for session in to_kill {
             let _ = Command::new("tmux")
+                .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
                 .args(["kill-session", "-t", &session])
                 .output();
         }
