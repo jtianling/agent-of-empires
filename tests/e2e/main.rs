@@ -22,6 +22,7 @@ mod attach_reconcile;
 mod cli;
 mod errors;
 mod fork;
+mod legacy_schema_heal;
 mod multi_agent_session;
 mod multi_pane_restart;
 mod new_session;

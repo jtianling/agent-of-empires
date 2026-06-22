@@ -276,6 +276,29 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             created_at         INTEGER NOT NULL
         );",
     )?;
+    backfill_agent_slot_tmux_pane(conn)?;
+    Ok(())
+}
+
+/// Backfill the `agent_slot.tmux_pane` column on legacy databases.
+///
+/// `agent_slot` shipped before `tmux_pane` was added to its DDL. Because the
+/// table is created with `CREATE TABLE IF NOT EXISTS`, those legacy databases
+/// keep a 6-column table and `upsert_agent_slot` (which writes `tmux_pane`)
+/// fails. This adds the column when it is absent. Idempotent: a no-op once the
+/// column exists, so it leaves fresh and already-healed databases untouched.
+fn backfill_agent_slot_tmux_pane(conn: &Connection) -> Result<()> {
+    let has_column: bool = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = 'tmux_pane'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE agent_slot ADD COLUMN tmux_pane TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -442,5 +465,92 @@ mod tests {
         ensure_schema(&store.conn).unwrap();
         ensure_schema(&store.conn).unwrap();
         assert_eq!(store.read_slots_for_instance("keep").unwrap().len(), 1);
+    }
+
+    /// Create a legacy `agent_slot` (6 columns, no `tmux_pane`) and seed a row,
+    /// mirroring a database created before the column was added to the DDL.
+    fn legacy_store_with_seeded_row() -> (TempDir, Store) {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open_at(&tmp.path().join("aoe.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE agent_slot (
+                    instance_id        TEXT NOT NULL,
+                    slot               INTEGER NOT NULL CHECK (slot >= 0 AND slot <= 3),
+                    agent              TEXT NOT NULL,
+                    native_session_id  TEXT NOT NULL,
+                    cwd                TEXT NOT NULL,
+                    last_seen_at       INTEGER NOT NULL,
+                    PRIMARY KEY (instance_id, slot)
+                );",
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO agent_slot \
+                 (instance_id, slot, agent, native_session_id, cwd, last_seen_at) \
+                 VALUES ('legacy', 0, 'claude', 'sess', '/tmp', 1)",
+                [],
+            )
+            .unwrap();
+        (tmp, store)
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            rusqlite::params![table, column],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ensure_schema_backfills_legacy_agent_slot_column() {
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        assert!(!column_exists(&store.conn, "agent_slot", "tmux_pane"));
+
+        ensure_schema(&store.conn).unwrap();
+
+        assert!(column_exists(&store.conn, "agent_slot", "tmux_pane"));
+        // The seeded row is preserved (column added, table not recreated) and
+        // its backfilled `tmux_pane` defaults to the empty string.
+        let slots = store.read_slots_for_instance("legacy").unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].native_session_id, "sess");
+        assert_eq!(slots[0].tmux_pane, "");
+    }
+
+    #[test]
+    fn upsert_agent_slot_succeeds_after_backfill() {
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        ensure_schema(&store.conn).unwrap();
+
+        // Before the fix this failed with "no such column: tmux_pane".
+        store
+            .upsert_agent_slot("legacy", 1, "claude", "new", "/tmp", "%9", 2)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("legacy").unwrap();
+        assert_eq!(slots.len(), 2);
+        let added = slots.iter().find(|s| s.slot == 1).unwrap();
+        assert_eq!(added.tmux_pane, "%9");
+    }
+
+    #[test]
+    fn backfill_is_idempotent() {
+        // Re-running over a freshly-healed legacy database does not error.
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        ensure_schema(&store.conn).unwrap();
+        ensure_schema(&store.conn).unwrap();
+        assert!(column_exists(&store.conn, "agent_slot", "tmux_pane"));
+
+        // A fresh database already has the column; the backfill must not try to
+        // add a duplicate column.
+        let (_fresh_tmp, fresh) = temp_store();
+        ensure_schema(&fresh.conn).unwrap();
+        assert!(column_exists(&fresh.conn, "agent_slot", "tmux_pane"));
     }
 }
