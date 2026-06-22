@@ -1009,6 +1009,116 @@ impl Instance {
         outcomes
     }
 
+    /// Whether this instance can be cold-start recovered: it has persisted
+    /// `agent_slot` rows but its tmux session no longer exists. Slot presence is
+    /// supplied by the caller (read from the store) so detection stays a pure
+    /// function of `has_slots` and live tmux state.
+    pub fn is_recoverable(&self, has_slots: bool) -> bool {
+        is_recoverable_from(
+            has_slots,
+            self.tmux_session().map(|s| s.exists()).unwrap_or(false),
+        )
+    }
+
+    /// Rebuild this instance's tmux session from its persisted slots and resume
+    /// each pane from its `native_session_id`. The session is recreated through
+    /// the normal start path so worktree/sandbox context is restored, then one
+    /// pane per slot is created in ascending slot order (slot 0 is the primary
+    /// `@aoe_agent_pane`, the rest are split off), each pane is resume-launched
+    /// via [`resume_launch_pane`], the new pane ids are written back into
+    /// `agent_slot.tmux_pane`, and `@aoe_agent_pane` is re-pinned to slot 0.
+    ///
+    /// Per-pane failures are collected into the returned outcomes and never abort
+    /// recovery of sibling panes. Returns an error only when the session/pane
+    /// rebuild itself fails (before any per-pane resume runs) or when the created
+    /// pane count does not match the slot count.
+    pub fn recover_from_slots(
+        &mut self,
+        store: &crate::db::Store,
+        slots: &[crate::db::AgentSlot],
+    ) -> Result<Vec<PaneResumeOutcome>> {
+        if slots.is_empty() {
+            anyhow::bail!("no persisted slots to recover");
+        }
+
+        let mut ordered: Vec<crate::db::AgentSlot> = slots.to_vec();
+        ordered.sort_by_key(|s| s.slot);
+
+        // Recreate the session shell with its slot-0 primary pane via the normal
+        // start path (restores worktree/sandbox). The slot-0 command is launched
+        // fresh here and then uniformly resume-launched below, matching how
+        // `resume_all_tracked_panes` treats every slot the same way.
+        self.start_with_size(crate::terminal::get_size())?;
+
+        let session_name = tmux::Session::generate_name(&self.id, &self.title);
+
+        // Pair each slot with the new pane created for it, capturing pane ids in
+        // slot order at creation time (see `rebuild_recovery_panes`). A slot
+        // whose pane could not be created is paired with `None` and surfaced as a
+        // per-pane error below without aborting its siblings.
+        let paired = rebuild_recovery_panes(&self.title, &session_name, &ordered)?;
+        tmux::refresh_session_cache();
+
+        let now = crate::db::now_unix();
+        let mut outcomes = Vec::with_capacity(paired.len());
+        for (slot, maybe_pane) in &paired {
+            let Some(new_pane) = maybe_pane else {
+                outcomes.push(PaneResumeOutcome::Error(format!(
+                    "pane creation failed for slot {} (cwd {})",
+                    slot.slot, slot.cwd
+                )));
+                continue;
+            };
+            let outcome =
+                resume_launch_pane(&slot.agent, &slot.native_session_id, new_pane, &slot.cwd);
+            if let PaneResumeOutcome::Error(ref err) = outcome {
+                tracing::warn!(
+                    "Failed to recover pane (slot {}) for '{}': {}",
+                    slot.slot,
+                    self.title,
+                    err
+                );
+            }
+            if let Err(e) = store.upsert_agent_slot(
+                &slot.instance_id,
+                slot.slot,
+                &slot.agent,
+                &slot.native_session_id,
+                &slot.cwd,
+                new_pane,
+                now,
+            ) {
+                tracing::error!(
+                    "Failed to write back tmux_pane for slot {} of '{}': {}",
+                    slot.slot,
+                    self.title,
+                    e
+                );
+            }
+            outcomes.push(outcome);
+        }
+
+        // Re-pin @aoe_agent_pane to slot 0's pane (always created: the primary
+        // pane) so reconcile and the `R` resume-all flow keep operating on the
+        // rebuilt session.
+        if let Some((_, Some(primary_pane))) = paired.first() {
+            if let Err(e) = tmux::set_agent_pane_id(&session_name, primary_pane) {
+                tracing::error!(
+                    "Failed to re-pin @aoe_agent_pane for '{}': {}",
+                    self.title,
+                    e
+                );
+            }
+        }
+
+        self.run_auto_confirm();
+        self.apply_tmux_options(&Self::current_profile());
+        self.status = Status::Starting;
+        self.last_start_time = Some(Instant::now());
+
+        Ok(outcomes)
+    }
+
     fn clear_resume_token(&mut self) {
         self.resume_token = None;
     }
@@ -1623,6 +1733,57 @@ pub(crate) fn is_valid_resume_token(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// Pure recoverability predicate: an instance is recoverable when it has
+/// persisted slots and its tmux session is not currently alive.
+fn is_recoverable_from(has_slots: bool, session_alive: bool) -> bool {
+    has_slots && !session_alive
+}
+
+/// Recreate one pane per slot and pair each slot with its new pane id in slot
+/// order. Slot 0 is the primary pane the start path already created (read back
+/// from `@aoe_agent_pane`); slots 1..N are split off, each capturing its own id
+/// at creation time. Pane ids are deliberately NOT re-listed via
+/// `session_pane_ids`: that orders by `pane_index`, which diverges from creation
+/// order for 3+ panes (every right-split inserts a pane next to pane 0). A slot
+/// whose split fails (e.g. a recorded cwd that no longer exists) is paired with
+/// `None` so its siblings still recover instead of the whole rebuild aborting.
+fn rebuild_recovery_panes(
+    title: &str,
+    session_name: &str,
+    ordered: &[crate::db::AgentSlot],
+) -> Result<Vec<(crate::db::AgentSlot, Option<String>)>> {
+    // Slot 0 is the single pane the start path just created. Prefer the pinned
+    // `@aoe_agent_pane`, but fall back to listing the session's only pane for
+    // start paths that don't pin it (the list is unambiguous before any split).
+    let primary_pane = tmux::get_agent_pane_id(session_name)
+        .or_else(|| {
+            crate::db::reconcile::session_pane_ids(session_name)
+                .into_iter()
+                .next()
+        })
+        .ok_or_else(|| anyhow::anyhow!("recovered session '{}' has no primary pane", title))?;
+
+    let mut paired = Vec::with_capacity(ordered.len());
+    paired.push((ordered[0].clone(), Some(primary_pane)));
+
+    for slot in ordered.iter().skip(1) {
+        match tmux::split_window_right_capture_pane(session_name, &slot.cwd, "") {
+            Ok(pane_id) => paired.push((slot.clone(), Some(pane_id))),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create recovery pane for slot {} of '{}' (cwd {}): {}",
+                    slot.slot,
+                    title,
+                    slot.cwd,
+                    e
+                );
+                paired.push((slot.clone(), None));
+            }
+        }
+    }
+    Ok(paired)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2108,6 +2269,25 @@ mod tests {
     fn test_build_pane_resume_command_unsafe_unknown_agent_is_rejected() {
         // An unknown agent name with shell metacharacters must not be executed.
         assert!(build_pane_resume_command("evil; rm -rf ~", "some-id").is_none());
+    }
+
+    #[test]
+    fn test_is_recoverable_slots_and_dead_session() {
+        // Has persisted slots AND tmux session dead => recoverable.
+        assert!(is_recoverable_from(true, false));
+    }
+
+    #[test]
+    fn test_is_recoverable_live_session_never_recoverable() {
+        // Live session is never recoverable regardless of slots.
+        assert!(!is_recoverable_from(true, true));
+    }
+
+    #[test]
+    fn test_is_recoverable_no_slots_not_recoverable() {
+        // No persisted slots => not recoverable even when the session is dead.
+        assert!(!is_recoverable_from(false, false));
+        assert!(!is_recoverable_from(false, true));
     }
 
     // Tests for Status enum

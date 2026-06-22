@@ -788,6 +788,13 @@ impl HomeView {
                     return Some(Action::RespawnAgentPane(id.to_string()));
                 }
             }
+            KeyCode::Char('V') => {
+                if let Some(id) = &self.selected_session {
+                    if self.is_recoverable(id) {
+                        return Some(Action::RecoverInstance(id.to_string()));
+                    }
+                }
+            }
             KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {

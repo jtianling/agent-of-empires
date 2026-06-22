@@ -179,6 +179,11 @@ pub struct HomeView {
 
     /// Flag to indicate that a refresh is needed due to internal state changes (e.g., preview update)
     pub(super) needs_redraw: bool,
+
+    /// Instance ids classified as cold-start recoverable (have persisted agent
+    /// slots but a dead tmux session). Refreshed on the disk/status cadence so
+    /// render and input never block on a store read.
+    pub(super) recoverable_ids: HashSet<String>,
 }
 
 impl HomeView {
@@ -298,9 +303,11 @@ impl HomeView {
                 .and_then(|c| c.app_state.home_list_width)
                 .unwrap_or(45),
             needs_redraw: false,
+            recoverable_ids: HashSet::new(),
         };
 
         view.update_selected();
+        view.refresh_recoverable_cache();
         Ok(view)
     }
 
@@ -343,6 +350,7 @@ impl HomeView {
         }
 
         self.update_selected();
+        self.refresh_recoverable_cache();
         Ok(())
     }
 
@@ -469,6 +477,7 @@ impl HomeView {
                 }
             }
             self.pending_status_refresh = false;
+            self.refresh_recoverable_cache();
             return true;
         }
         false
@@ -712,6 +721,40 @@ impl HomeView {
 
     pub fn get_instance(&self, id: &str) -> Option<&Instance> {
         self.instance_map.get(id)
+    }
+
+    /// Whether an instance is currently classified as cold-start recoverable.
+    pub(super) fn is_recoverable(&self, id: &str) -> bool {
+        self.recoverable_ids.contains(id)
+    }
+
+    /// Recompute which instances are cold-start recoverable (persisted agent
+    /// slots present AND tmux session dead). Reads the per-profile store once and
+    /// re-checks live tmux state; called on the disk/status refresh cadence so
+    /// the render and input paths only consult the cached set.
+    pub(super) fn refresh_recoverable_cache(&mut self) {
+        let store = match crate::db::Store::open_with_schema(self.storage.profile()) {
+            Ok(store) => store,
+            Err(e) => {
+                tracing::debug!("recoverable: cannot open store: {}", e);
+                return;
+            }
+        };
+
+        let mut recoverable = HashSet::new();
+        for inst in &self.instances {
+            let has_slots = match store.read_slots_for_instance(&inst.id) {
+                Ok(slots) => !slots.is_empty(),
+                Err(e) => {
+                    tracing::debug!("recoverable: read slots for {} failed: {}", inst.id, e);
+                    continue;
+                }
+            };
+            if inst.is_recoverable(has_slots) {
+                recoverable.insert(inst.id.clone());
+            }
+        }
+        self.recoverable_ids = recoverable;
     }
 
     pub fn available_tools(&self) -> AvailableTools {

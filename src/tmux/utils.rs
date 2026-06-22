@@ -796,6 +796,20 @@ pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
     }
 }
 
+/// Pin `@aoe_agent_pane` for a session to an explicit pane id. Used by cold-start
+/// recovery to re-pin the rebuilt slot-0 pane so the reconciler and the `R`
+/// resume-all flow keep operating on the recovered session.
+pub fn set_agent_pane_id(session_name: &str, pane_id: &str) -> anyhow::Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-option", "-t", session_name, "@aoe_agent_pane", pane_id])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to set @aoe_agent_pane: {}", stderr);
+    }
+    Ok(())
+}
+
 pub fn append_store_pane_id_args(args: &mut Vec<String>, target: &str) {
     // -F enables format expansion so #{pane_id} resolves to the actual pane ID (e.g. %42)
     args.extend([

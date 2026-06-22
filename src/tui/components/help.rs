@@ -7,7 +7,7 @@ use crate::session::config::SortOrder;
 use crate::tui::styles::Theme;
 
 const DIALOG_WIDTH: u16 = 50;
-const DIALOG_HEIGHT: u16 = 38;
+const DIALOG_HEIGHT: u16 = 39;
 #[cfg(test)]
 const BORDER_HEIGHT: u16 = 2;
 #[cfg(test)]
@@ -38,6 +38,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("f", "Fork session (claude/codex/opencode)"),
                 ("x", "Stop session"),
                 ("R", "Restart agent panes (resume tracked)"),
+                ("V", "Recover session (rebuild from slots)"),
                 ("d", "Delete session/group"),
                 ("r", "Rename session"),
                 ("J/K", "Move item (Manual sort)"),

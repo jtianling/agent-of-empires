@@ -563,6 +563,9 @@ impl App {
                     self.attach_session(&id, terminal)?;
                 }
             }
+            Action::RecoverInstance(id) => {
+                self.recover_instance(&id, terminal)?;
+            }
             Action::StopSession(id) => {
                 if let Some(inst) = self.home.get_instance(&id) {
                     let inst_clone = inst.clone();
@@ -594,6 +597,88 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Cold-start recover a single focused instance: rebuild its tmux session
+    /// from persisted slots and resume each pane. Recoverability is re-checked at
+    /// action time against the store and live tmux, so a no-longer-recoverable
+    /// (or now-alive) instance is a silent no-op.
+    fn recover_instance(
+        &mut self,
+        id: &str,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        let Some(inst) = self.home.get_instance(id).cloned() else {
+            return Ok(());
+        };
+
+        let profile = self.home.storage.profile().to_string();
+        let store = match crate::db::Store::open_with_schema(&profile) {
+            Ok(store) => store,
+            Err(e) => {
+                tracing::error!("Failed to open store for recovery of '{}': {}", id, e);
+                self.home.set_instance_error(id, Some(e.to_string()));
+                return Ok(());
+            }
+        };
+        let slots = match store.read_slots_for_instance(id) {
+            Ok(slots) => slots,
+            Err(e) => {
+                tracing::error!("Failed to read slots for recovery of '{}': {}", id, e);
+                self.home.set_instance_error(id, Some(e.to_string()));
+                return Ok(());
+            }
+        };
+
+        // Re-check recoverability at action time: a live session or an instance
+        // with no slots is not recoverable, so do nothing and surface no error.
+        if !inst.is_recoverable(!slots.is_empty()) {
+            return Ok(());
+        }
+
+        let mut result = Ok(Vec::new());
+        self.home.mutate_instance(id, |inst| {
+            result = inst.recover_from_slots(&store, &slots);
+        });
+
+        match result {
+            Ok(outcomes) => {
+                let errors: Vec<String> = outcomes
+                    .iter()
+                    .filter_map(|o| match o {
+                        crate::session::PaneResumeOutcome::Error(e) => Some(e.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if errors.is_empty() {
+                    self.home.set_instance_error(id, None);
+                } else {
+                    self.home.set_instance_error(
+                        id,
+                        Some(format!(
+                            "{} pane(s) failed to recover: {}",
+                            errors.len(),
+                            errors.join("; ")
+                        )),
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to recover instance '{}': {}", id, e);
+                self.home.set_instance_error(id, Some(e.to_string()));
+                self.home
+                    .set_instance_status(id, crate::session::Status::Error);
+                return Ok(());
+            }
+        }
+
+        if let Err(err) = self.home.save() {
+            tracing::error!("Failed to save after recovery: {}", err);
+        }
+        crate::tmux::refresh_session_cache();
+        self.home.refresh_recoverable_cache();
+
+        self.attach_session(id, terminal)
     }
 
     fn attach_session(
@@ -944,6 +1029,7 @@ pub enum Action {
     Quit,
     AttachSession(String),
     RespawnAgentPane(String),
+    RecoverInstance(String),
     SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),

@@ -461,6 +461,56 @@ pub fn split_window_right(session_name: &str, working_dir: &str, command: &str) 
     Ok(())
 }
 
+/// Like [`split_window_right`] but returns the new pane's id. Cold-start recovery
+/// needs pane ids in creation (slot) order: `session_pane_ids` lists by
+/// `pane_index`, which diverges from creation order once a session has 3+ panes
+/// (every split inserts a pane immediately right of pane 0, so newer panes take
+/// lower indexes). `-P -F '#{pane_id}'` makes tmux print the created pane's id.
+pub fn split_window_right_capture_pane(
+    session_name: &str,
+    working_dir: &str,
+    command: &str,
+) -> Result<String> {
+    let mut args = vec![
+        "split-window".to_string(),
+        "-h".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{pane_id}".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+        command.to_string(),
+    ];
+
+    append_remain_on_exit_args(&mut args, session_name);
+
+    args.extend([
+        ";".to_string(),
+        "select-pane".to_string(),
+        "-t".to_string(),
+        format!("{}:.0", session_name),
+    ]);
+
+    let output = Command::new("tmux").args(&args).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to split window: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(pane_id) => Ok(pane_id.to_string()),
+        None => bail!("split-window did not report a pane id"),
+    }
+}
+
 fn sanitize_session_name(name: &str) -> String {
     name.chars()
         .map(|c| {

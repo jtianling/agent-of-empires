@@ -356,6 +356,12 @@ impl HomeView {
                         Style::default().fg(theme.sandbox),
                     ));
                 }
+                if self.is_recoverable(id) {
+                    line_spans.push(Span::styled(
+                        " [recoverable]",
+                        Style::default().fg(theme.waiting),
+                    ));
+                }
             }
         }
 
@@ -478,6 +484,18 @@ impl HomeView {
                 Span::styled("│", sep_style),
                 Span::styled(" m", key_style),
                 Span::styled(" Msg ", desc_style),
+            ]);
+        }
+
+        if self
+            .selected_session
+            .as_ref()
+            .is_some_and(|id| self.is_recoverable(id))
+        {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" V", key_style),
+                Span::styled(" Recover ", desc_style),
             ]);
         }
 
