@@ -239,6 +239,38 @@ pub fn get_current_session_name() -> Option<String> {
     None
 }
 
+/// The tmux session the AoE TUI process is itself hosted in, if any. Resolved
+/// once at TUI startup. `None` when AoE is not running inside tmux (the normal
+/// case), which makes every self-session guard below inert.
+static HOST_SESSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Resolve and cache the session AoE is running inside. Gated on `$TMUX` so a
+/// stray `tmux display-message` outside tmux can't misidentify an unrelated
+/// session as the host. Idempotent: only the first call resolves.
+pub fn init_host_session() {
+    HOST_SESSION.get_or_init(|| {
+        if std::env::var("TMUX").is_err() {
+            return None;
+        }
+        get_current_session_name()
+    });
+}
+
+/// Whether `session_name` is the session AoE itself is running inside. Always
+/// false when AoE is not nested in tmux, so callers can guard unconditionally.
+pub fn is_host_session(session_name: &str) -> bool {
+    host_matches(
+        HOST_SESSION.get().and_then(|cached| cached.as_deref()),
+        session_name,
+    )
+}
+
+/// Pure predicate behind [`is_host_session`]: true only when a host session was
+/// resolved and exactly equals `session_name`.
+fn host_matches(host: Option<&str>, session_name: &str) -> bool {
+    host == Some(session_name)
+}
+
 pub fn get_current_client_name() -> Option<String> {
     let output = Command::new("tmux")
         .args(["display-message", "-p", "#{client_name}"])
@@ -406,6 +438,15 @@ impl AvailableTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_host_matches_requires_resolved_and_equal() {
+        assert!(host_matches(Some("aoe_aoe_976f8c9d"), "aoe_aoe_976f8c9d"));
+        // Not the host session.
+        assert!(!host_matches(Some("aoe_aoe_976f8c9d"), "aoe_main_0fc06446"));
+        // No host resolved (AoE not nested in tmux) => never a self match.
+        assert!(!host_matches(None, "aoe_aoe_976f8c9d"));
+    }
 
     #[test]
     fn test_parse_session_cache_output_includes_window_activity() {

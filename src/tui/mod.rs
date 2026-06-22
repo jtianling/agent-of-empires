@@ -66,6 +66,10 @@ pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
         std::process::exit(1);
     }
 
+    // Resolve the session AoE is nested inside (if any) once, so self-session
+    // guards (preview capture, attach) can avoid recursing into our own pane.
+    crate::tmux::init_host_session();
+
     // Check for coding tools
     let available_tools = crate::tmux::AvailableTools::detect();
     if !available_tools.any_available() {

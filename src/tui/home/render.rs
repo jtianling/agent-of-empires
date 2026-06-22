@@ -386,9 +386,17 @@ impl HomeView {
         if needs_refresh {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
-                    let new_content = inst
-                        .capture_output_with_size(height as usize, width, height)
-                        .unwrap_or_default();
+                    let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+                    let new_content = if crate::tmux::is_host_session(&session_name) {
+                        // Capturing the session AoE itself runs in would render our
+                        // own screen recursively, so show a placeholder instead.
+                        "AoE is running inside this session.\n\
+                         Preview is disabled here to avoid recursive nesting."
+                            .to_string()
+                    } else {
+                        inst.capture_output_with_size(height as usize, width, height)
+                            .unwrap_or_default()
+                    };
 
                     let changed = new_content != self.preview_cache.content
                         || self.preview_cache.session_id.as_ref() != Some(id);

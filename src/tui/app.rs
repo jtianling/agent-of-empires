@@ -606,6 +606,20 @@ impl App {
             None => return Ok(()),
         };
 
+        // Refuse to attach to the session AoE is itself running inside: tmux
+        // would nest a client into our own pane (the infinite re-enter loop).
+        if crate::tmux::is_host_session(&crate::tmux::Session::generate_name(
+            &instance.id,
+            &instance.title,
+        )) {
+            self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                "Already in this session",
+                "AoE is running inside this tmux session, so it can't attach to itself. \
+                 Detach (Ctrl+b d) or pick another session.",
+            ));
+            return Ok(());
+        }
+
         let tmux_session = instance.tmux_session()?;
 
         // Determine whether the agent pane needs to be (re)started.
