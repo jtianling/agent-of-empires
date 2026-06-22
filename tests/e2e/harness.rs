@@ -958,7 +958,7 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_path}",
+            "#{session_name}\t#{pane_current_path}\t#{pane_dead}",
         ])
         .output()
     else {
@@ -971,9 +971,12 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
     let listing = String::from_utf8_lossy(&output.stdout);
     let mut killed = std::collections::HashSet::new();
     for line in listing.lines() {
-        let Some((session, path)) = line.split_once('\t') else {
+        let mut parts = line.splitn(3, '\t');
+        let Some(session) = parts.next() else {
             continue;
         };
+        let path = parts.next().unwrap_or("");
+        let pane_dead = parts.next().unwrap_or("") == "1";
         // When the pane cwd can still be canonicalized, match against the
         // canonical HOME root. If it cannot (directory already deleted), fall
         // back to raw string-prefix matching against both the raw and
@@ -991,7 +994,12 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
                     || canon.as_deref().is_some_and(|c| path.starts_with(c))
             }
         };
-        if !under_root {
+        // A dead pane on the e2e-private socket is a finished or leaked test
+        // session: the launched stub has exited, so tmux reports an empty cwd
+        // that the under_root match can't catch. This socket never holds real
+        // sessions, so reaping any dead `aoe_` session here is safe.
+        let dead_leak = pane_dead && session.starts_with("aoe_");
+        if !under_root && !dead_leak {
             continue;
         }
         if killed.insert(session.to_string()) {
@@ -1006,9 +1014,11 @@ fn kill_inner_aoe_sessions(home_root: &Path) {
 /// Clean up tmux sessions leaked by prior test binaries that were killed
 /// before `Drop` could run (SIGKILL, CI timeout, Ctrl+\).
 ///
-/// Only touches sessions whose name starts with `aoe_` AND whose pane cwd
-/// both looks like a platform temp dir AND no longer exists on disk. That
-/// two-factor match keeps us from ever killing sessions a user created.
+/// Scans only the e2e-private socket (`TMUX_TMPDIR`), which never holds real
+/// sessions, so it safely reaps any `aoe_`-named session whose pane is dead (a
+/// finished or leaked test whose launched stub has already exited). It also
+/// keeps the older guard for a still-live pane: cwd looks like a platform temp
+/// dir AND no longer exists on disk.
 ///
 /// Runs at most once per test binary via `Once`.
 fn reap_stale_aoe_test_sessions() {
@@ -1020,7 +1030,7 @@ fn reap_stale_aoe_test_sessions() {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_current_path}",
+                "#{session_name}\t#{pane_current_path}\t#{pane_dead}",
             ])
             .output()
         else {
@@ -1033,25 +1043,34 @@ fn reap_stale_aoe_test_sessions() {
         let listing = String::from_utf8_lossy(&output.stdout);
         let mut to_kill = std::collections::HashSet::new();
         for line in listing.lines() {
-            let Some((session, path)) = line.split_once('\t') else {
+            let mut parts = line.splitn(3, '\t');
+            let Some(session) = parts.next() else {
                 continue;
             };
+            let path = parts.next().unwrap_or("");
+            let pane_dead = parts.next().unwrap_or("") == "1";
             if !session.starts_with("aoe_") {
                 continue;
             }
-            // Platform temp-dir fingerprint: macOS uses /var/folders/.../T/,
-            // Linux uses /tmp/. A real user session would not be rooted here.
-            let looks_temp = path.contains("/var/folders/")
-                || path.starts_with("/tmp/")
-                || path.starts_with("/private/tmp/")
-                || path.starts_with("/private/var/folders/");
-            if !looks_temp {
-                continue;
-            }
-            // Must be dead on disk. `exists()` follows symlinks; an existing
-            // path means either a live test or a path a user cares about.
-            if Path::new(path).exists() {
-                continue;
+            // A dead pane is a finished or leaked test session: the launched
+            // stub has exited and tmux reports an empty cwd, so the temp-dir +
+            // deleted check below can't catch it. Safe here because this scans
+            // only the e2e-private socket, which never holds real sessions.
+            if !pane_dead {
+                // Platform temp-dir fingerprint: macOS uses /var/folders/.../T/,
+                // Linux uses /tmp/. A real user session would not be rooted here.
+                let looks_temp = path.contains("/var/folders/")
+                    || path.starts_with("/tmp/")
+                    || path.starts_with("/private/tmp/")
+                    || path.starts_with("/private/var/folders/");
+                if !looks_temp {
+                    continue;
+                }
+                // Must be dead on disk. `exists()` follows symlinks; an existing
+                // path means either a live test or a path a user cares about.
+                if Path::new(path).exists() {
+                    continue;
+                }
             }
             to_kill.insert(session.to_string());
         }
