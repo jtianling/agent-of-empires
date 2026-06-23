@@ -28,11 +28,13 @@ pub struct AssignedPane {
 /// Assignment is sticky: a pane that already owns a slot (per `existing`, the
 /// instance's durable `(slot, tmux_pane)` rows) keeps that slot, so a newly
 /// appearing pane never evicts an established one. The primary pane
-/// (`@aoe_agent_pane`, if live) is pinned to slot 0. Slots already recorded in
-/// `existing` are reserved even when their pane is no longer live, so durable
-/// records are preserved. New live panes fill the remaining free slots in
-/// ascending pane-index order; once all `MAX_SLOT + 1` (4) slots are taken,
-/// extra panes are dropped.
+/// (`@aoe_agent_pane`, if live) is pinned to slot 0. A durable slot whose pane
+/// is still one of the session's live panes is reserved so it is not
+/// overwritten; a durable slot whose pane is gone (the user closed that split,
+/// or tmux reused the id elsewhere) is reclaimable, so a new live pane can take
+/// it rather than being dropped at the four-slot cap. New live panes fill the
+/// remaining free slots in ascending pane-index order; once all `MAX_SLOT + 1`
+/// (4) slots are taken, extra panes are dropped.
 ///
 /// `panes` is a list of `(pane_index, pane_id)` sorted by pane index.
 pub fn assign_slots(
@@ -72,10 +74,17 @@ pub fn assign_slots(
         }
     }
 
-    // 3. Reserve durable slots not re-kept above (their pane died or moved) so
-    //    a new pane never overwrites an existing record.
-    for (slot, _) in existing {
-        if (0..=MAX_SLOT).contains(slot) {
+    // 3. Reserve durable slots whose pane is still one of the session's live
+    //    panes, so an established record is never overwritten by a different
+    //    pane. A durable slot whose pane is gone (the user closed that split, or
+    //    tmux reused the id elsewhere) is deliberately NOT reserved: step 4 lets
+    //    a new live pane reclaim the freed slot instead of being dropped at the
+    //    four-slot cap. This path only runs for a live session (`reconcile_all`
+    //    skips sessions with no panes), so a whole-session death after a reboot
+    //    never reclaims here -- those slots stay intact for cold-start recovery.
+    let live_pane_ids: HashSet<&str> = panes.iter().map(|(_, id)| id.as_str()).collect();
+    for (slot, tmux_pane) in existing {
+        if (0..=MAX_SLOT).contains(slot) && live_pane_ids.contains(tmux_pane.as_str()) {
             used_slots.insert(*slot);
         }
     }
@@ -377,6 +386,49 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn dead_slot_is_reclaimed_by_new_live_pane() {
+        // helpers regression: slot 1's pane (%18) died and tmux reused the id in
+        // another session; a freshly opened split (%9) must reclaim the freed
+        // slot 1 instead of being dropped at the four-slot cap. The three live
+        // panes that still own their slots keep them (sticky).
+        let p = panes(&[(0, "%6"), (1, "%8"), (2, "%7"), (3, "%9")]);
+        let existing = vec![
+            (0, "%6".to_string()),
+            (1, "%18".to_string()), // dead: not in the live pane list
+            (2, "%8".to_string()),
+            (3, "%7".to_string()),
+        ];
+        let assigned = assign_slots(&p, Some("%6"), &existing);
+        let mut by_pane: Vec<(&str, i64)> = assigned
+            .iter()
+            .map(|a| (a.pane_id.as_str(), a.slot))
+            .collect();
+        by_pane.sort();
+        assert_eq!(by_pane, vec![("%6", 0), ("%7", 3), ("%8", 2), ("%9", 1)]);
+    }
+
+    #[test]
+    fn dead_slot_without_new_pane_leaves_live_panes_untouched() {
+        // slot 1 (%18) died but there is no new pane to reclaim it. The live
+        // panes keep their existing slots (no needless migration into the gap);
+        // the dead slot is simply not reassigned (its DB row is preserved by the
+        // caller, which only upserts assigned panes).
+        let p = panes(&[(0, "%6"), (1, "%8")]);
+        let existing = vec![
+            (0, "%6".to_string()),
+            (1, "%18".to_string()), // dead
+            (2, "%8".to_string()),
+        ];
+        let assigned = assign_slots(&p, Some("%6"), &existing);
+        let mut by_pane: Vec<(&str, i64)> = assigned
+            .iter()
+            .map(|a| (a.pane_id.as_str(), a.slot))
+            .collect();
+        by_pane.sort();
+        assert_eq!(by_pane, vec![("%6", 0), ("%8", 2)]);
     }
 
     #[test]
