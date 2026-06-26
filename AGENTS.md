@@ -112,12 +112,13 @@ tmux socket. Destructive tmux operations can therefore kill the user's live work
 
 Hard rules for both production code AND tests:
 
-- **Never run `tmux kill-server`.** It tears down every session on the socket. There is no scenario in this codebase where killing the whole server is correct.
+- **Never run `tmux kill-server`** -- not in code, not in tests, not in an ad-hoc shell command. It tears down every session on the socket. There is no scenario in this codebase where killing the whole server is correct. (This rule has been violated and killed live sessions; treat it as absolute.)
 - **Never kill or iterate sessions by prefix on a shared socket.** Do not do "list `aoe_*` sessions, then kill them" against the default socket. Production teardown/reconcile MUST target a specific managed session by its exact name (`kill-session -t <exact-name>`), never a pattern sweep.
-- **Tests that touch tmux MUST use an isolated socket** (`TMUX_TMPDIR` via the e2e harness), never the default socket. A full `cargo test` run MUST NOT kill, reap, or disturb any live AoE session. If you add a tmux-touching test, route it through `TuiTestHarness` (which sets `TMUX_TMPDIR`) or set `TMUX_TMPDIR` yourself; do not call bare `tmux new-session`/`kill-session`/`list-sessions` on the default socket.
+- **Tests that touch tmux MUST use an isolated socket**, never the default socket. A full `cargo test` run MUST NOT kill, reap, or disturb any live AoE session. If you add a tmux-touching test, route it through `TuiTestHarness`, or use the `crate::tmux::isolate_tmux_socket()` helper for unit tests.
+- **`TMUX_TMPDIR` ALONE IS NOT ISOLATION.** When the test runner (or your shell) is itself inside a tmux session, `$TMUX` is set, and every `tmux` client connects to that CURRENT server and *ignores `TMUX_TMPDIR` entirely*. A `kill-session`/`kill-server` then hits the developer's live server. To isolate you MUST also remove `$TMUX` and `$TMUX_PANE` (e.g. `Command::env_remove("TMUX")` / `std::env::remove_var("TMUX")`), the way the e2e harness and `isolate_tmux_socket()` do. Before relying on any isolation, verify with `env | grep TMUX` that `$TMUX` is unset for the tmux client.
 - Any new `kill-server`/`kill-session`/pattern-based cleanup in a sweep helper (even guarded by `#[cfg(test)]`) must be scoped to the e2e-private socket, the way `reap_stale_aoe_test_sessions` already is.
 
-If a change needs broad tmux cleanup, scope it to a private socket or to exact session names. When in doubt, do not destroy sessions.
+If a change needs broad tmux cleanup, scope it to a private socket or to exact session names. When in doubt, do not destroy sessions. **Do not run ad-hoc `tmux` probe/cleanup commands on a machine with live AoE sessions while `$TMUX` is set.**
 
 ## Tmux Keybinding Lifecycle
 
