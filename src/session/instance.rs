@@ -221,7 +221,7 @@ pub struct Instance {
     pub resume_token: Option<String>,
     /// When set, indicates this session is a pending fork of another session.
     /// The stored value is the parent agent's session token (e.g. Claude/Codex UUID
-    /// or OpenCode `ses_...` id). On first successful launch, `build_base_tool_command`
+    /// or OpenCode `ses_...` id). On first successful launch, `build_base_pane_command`
     /// uses the agent's `fork_template` with this value, and the field is then cleared
     /// so subsequent restarts follow the normal resume path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -534,14 +534,41 @@ impl Instance {
 
     /// Build the agent launch command string. Pure command construction with no
     /// side effects (no hooks, no container lifecycle management).
+    ///
+    /// Delegates to [`build_pane_command`](Self::build_pane_command) for the
+    /// primary agent (`self.tool`, `is_primary = true`) so that the single-pane
+    /// start/respawn path and the slot-based multi-pane resume path share one
+    /// launch-context decoration pipeline.
     pub fn build_agent_command(&self, resume_token: Option<&str>) -> Option<String> {
-        let agent = crate::agents::get_agent(&self.tool);
+        let tool = self.tool.clone();
+        self.build_pane_command(&tool, resume_token, true)
+    }
+
+    /// Build the launch command for a single pane, applying the full launch
+    /// context (resume flag, YOLO mode, cross-agent-team flag, `AOE_INSTANCE_ID`
+    /// for hook-config agents, sandbox `docker exec` wrapping, custom instruction,
+    /// and command override). This is the one decoration pipeline shared by the
+    /// single-pane start/respawn path and the slot-based multi-pane resume path.
+    ///
+    /// `target_agent` is the agent that runs in this pane (the instance tool for
+    /// the primary pane, or a slot's recorded agent for a secondary pane).
+    /// `is_primary` is true only for the instance's primary pane (slot 0): the
+    /// command override (`self.command`), pre-allocated session id, fork token,
+    /// and `extra_args` are instance-primary concepts and apply to that pane only.
+    /// Secondary panes build from their own agent binary.
+    pub fn build_pane_command(
+        &self,
+        target_agent: &str,
+        resume_token: Option<&str>,
+        is_primary: bool,
+    ) -> Option<String> {
+        let agent = crate::agents::get_agent(target_agent);
 
         if self.is_sandboxed() {
             let sandbox = self.sandbox_info.as_ref()?;
             let container = DockerContainer::from_session_id(&self.id);
 
-            let base_cmd = self.build_base_tool_command(agent, resume_token);
+            let base_cmd = self.build_base_pane_command(agent, resume_token, is_primary);
             let mut tool_cmd = if self.is_yolo_mode() {
                 if let Some(yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
@@ -557,12 +584,14 @@ impl Instance {
             } else {
                 base_cmd
             };
-            if let Some(ref instruction) = sandbox.custom_instruction {
-                if !instruction.is_empty() {
-                    if let Some(flag_template) = agent.and_then(|a| a.instruction_flag) {
-                        let escaped = shell_escape(instruction);
-                        let flag = flag_template.replace("{}", &escaped);
-                        tool_cmd = format!("{} {}", tool_cmd, flag);
+            if is_primary {
+                if let Some(ref instruction) = sandbox.custom_instruction {
+                    if !instruction.is_empty() {
+                        if let Some(flag_template) = agent.and_then(|a| a.instruction_flag) {
+                            let escaped = shell_escape(instruction);
+                            let flag = flag_template.replace("{}", &escaped);
+                            tool_cmd = format!("{} {}", tool_cmd, flag);
+                        }
                     }
                 }
             }
@@ -575,10 +604,11 @@ impl Instance {
             ))
         } else {
             let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
+            let has_override = is_primary && !self.command.is_empty();
 
-            if self.command.is_empty() {
+            if !has_override {
                 agent.filter(|a| a.supports_host_launch).map(|a| {
-                    let mut cmd = self.build_base_tool_command(Some(a), resume_token);
+                    let mut cmd = self.build_base_pane_command(Some(a), resume_token, is_primary);
                     let mut env_vars: Vec<(&str, &str)> = Vec::new();
                     if needs_instance_id {
                         env_vars.push(("AOE_INSTANCE_ID", &self.id));
@@ -602,8 +632,7 @@ impl Instance {
                     wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
                 })
             } else {
-                let mut cmd = self.build_base_tool_command(agent, resume_token);
-                let agent = crate::agents::get_agent(&self.tool);
+                let mut cmd = self.build_base_pane_command(agent, resume_token, is_primary);
                 let mut env_vars: Vec<(&str, &str)> = Vec::new();
                 if needs_instance_id {
                     env_vars.push(("AOE_INSTANCE_ID", &self.id));
@@ -636,11 +665,32 @@ impl Instance {
         }
     }
 
-    fn build_base_tool_command(
+    /// Build the bare tool command (binary + resume/fork/session-id flags +
+    /// extra args) for a single pane before launch-context decoration.
+    ///
+    /// For the primary pane (`is_primary = true`) this honors the instance
+    /// command override (`self.command`), `extra_args`, pre-allocated session id,
+    /// and fork token, matching the single-pane start/respawn path byte-for-byte.
+    /// For secondary panes (`is_primary = false`) those instance-primary concepts
+    /// do not apply: the command is built from the slot agent's own binary plus,
+    /// when present, a resume flag from the supplied token.
+    fn build_base_pane_command(
         &self,
         agent: Option<&crate::agents::AgentDef>,
         resume_token: Option<&str>,
+        is_primary: bool,
     ) -> String {
+        if !is_primary {
+            let mut cmd = agent.map_or_else(|| "bash".to_string(), |a| a.binary.to_string());
+            if let (Some(token), Some(resume)) =
+                (resume_token, agent.and_then(|a| a.resume.as_ref()))
+            {
+                let resume_flag = resume.resume_flag.replace("{}", token);
+                cmd = format!("{} {}", cmd, resume_flag);
+            }
+            return cmd;
+        }
+
         let mut cmd = self.get_tool_command().to_string();
         if let Some(token) = resume_token {
             // A live resume token always wins: once the forked session has spawned
@@ -982,11 +1032,12 @@ impl Instance {
 
         let mut outcomes = Vec::with_capacity(slots.len());
         for slot in slots {
-            let outcome = resume_launch_pane(
+            let outcome = self.resume_launch_pane(
                 &slot.agent,
                 &slot.native_session_id,
                 &slot.tmux_pane,
                 &slot.cwd,
+                slot.slot == 0,
             );
             if let PaneResumeOutcome::Error(ref err) = outcome {
                 tracing::warn!(
@@ -1069,8 +1120,13 @@ impl Instance {
                 )));
                 continue;
             };
-            let outcome =
-                resume_launch_pane(&slot.agent, &slot.native_session_id, new_pane, &slot.cwd);
+            let outcome = self.resume_launch_pane(
+                &slot.agent,
+                &slot.native_session_id,
+                new_pane,
+                &slot.cwd,
+                slot.slot == 0,
+            );
             if let PaneResumeOutcome::Error(ref err) = outcome {
                 tracing::warn!(
                     "Failed to recover pane (slot {}) for '{}': {}",
@@ -1659,65 +1715,85 @@ fn is_safe_command_token(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Build the launch command for one tracked pane from its recorded agent and
-/// persisted native session id. Returns `Some((command, resumed))` where
-/// `resumed` is true only when a resume flag was appended. A known agent that
-/// lacks a `ResumeConfig`, has an empty/invalid `native_session_id`, degrades to
-/// a fresh command (just the binary). Returns `None` when no safe command can be
-/// built (an unknown agent whose recorded name is not a safe command token), so
-/// the caller can surface a per-pane error instead of executing it.
-///
-/// The persisted id and unknown-agent name are validated because the command is
-/// ultimately run through a shell by `tmux respawn-pane`; an unvalidated value
-/// with shell metacharacters would otherwise be a command-injection vector.
-fn build_pane_resume_command(agent: &str, native_session_id: &str) -> Option<(String, bool)> {
-    let Some(def) = crate::agents::get_agent(agent) else {
-        // Unknown agent: only the recorded name can act as the binary, and only
-        // if it is a safe command token; otherwise refuse to build a command.
-        return is_safe_command_token(agent).then(|| (agent.to_string(), false));
-    };
+impl Instance {
+    /// Build the launch command for one tracked pane from its recorded agent and
+    /// persisted native session id, decorating it with the instance's full launch
+    /// context through [`build_pane_command`](Self::build_pane_command). Returns
+    /// `Some((command, resumed))` where `resumed` is true only when a resume flag
+    /// was appended.
+    ///
+    /// A known agent with an empty/invalid `native_session_id`, or one that lacks
+    /// a `ResumeConfig`, degrades to a fresh launch that still carries the full
+    /// launch context (not a bare binary). An unknown agent whose recorded name is
+    /// a safe command token degrades to a bare-binary fresh launch (it cannot be
+    /// decorated). Returns `None` when no safe command can be built (an unknown
+    /// agent whose recorded name is not a safe command token, or a known agent the
+    /// launch pipeline declines to launch in this configuration), so the caller
+    /// can surface a per-pane error instead of executing it.
+    ///
+    /// The persisted id and unknown-agent name are validated because the command
+    /// is ultimately run through a shell by `tmux respawn-pane`; an unvalidated
+    /// value with shell metacharacters would otherwise be a command-injection
+    /// vector. Only a `native_session_id` that passes `is_valid_resume_token` is
+    /// ever interpolated into the resume flag.
+    fn build_pane_resume_plan(
+        &self,
+        agent: &str,
+        native_session_id: &str,
+        is_primary: bool,
+    ) -> Option<(String, bool)> {
+        let Some(def) = crate::agents::get_agent(agent) else {
+            // Unknown agent: only the recorded name can act as the binary, and
+            // only if it is a safe command token; otherwise refuse to build a
+            // command. Unknown agents cannot be decorated with launch context.
+            return is_safe_command_token(agent).then(|| (agent.to_string(), false));
+        };
 
-    match def.resume.as_ref() {
-        Some(resume) if is_valid_resume_token(native_session_id) => {
-            let resume_flag = resume.resume_flag.replace("{}", native_session_id);
-            Some((format!("{} {}", def.binary, resume_flag), true))
+        let resumed = def.resume.is_some() && is_valid_resume_token(native_session_id);
+        let resume_token = resumed.then_some(native_session_id);
+        let command = self.build_pane_command(def.name, resume_token, is_primary)?;
+        Some((command, resumed))
+    }
+
+    /// Reusable per-pane resume-launch core (shared with cold-start recovery).
+    ///
+    /// Given a tracked pane's recorded agent, its persisted `native_session_id`,
+    /// its `tmux_pane` target, its `cwd`, and whether it is the primary pane, kill
+    /// the pane's process tree and respawn it with the command built through
+    /// [`build_pane_resume_plan`](Self::build_pane_resume_plan) (full launch
+    /// context plus, when a valid token is present, the resume flag). A pane with
+    /// no usable resume id (empty/invalid id or an agent without a `ResumeConfig`)
+    /// degrades to a fresh launch of that one pane that still carries the launch
+    /// context. A pane whose agent name is unknown and not a safe command token,
+    /// or whose tmux respawn fails, is returned as [`PaneResumeOutcome::Error`] so
+    /// the caller can isolate per-pane failures.
+    fn resume_launch_pane(
+        &self,
+        agent: &str,
+        native_session_id: &str,
+        tmux_pane: &str,
+        cwd: &str,
+        is_primary: bool,
+    ) -> PaneResumeOutcome {
+        // Build (and validate) the command before killing the pane, so a pane we
+        // cannot safely respawn is left running rather than killed and abandoned.
+        let Some((command, resumed)) =
+            self.build_pane_resume_plan(agent, native_session_id, is_primary)
+        else {
+            return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
+        };
+
+        tmux::kill_pane_process_tree_target(tmux_pane);
+
+        if let Err(err) = tmux::respawn_pane_target(tmux_pane, &command, cwd) {
+            return PaneResumeOutcome::Error(err.to_string());
         }
-        _ => Some((def.binary.to_string(), false)),
-    }
-}
 
-/// Reusable per-pane resume-launch core (shared with w04 cold-start recovery).
-///
-/// Given a tracked pane's recorded agent, its persisted `native_session_id`, its
-/// `tmux_pane` target, and its `cwd`, kill the pane's process tree and respawn it
-/// with the resume command built from `ResumeConfig.resume_flag`. A pane with no
-/// usable resume id (empty/invalid id, no `ResumeConfig`, or a known-but-unknown
-/// agent name) degrades to a fresh restart of that one pane. A pane whose agent
-/// name is unknown and not a safe command token, or whose tmux respawn fails, is
-/// returned as [`PaneResumeOutcome::Error`] so the caller can isolate per-pane
-/// failures.
-pub fn resume_launch_pane(
-    agent: &str,
-    native_session_id: &str,
-    tmux_pane: &str,
-    cwd: &str,
-) -> PaneResumeOutcome {
-    // Build (and validate) the command before killing the pane, so a pane we
-    // cannot safely respawn is left running rather than killed and abandoned.
-    let Some((command, resumed)) = build_pane_resume_command(agent, native_session_id) else {
-        return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
-    };
-
-    tmux::kill_pane_process_tree_target(tmux_pane);
-
-    if let Err(err) = tmux::respawn_pane_target(tmux_pane, &command, cwd) {
-        return PaneResumeOutcome::Error(err.to_string());
-    }
-
-    if resumed {
-        PaneResumeOutcome::Resumed
-    } else {
-        PaneResumeOutcome::DegradedToFresh
+        if resumed {
+            PaneResumeOutcome::Resumed
+        } else {
+            PaneResumeOutcome::DegradedToFresh
+        }
     }
 }
 
@@ -2216,59 +2292,306 @@ mod tests {
     }
 
     #[test]
-    fn test_build_pane_resume_command_claude_appends_resume_flag() {
-        let (cmd, resumed) =
-            build_pane_resume_command("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11").unwrap();
+    fn test_build_pane_resume_plan_claude_appends_resume_flag() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .unwrap();
         assert!(resumed);
-        assert_eq!(cmd, "claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11");
+        assert!(
+            cmd.contains("claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"),
+            "expected resume flag, got: {cmd}"
+        );
     }
 
     #[test]
-    fn test_build_pane_resume_command_codex_uses_resume_subcommand() {
-        let (cmd, resumed) =
-            build_pane_resume_command("codex", "019d1af9-a899-7df1-8f7d-a244126e5ded").unwrap();
+    fn test_build_pane_resume_plan_codex_uses_resume_subcommand() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("codex", "019d1af9-a899-7df1-8f7d-a244126e5ded", true)
+            .unwrap();
         assert!(resumed);
-        assert_eq!(cmd, "codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded");
+        assert!(
+            cmd.contains("codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded"),
+            "expected resume subcommand, got: {cmd}"
+        );
     }
 
     #[test]
-    fn test_build_pane_resume_command_empty_id_restarts_fresh() {
-        let (cmd, resumed) = build_pane_resume_command("claude", "").unwrap();
+    fn test_build_pane_resume_plan_empty_id_restarts_fresh() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let (cmd, resumed) = inst.build_pane_resume_plan("claude", "", true).unwrap();
         assert!(!resumed);
-        assert_eq!(cmd, "claude");
-        assert!(!cmd.contains("--resume"));
+        assert!(
+            !cmd.contains("--resume"),
+            "expected no resume flag, got: {cmd}"
+        );
     }
 
     #[test]
-    fn test_build_pane_resume_command_invalid_id_restarts_fresh() {
+    fn test_build_pane_resume_plan_invalid_id_restarts_fresh() {
         // A persisted id with shell metacharacters must never be substituted
         // into the command; it degrades to a fresh restart instead.
-        let (cmd, resumed) = build_pane_resume_command("claude", "abc; rm -rf ~").unwrap();
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "abc; rm -rf ~", true)
+            .unwrap();
         assert!(!resumed);
-        assert_eq!(cmd, "claude");
-        assert!(!cmd.contains("rm -rf"));
+        assert!(
+            !cmd.contains("--resume"),
+            "expected no resume flag, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("rm -rf"),
+            "unsafe id must not be interpolated: {cmd}"
+        );
     }
 
     #[test]
-    fn test_build_pane_resume_command_agent_without_resume_config_restarts_fresh() {
-        // gemini has no ResumeConfig -> fresh binary even with a persisted id.
-        let (cmd, resumed) = build_pane_resume_command("gemini", "gemini-sess-0").unwrap();
+    fn test_build_pane_resume_plan_agent_without_resume_config_restarts_fresh() {
+        // gemini has no ResumeConfig -> fresh launch even with a persisted id.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "gemini".to_string();
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("gemini", "gemini-sess-0", true)
+            .unwrap();
         assert!(!resumed);
-        assert_eq!(cmd, crate::agents::get_agent("gemini").unwrap().binary);
-        assert!(!cmd.contains("resume"));
+        assert!(
+            !cmd.contains("resume"),
+            "expected no resume flag, got: {cmd}"
+        );
+        assert!(
+            cmd.contains(crate::agents::get_agent("gemini").unwrap().binary),
+            "expected gemini binary, got: {cmd}"
+        );
     }
 
     #[test]
-    fn test_build_pane_resume_command_unknown_safe_agent_uses_recorded_name_fresh() {
-        let (cmd, resumed) = build_pane_resume_command("mystery", "some-id").unwrap();
+    fn test_build_pane_resume_plan_unknown_safe_agent_uses_recorded_name_fresh() {
+        // An unknown but safe agent name cannot be decorated; it degrades to a
+        // bare-binary fresh launch.
+        let inst = Instance::new("test", "/tmp/test");
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("mystery", "some-id", false)
+            .unwrap();
         assert!(!resumed);
         assert_eq!(cmd, "mystery");
     }
 
     #[test]
-    fn test_build_pane_resume_command_unsafe_unknown_agent_is_rejected() {
+    fn test_build_pane_resume_plan_unsafe_unknown_agent_is_rejected() {
         // An unknown agent name with shell metacharacters must not be executed.
-        assert!(build_pane_resume_command("evil; rm -rf ~", "some-id").is_none());
+        let inst = Instance::new("test", "/tmp/test");
+        assert!(inst
+            .build_pane_resume_plan("evil; rm -rf ~", "some-id", false)
+            .is_none());
+    }
+
+    fn sandboxed_instance(tool: &str) -> Instance {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = tool.to_string();
+        inst.sandbox_info = Some(SandboxInfo {
+            enabled: true,
+            container_id: None,
+            image: "test-image".to_string(),
+            container_name: "test".to_string(),
+            created_at: None,
+            extra_env: None,
+            custom_instruction: None,
+        });
+        inst
+    }
+
+    // --- Slot-resume launch-context preservation (fix-resume-preserves-launch-context) ---
+
+    #[test]
+    fn test_slot_resume_yolo_cliflag_keeps_flag_and_resume_token() {
+        // A YOLO CliFlag agent (claude) resumed via the slot path must carry both
+        // the YOLO flag and the resume flag built from native_session_id.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.yolo_mode = true;
+
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .unwrap();
+        assert!(resumed, "expected a resume plan, got fresh");
+        assert!(
+            cmd.contains("claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"),
+            "expected resume flag from native_session_id, got: {cmd}"
+        );
+        assert!(
+            cmd.contains("--dangerously-skip-permissions"),
+            "expected YOLO CliFlag, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_slot_resume_yolo_envvar_sets_env_var() {
+        // A YOLO EnvVar agent resumed via the slot path must set the YOLO env var.
+        // opencode is sandbox-only on the real host path, so the host EnvVar branch
+        // is reached here through a command override equal to the binary (a real,
+        // reachable configuration that still exercises the EnvVar decoration).
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "opencode".to_string();
+        inst.command = "opencode".to_string();
+        inst.yolo_mode = true;
+
+        let cmd = inst
+            .build_pane_command("opencode", None, true)
+            .expect("opencode command override should build");
+        assert!(
+            cmd.contains("OPENCODE_PERMISSION="),
+            "expected YOLO env var, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_slot_resume_hook_agent_sets_instance_id() {
+        // A hook-config agent (claude) resumed via the slot path must carry
+        // AOE_INSTANCE_ID set to the instance id.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let id = inst.id.clone();
+
+        let (cmd, _resumed) = inst
+            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .unwrap();
+        assert!(
+            cmd.contains(&format!("AOE_INSTANCE_ID='{id}'")),
+            "expected AOE_INSTANCE_ID env, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_slot_resume_sandboxed_is_docker_wrapped() {
+        // A sandboxed instance resumed via the slot path must be docker-exec
+        // wrapped into the instance's container, not a bare host binary.
+        let inst = sandboxed_instance("claude");
+        let container = DockerContainer::generate_name(&inst.id);
+
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .unwrap();
+        assert!(resumed);
+        assert!(
+            cmd.contains("exec -it") && cmd.contains(&container),
+            "expected docker exec into {container}, got: {cmd}"
+        );
+        assert!(
+            cmd.contains("claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"),
+            "expected resume flag inside container command, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_slot_resume_non_yolo_has_no_yolo_flag_or_env() {
+        // A non-YOLO instance resumed via the slot path must not gain any YOLO
+        // flag or YOLO env var.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.yolo_mode = false;
+
+        let (cmd, _resumed) = inst
+            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .unwrap();
+        assert!(
+            !cmd.contains("--dangerously-skip-permissions"),
+            "non-YOLO must not carry YOLO flag, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("OPENCODE_PERMISSION"),
+            "non-YOLO must not carry YOLO env, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_slot_resume_degraded_fresh_keeps_launch_context() {
+        // A pane with no usable resume token (invalid native_session_id) must
+        // still launch fresh WITH full launch context (YOLO flag, hook env),
+        // never a bare binary.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.yolo_mode = true;
+        let id = inst.id.clone();
+
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "not a valid; token", true)
+            .unwrap();
+        assert!(!resumed, "invalid token must degrade to fresh");
+        assert!(
+            !cmd.contains("--resume"),
+            "degraded-fresh must not carry a resume flag, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("not a valid"),
+            "unsafe token must not be interpolated, got: {cmd}"
+        );
+        assert!(
+            cmd.contains("--dangerously-skip-permissions"),
+            "degraded-fresh must still carry YOLO flag, got: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!("AOE_INSTANCE_ID='{id}'")),
+            "degraded-fresh must still carry hook env, got: {cmd}"
+        );
+        let binary = crate::agents::get_agent("claude").unwrap().binary;
+        assert_ne!(cmd, binary, "degraded-fresh must not be a bare binary");
+    }
+
+    #[test]
+    fn test_slot_resume_injection_guard_intact() {
+        // An unsafe/unknown slot agent name is refused (None); an invalid resume
+        // token degrades to fresh without interpolating the raw value.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+
+        assert!(
+            inst.build_pane_resume_plan("evil; rm -rf ~", "some-id", true)
+                .is_none(),
+            "unsafe agent name must be refused"
+        );
+
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "abc; rm -rf ~", true)
+            .unwrap();
+        assert!(!resumed);
+        assert!(
+            !cmd.contains("rm -rf"),
+            "invalid resume token must not be interpolated: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_slot_resume_heterogeneous_panes_apply_own_yolo_variant() {
+        // A YOLO instance whose slots record different agents must apply each
+        // pane's own YoloMode variant: claude (CliFlag) gets the flag; pi
+        // (AlwaysYolo) gets neither a flag nor an env var.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.yolo_mode = true;
+
+        let (primary, _) = inst
+            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .unwrap();
+        assert!(
+            primary.contains("--dangerously-skip-permissions"),
+            "claude pane must carry its CliFlag, got: {primary}"
+        );
+
+        let (secondary, _) = inst.build_pane_resume_plan("pi", "ignored", false).unwrap();
+        assert!(
+            !secondary.contains("--dangerously-skip-permissions"),
+            "pi (AlwaysYolo) pane must not carry claude's flag, got: {secondary}"
+        );
+        assert!(
+            secondary.contains("pi"),
+            "pi pane must launch the pi binary, got: {secondary}"
+        );
     }
 
     #[test]
@@ -2843,7 +3166,7 @@ mod tests {
         let parent = parent_instance("claude", Some("parent-uuid"));
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let agent = crate::agents::get_agent("claude");
-        let cmd = fork.build_base_tool_command(agent, None);
+        let cmd = fork.build_base_pane_command(agent, None, true);
         assert!(
             cmd.contains("claude --resume parent-uuid --fork-session"),
             "expected claude fork command, got: {cmd}"
@@ -2855,7 +3178,7 @@ mod tests {
         let parent = parent_instance("codex", Some("parent-uuid"));
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let agent = crate::agents::get_agent("codex");
-        let cmd = fork.build_base_tool_command(agent, None);
+        let cmd = fork.build_base_pane_command(agent, None, true);
         assert!(
             cmd.contains("codex fork parent-uuid"),
             "expected codex fork command, got: {cmd}"
@@ -2870,7 +3193,7 @@ mod tests {
         let mut fork = parent.create_fork("f".to_string(), None).unwrap();
         fork.resume_token = Some("new-fork-uuid".to_string());
         let agent = crate::agents::get_agent("claude");
-        let cmd = fork.build_base_tool_command(agent, Some("new-fork-uuid"));
+        let cmd = fork.build_base_pane_command(agent, Some("new-fork-uuid"), true);
         assert!(
             cmd.contains("--resume new-fork-uuid") && !cmd.contains("--fork-session"),
             "expected plain resume command, got: {cmd}"

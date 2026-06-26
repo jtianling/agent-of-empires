@@ -25,8 +25,8 @@ pub use groups::{
 };
 pub(crate) use instance::{extract_resume_token, is_valid_resume_token};
 pub use instance::{
-    resume_launch_pane, Instance, PaneResumeOutcome, SandboxInfo, Status, StatusUpdateOptions,
-    TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
+    Instance, PaneResumeOutcome, SandboxInfo, Status, StatusUpdateOptions, TerminalInfo,
+    WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
 };
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,
