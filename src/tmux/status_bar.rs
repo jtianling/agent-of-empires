@@ -87,7 +87,7 @@ pub fn apply_status_bar(
 }
 
 pub(super) fn set_session_option(session_name: &str, option: &str, value: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["set-option", "-t", session_name, option, value])
         .output()?;
 
@@ -100,7 +100,7 @@ pub(super) fn set_session_option(session_name: &str, option: &str, value: &str) 
 }
 
 fn set_window_option(session_name: &str, option: &str, value: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["set-window-option", "-t", session_name, option, value])
         .output()?;
 
@@ -133,7 +133,7 @@ fn set_initial_pane_title(session_name: &str, title: &str) -> Result<()> {
 }
 
 fn set_pane_title(target: &str, title: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["select-pane", "-t", target, "-T", title])
         .output()?;
 
@@ -146,7 +146,7 @@ fn set_pane_title(target: &str, title: &str) -> Result<()> {
 }
 
 pub(super) fn unset_session_option(session_name: &str, option: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["set-option", "-t", session_name, "-u", option])
         .output()?;
 
@@ -159,7 +159,7 @@ pub(super) fn unset_session_option(session_name: &str, option: &str) -> Result<(
 }
 
 pub(super) fn set_server_option(option: &str, value: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["set-option", "-gq", option, value])
         .output()?;
 
@@ -172,7 +172,7 @@ pub(super) fn set_server_option(option: &str, value: &str) -> Result<()> {
 }
 
 pub(super) fn unset_server_option(option: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["set-option", "-gqu", option])
         .output()?;
 
@@ -185,7 +185,7 @@ pub(super) fn unset_server_option(option: &str) -> Result<()> {
 }
 
 pub(super) fn get_server_option(option: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["show-option", "-gv", option])
         .output()
         .ok()?;
@@ -201,7 +201,7 @@ pub(super) fn get_server_option(option: &str) -> Option<String> {
 }
 
 fn session_exists(session_name: &str) -> bool {
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["has-session", "-t", session_name])
         .output()
         .map(|o| o.status.success())
@@ -209,7 +209,7 @@ fn session_exists(session_name: &str) -> bool {
 }
 
 fn capture_pane(target: &str, lines: usize) -> Result<String> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args([
             "capture-pane",
             "-t",
@@ -240,7 +240,7 @@ pub(super) fn pid_is_running(pid: &str) -> bool {
 }
 
 pub(super) fn list_aoe_sessions() -> Result<Vec<String>> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()?;
 
@@ -425,7 +425,7 @@ pub fn get_status_for_current_session() -> Option<String> {
 }
 
 fn get_session_option(session_name: &str, option: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["show-options", "-t", session_name, "-v", option])
         .output()
         .ok()?;

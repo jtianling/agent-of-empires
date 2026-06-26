@@ -2,7 +2,6 @@
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -54,7 +53,7 @@ impl Session {
             return exists;
         }
 
-        Command::new("tmux")
+        crate::tmux::tmux_command()
             .args(["has-session", "-t", &self.name])
             .output()
             .map(|o| o.status.success())
@@ -80,7 +79,7 @@ impl Session {
         append_store_pane_id_args(&mut args, &self.name);
         append_store_project_path_args(&mut args, &self.name, working_dir);
 
-        let output = Command::new("tmux").args(&args).output()?;
+        let output = crate::tmux::tmux_command().args(&args).output()?;
 
         // Note: With -d flag, tmux new-session returns 0 even if the shell command fails.
         // Log args at debug level for troubleshooting.
@@ -121,7 +120,7 @@ impl Session {
             process::kill_process_tree(pid);
         }
 
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &self.name])
             .output()?;
 
@@ -145,7 +144,7 @@ impl Session {
             return Ok(());
         }
 
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args(["rename-session", "-t", &self.name, new_name])
             .output()?;
 
@@ -162,7 +161,7 @@ impl Session {
             bail!("Session does not exist: {}", self.name);
         }
 
-        let status = Command::new("tmux")
+        let status = crate::tmux::tmux_command()
             .args(["attach-session", "-t", &self.name])
             .status()?;
 
@@ -203,7 +202,7 @@ impl Session {
         // when the option is not set.
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
 
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "capture-pane",
                 "-t",
@@ -223,7 +222,7 @@ impl Session {
     }
 
     fn all_pane_pids(&self) -> Vec<u32> {
-        Command::new("tmux")
+        crate::tmux::tmux_command()
             .args(["list-panes", "-t", &self.name, "-F", "#{pane_pid}"])
             .output()
             .ok()
@@ -237,7 +236,7 @@ impl Session {
     }
 
     pub fn pane_count(&self) -> usize {
-        Command::new("tmux")
+        crate::tmux::tmux_command()
             .args(["list-panes", "-t", &self.name])
             .output()
             .ok()
@@ -275,7 +274,7 @@ impl Session {
     }
 
     fn tmux_send(target: &str, args: &[&str]) -> Result<()> {
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .arg("send-keys")
             .args(["-t", target])
             .args(args)
@@ -323,7 +322,7 @@ impl Session {
 
     /// Capture pane content by tmux pane ID (e.g., "%42").
     pub fn capture_pane_by_id(pane_id: &str, lines: usize) -> Result<String> {
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "capture-pane",
                 "-t",
@@ -377,7 +376,7 @@ fn clear_cached_capture(session_name: &str) {
 /// Respawn an explicit tmux pane target (e.g. `%37`) with `command`, killing
 /// the current pane process first (`respawn-pane -k`) and running in `working_dir`.
 pub fn respawn_pane_target(pane: &str, command: &str, working_dir: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["respawn-pane", "-k", "-c", working_dir, "-t", pane, command])
         .output()?;
 
@@ -403,7 +402,7 @@ pub fn send_keys_to_pane_target(pane: &str, keys: &[&str]) -> Result<()> {
         return Ok(());
     }
 
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .arg("send-keys")
         .arg("-t")
         .arg(pane)
@@ -453,7 +452,7 @@ pub fn split_window_right(session_name: &str, working_dir: &str, command: &str) 
         "Splitting tmux window for right pane"
     );
 
-    let output = Command::new("tmux").args(&args).output()?;
+    let output = crate::tmux::tmux_command().args(&args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("Failed to split window: {}", stderr);
@@ -493,7 +492,7 @@ pub fn split_window_right_capture_pane(
         format!("{}:.0", session_name),
     ]);
 
-    let output = Command::new("tmux").args(&args).output()?;
+    let output = crate::tmux::tmux_command().args(&args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("Failed to split window: {}", stderr);
@@ -561,7 +560,7 @@ mod tests {
 
     /// Helper: check if tmux is available for tests that need it
     fn tmux_available() -> bool {
-        Command::new("tmux")
+        crate::tmux::tmux_command()
             .arg("-V")
             .output()
             .map(|o| o.status.success())
@@ -575,10 +574,11 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let session_name = format!("aoe_test_remain_{}", std::process::id());
         // Chain set-option -p with new-session to avoid race condition
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "new-session",
                 "-d",
@@ -605,7 +605,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1500));
 
         // Session should still exist (remain-on-exit keeps it)
-        let exists = Command::new("tmux")
+        let exists = crate::tmux::tmux_command()
             .args(["has-session", "-t", &session_name])
             .output()
             .map(|o| o.status.success())
@@ -613,7 +613,7 @@ mod tests {
         assert!(exists, "Session should still exist due to remain-on-exit");
 
         // Pane should be dead (process exited)
-        let pane_dead = Command::new("tmux")
+        let pane_dead = crate::tmux::tmux_command()
             .args(["display-message", "-t", &session_name, "-p", "#{pane_dead}"])
             .output()
             .ok()
@@ -623,7 +623,7 @@ mod tests {
         assert!(pane_dead, "Pane should be dead after command exits");
 
         // Clean up
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
             .output();
     }
@@ -635,11 +635,12 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let session_name = format!("aoe_test_alive_{}", std::process::id());
 
         // Create a session with a long-running command
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "new-session",
                 "-d",
@@ -665,7 +666,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Pane should NOT be dead (sleep is still running)
-        let pane_dead = Command::new("tmux")
+        let pane_dead = crate::tmux::tmux_command()
             .args(["display-message", "-t", &session_name, "-p", "#{pane_dead}"])
             .output()
             .ok()
@@ -675,7 +676,7 @@ mod tests {
         assert!(!pane_dead, "Pane should be alive while command is running");
 
         // Clean up
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
             .output();
     }
@@ -748,10 +749,11 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let session_name = format!("aoe_test_shell_{}", std::process::id());
 
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "new-session",
                 "-d",
@@ -774,7 +776,7 @@ mod tests {
             "Session running sh should be detected as a shell"
         );
 
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
             .output();
     }
@@ -786,10 +788,11 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let session_name = format!("aoe_test_noshell_{}", std::process::id());
 
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "new-session",
                 "-d",
@@ -813,7 +816,7 @@ mod tests {
             "Session running 'sleep' should not be detected as a shell"
         );
 
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
             .output();
     }
@@ -825,9 +828,10 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let session_name = format!("aoe_test_respawn_target_{}", std::process::id());
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args([
                 "new-session",
                 "-d",
@@ -843,7 +847,7 @@ mod tests {
             .expect("tmux new-session");
         assert!(output.status.success());
 
-        let pane_id = Command::new("tmux")
+        let pane_id = crate::tmux::tmux_command()
             .args(["display-message", "-t", &session_name, "-p", "#{pane_id}"])
             .output()
             .ok()
@@ -853,7 +857,7 @@ mod tests {
 
         respawn_pane_target(&pane_id, "sleep 99", "/tmp").expect("respawn target");
 
-        let start_cmd = Command::new("tmux")
+        let start_cmd = crate::tmux::tmux_command()
             .args([
                 "display-message",
                 "-t",
@@ -872,7 +876,7 @@ mod tests {
             start_cmd
         );
 
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
             .output();
     }

@@ -14,6 +14,25 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
+/// A private per-process tmux socket name. `-L <this>` keeps every test command
+/// on a throwaway server, never the developer's default socket.
+fn test_socket() -> String {
+    format!("aoe_test_attach_{}", std::process::id())
+}
+
+/// A `tmux` command pinned to the private socket via `-L`. `-L` is
+/// authoritative over `$TMUX` (a tmux client reads `$TMUX` only when neither
+/// `-L` nor `-S` is given), so this isolates correctly even when the test
+/// runner is itself inside tmux. `$TMUX`/`$TMUX_PANE` are also cleared as
+/// belt-and-suspenders. See AGENTS.md "Tmux Session Safety".
+fn isolated_tmux() -> Command {
+    let mut cmd = Command::new("tmux");
+    cmd.arg("-L").arg(test_socket());
+    cmd.env_remove("TMUX");
+    cmd.env_remove("TMUX_PANE");
+    cmd
+}
+
 /// Test that tmux sessions can be created and killed
 #[test]
 fn test_tmux_session_lifecycle() {
@@ -22,10 +41,11 @@ fn test_tmux_session_lifecycle() {
         return;
     }
 
-    let session_name = "aoe_test_lifecycle_12345678";
+    let session_name = format!("aoe_test_lifecycle_{}", std::process::id());
+    let session_name = session_name.as_str();
 
     // Create a detached session
-    let create = Command::new("tmux")
+    let create = isolated_tmux()
         .args(["new-session", "-d", "-s", session_name])
         .output()
         .expect("Failed to create tmux session");
@@ -33,7 +53,7 @@ fn test_tmux_session_lifecycle() {
     assert!(create.status.success(), "Failed to create test session");
 
     // Verify session exists
-    let check = Command::new("tmux")
+    let check = isolated_tmux()
         .args(["has-session", "-t", session_name])
         .output()
         .expect("Failed to check session");
@@ -44,7 +64,7 @@ fn test_tmux_session_lifecycle() {
     );
 
     // Kill session
-    let kill = Command::new("tmux")
+    let kill = isolated_tmux()
         .args(["kill-session", "-t", session_name])
         .output()
         .expect("Failed to kill session");
@@ -52,7 +72,7 @@ fn test_tmux_session_lifecycle() {
     assert!(kill.status.success(), "Failed to kill test session");
 
     // Verify session no longer exists
-    let check_after = Command::new("tmux")
+    let check_after = isolated_tmux()
         .args(["has-session", "-t", session_name])
         .output()
         .expect("Failed to check session");

@@ -17,10 +17,79 @@ pub use utils::{get_agent_pane_id, set_agent_pane_id};
 
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 pub const SESSION_PREFIX: &str = "aoe_";
+
+/// Process-global tmux socket name. `None` (or unset) selects the default tmux
+/// socket (bare `tmux`); `Some(name)` makes every AoE tmux command run on
+/// `-L <name>`. Set once at startup from config, or pinned to a private label by
+/// tests. See `tmux_command()` and AGENTS.md "Tmux Session Safety".
+static TMUX_SOCKET_NAME: OnceLock<Option<String>> = OnceLock::new();
+
+/// Set AoE's tmux socket name once at startup from config. `None` = default
+/// socket (current behavior). First write wins.
+pub fn init_tmux_socket_name(name: Option<String>) {
+    let _ = TMUX_SOCKET_NAME.set(name);
+}
+
+/// Resolve the socket name to pass as `-L`. Returns the configured name, or
+/// `None` for the default socket. CRITICAL SAFETY NET: under unit-test builds
+/// this NEVER returns `None` -- it lazily pins `aoe_test_<pid>` so a test that
+/// forgot to opt in still cannot reach the developer's default/live socket.
+fn resolved_socket_name() -> Option<String> {
+    if let Some(name) = TMUX_SOCKET_NAME.get() {
+        return name.clone();
+    }
+    // Under unit-test builds, never fall through to the default socket: pin a
+    // private per-process label so a test that forgot to opt in is still safe.
+    #[cfg(test)]
+    let fallback = {
+        let label = format!("aoe_test_{}", std::process::id());
+        let _ = TMUX_SOCKET_NAME.set(Some(label.clone()));
+        Some(label)
+    };
+    #[cfg(not(test))]
+    let fallback = None;
+    fallback
+}
+
+/// Build a `tmux` command targeting AoE's configured socket. EVERY AoE tmux
+/// invocation MUST go through this builder (enforced by a static guard) so the
+/// socket selection is centralized in one place.
+///
+/// When a socket name is set it appends `-L <name>`. `-L` is authoritative over
+/// `$TMUX` (a tmux client reads `$TMUX` only when neither `-L` nor `-S` is
+/// given), so this isolates correctly even when the process is inside tmux --
+/// which is exactly why env-based (`TMUX_TMPDIR`) isolation was unsafe.
+pub(crate) fn tmux_command() -> Command {
+    build_tmux_command(resolved_socket_name().as_deref())
+}
+
+/// Pure builder: `tmux` with `-L <name>` prepended when `socket_name` is `Some`.
+/// Split out from [`tmux_command`] so the flag logic is unit-testable without
+/// the process-global socket name.
+fn build_tmux_command(socket_name: Option<&str>) -> Command {
+    let mut cmd = Command::new("tmux");
+    if let Some(name) = socket_name {
+        cmd.arg("-L").arg(name);
+    }
+    cmd
+}
+
+/// Test-only: pin tmux to a private per-process socket and drop `$TMUX` /
+/// `$TMUX_PANE`. `tmux_command()` already forces a private `-L` under
+/// `#[cfg(test)]`, so this is belt-and-suspenders: clearing `$TMUX`/`$TMUX_PANE`
+/// also removes the nested-attach guard edge for attach-style tests. Callers
+/// MUST be `#[serial]`. See AGENTS.md "Tmux Session Safety".
+#[cfg(test)]
+pub(crate) fn isolate_tmux_socket() {
+    let label = format!("aoe_test_{}", std::process::id());
+    let _ = TMUX_SOCKET_NAME.set(Some(label));
+    std::env::remove_var("TMUX");
+    std::env::remove_var("TMUX_PANE");
+}
 
 /// Pre-fetched pane metadata from a single `tmux list-panes -a` call.
 #[derive(Debug, Clone)]
@@ -65,7 +134,7 @@ pub struct PaneInfo {
 }
 
 pub fn refresh_session_cache() {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "list-sessions",
             "-F",
@@ -85,7 +154,7 @@ pub fn refresh_session_cache() {
 }
 
 pub fn refresh_pane_info_cache() {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "list-panes",
             "-a",
@@ -108,7 +177,7 @@ pub fn refresh_pane_info_cache() {
 /// Batch-fetch pane metadata for all aoe sessions in a single tmux subprocess call.
 /// Returns a map from session name to metadata for the first window's first pane.
 pub fn batch_pane_metadata() -> HashMap<String, PaneMetadata> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "list-panes",
             "-a",
@@ -225,7 +294,7 @@ pub fn get_all_cached_pane_infos(session_name: &str) -> Option<Vec<PaneInfo>> {
 }
 
 pub fn get_current_session_name() -> Option<String> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["display-message", "-p", "#{session_name}"])
         .output()
         .ok()?;
@@ -272,7 +341,7 @@ fn host_matches(host: Option<&str>, session_name: &str) -> bool {
 }
 
 pub fn get_current_client_name() -> Option<String> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["display-message", "-p", "#{client_name}"])
         .output()
         .ok()?;
@@ -301,7 +370,7 @@ pub fn get_tty_name() -> Option<String> {
 }
 
 pub fn is_tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().is_ok()
+    tmux_command().arg("-V").output().is_ok()
 }
 
 fn is_agent_available(agent: &crate::agents::AgentDef) -> bool {
@@ -438,6 +507,40 @@ impl AvailableTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cmd_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn test_build_tmux_command_with_socket_name_prepends_dash_l() {
+        let cmd = build_tmux_command(Some("jt"));
+        assert_eq!(cmd.get_program().to_string_lossy(), "tmux");
+        // `-L <name>` must come first so it precedes any subcommand appended later.
+        assert_eq!(cmd_args(&cmd), vec!["-L".to_string(), "jt".to_string()]);
+    }
+
+    #[test]
+    fn test_build_tmux_command_without_socket_name_is_bare() {
+        let cmd = build_tmux_command(None);
+        assert!(cmd_args(&cmd).is_empty(), "no -L/-S when socket name unset");
+    }
+
+    #[test]
+    fn test_tmux_command_is_private_under_test_even_without_optin() {
+        // The seam's #[cfg(test)] safety net forces a private `-L aoe_test_<pid>`
+        // socket so a unit test can never reach the developer's default socket,
+        // even if it forgot to call isolate_tmux_socket().
+        let args = cmd_args(&tmux_command());
+        assert_eq!(args.first().map(String::as_str), Some("-L"));
+        assert_eq!(
+            args.get(1).map(String::as_str),
+            Some(format!("aoe_test_{}", std::process::id()).as_str()),
+            "tmux_command() must target a private per-process socket under test"
+        );
+    }
 
     #[test]
     fn test_host_matches_requires_resolved_and_equal() {

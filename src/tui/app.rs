@@ -5,7 +5,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent}
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::prelude::*;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use super::home::HomeView;
@@ -872,7 +871,7 @@ impl App {
             .map(|(width, _)| self.home.is_narrow_layout(width))
             .unwrap_or(false);
         if tmux_session.pane_count() > 1 {
-            let is_zoomed = Command::new("tmux")
+            let is_zoomed = crate::tmux::tmux_command()
                 .args([
                     "display-message",
                     "-t",
@@ -891,7 +890,7 @@ impl App {
 
             if should_zoom || should_unzoom {
                 let agent_pane_target = format!("{session_name}:.0");
-                match Command::new("tmux")
+                match crate::tmux::tmux_command()
                     .args(["resize-pane", "-Z", "-t", &agent_pane_target])
                     .output()
                 {

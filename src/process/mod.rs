@@ -1,7 +1,5 @@
 //! Process utilities for tmux session management
 
-use std::process::Command;
-
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -11,7 +9,7 @@ mod macos;
 /// Get the PID of the shell process running in a tmux pane.
 /// `target` can be a session name, a pane ID (e.g. `%42`), or any valid tmux target.
 pub fn get_pane_pid(target: &str) -> Option<u32> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["display-message", "-t", target, "-p", "#{pane_pid}"])
         .output()
         .ok()?;

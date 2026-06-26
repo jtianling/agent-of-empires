@@ -240,7 +240,7 @@ impl StatusPoller {
                     if last.map_or(true, |prev| *prev != desired) {
                         let session_name =
                             crate::tmux::Session::generate_name(&inst.id, &inst.title);
-                        let _ = std::process::Command::new("tmux")
+                        let _ = crate::tmux::tmux_command()
                             .args(["select-pane", "-t", &session_name, "-T", &desired])
                             .output();
                         managed_pane_titles.insert(inst.id.clone(), desired);

@@ -9,7 +9,6 @@
 //! any managed session.
 
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
 
 use anyhow::Result;
 
@@ -127,7 +126,7 @@ pub fn session_pane_ids(session_name: &str) -> Vec<String> {
 /// List a tmux session's panes as `(pane_index, pane_id)` sorted by pane index.
 /// Returns an empty vec if the session does not exist or tmux is unavailable.
 fn list_session_panes(session_name: &str) -> Vec<(u32, String)> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args([
             "list-panes",
             "-t",

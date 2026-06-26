@@ -1,7 +1,5 @@
 //! tmux utility functions
 
-use std::process::Command;
-
 use crate::session::{
     config::{load_config, SortOrder},
     expanded_groups, flatten_tree, Group, GroupTree, Instance, Item,
@@ -60,7 +58,7 @@ fn root_ctrl_q_run_shell_cmd() -> String {
 pub fn clear_last_detached_session_for_client(client_name: &str) {
     let option_key =
         client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, client_name);
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["set-option", "-gu"])
         .arg(&option_key)
         .output()
@@ -70,7 +68,7 @@ pub fn clear_last_detached_session_for_client(client_name: &str) {
 pub fn set_last_detached_session_for_client(client_name: &str, session_name: &str) {
     let option_key =
         client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, client_name);
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["set-option", "-gq"])
         .arg(&option_key)
         .arg(session_name)
@@ -83,7 +81,7 @@ pub fn set_last_detached_session_for_client(client_name: &str, session_name: &st
 pub fn take_last_detached_session_for_client(client_name: &str) -> Option<String> {
     let option_key =
         client_context_option_key(AOE_LAST_DETACHED_SESSION_OPTION_PREFIX, client_name);
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["show-option", "-gv"])
         .arg(&option_key)
         .output()
@@ -121,7 +119,7 @@ fn resolve_client_name(client_name: Option<&str>) -> Option<String> {
 }
 
 fn set_global_option(option_key: &str, value: &str) {
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["set-option", "-gq"])
         .arg(option_key)
         .arg(value)
@@ -130,7 +128,7 @@ fn set_global_option(option_key: &str, value: &str) {
 }
 
 fn unset_global_option(option_key: &str) {
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["set-option", "-gqu"])
         .arg(option_key)
         .output()
@@ -138,7 +136,7 @@ fn unset_global_option(option_key: &str) {
 }
 
 fn get_global_option(option_key: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["show-option", "-gv"])
         .arg(option_key)
         .output()
@@ -153,21 +151,21 @@ fn get_global_option(option_key: &str) -> Option<String> {
 }
 
 fn set_tmux_session_option(session_name: &str, option: &str, value: &str) {
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["set-option", "-t", session_name, option, value])
         .output()
         .ok();
 }
 
 fn unset_tmux_session_option(session_name: &str, option: &str) {
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["set-option", "-t", session_name, "-u", option])
         .output()
         .ok();
 }
 
 fn get_tmux_session_option(session_name: &str, option: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["show-options", "-t", session_name, "-v", option])
         .output()
         .ok()?;
@@ -428,7 +426,7 @@ fn source_file_batch(lines: &[String]) {
         tracing::warn!("Failed to write tmux commands to temp file: {}", e);
         return;
     }
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["source-file"])
         .arg(&tmp_path)
         .output();
@@ -562,7 +560,7 @@ fn current_tmux_session_name(client_name: Option<&str>) -> anyhow::Result<Option
 }
 
 fn session_name_for_client(client_name: &str) -> anyhow::Result<Option<String>> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["list-clients", "-F", "#{client_name}\t#{session_name}"])
         .output()?;
 
@@ -582,7 +580,7 @@ fn parse_session_name_for_client(stdout: &str, client_name: &str) -> Option<Stri
 }
 
 fn switch_client_to_session(target_session: &str, client_name: Option<&str>) -> anyhow::Result<()> {
-    let mut command = Command::new("tmux");
+    let mut command = crate::tmux::tmux_command();
     command.arg("switch-client");
     if let Some(client_name) = client_name {
         command.args(["-c", client_name]);
@@ -713,7 +711,7 @@ pub fn switch_aoe_session_back(profile: &str, client_name: Option<&str>) -> anyh
 }
 
 fn tmux_session_exists(name: &str) -> bool {
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["has-session", "-t", name])
         .output()
         .map(|o| o.status.success())
@@ -776,7 +774,7 @@ pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str) {
 }
 
 pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["show-option", "-t", session_name, "-v", "@aoe_agent_pane"])
         .output()
         .ok()?;
@@ -800,7 +798,7 @@ pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
 /// recovery to re-pin the rebuilt slot-0 pane so the reconciler and the `R`
 /// resume-all flow keep operating on the recovered session.
 pub fn set_agent_pane_id(session_name: &str, pane_id: &str) -> anyhow::Result<()> {
-    let output = Command::new("tmux")
+    let output = crate::tmux::tmux_command()
         .args(["set-option", "-t", session_name, "@aoe_agent_pane", pane_id])
         .output()?;
     if !output.status.success() {
@@ -840,7 +838,7 @@ fn resolve_pane_target(session_name: &str) -> String {
 
 pub fn is_pane_dead(session_name: &str) -> bool {
     let target = resolve_pane_target(session_name);
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args(["display-message", "-t", &target, "-p", "#{pane_dead}"])
         .output()
         .ok()
@@ -851,7 +849,7 @@ pub fn is_pane_dead(session_name: &str) -> bool {
 
 fn pane_current_command(session_name: &str) -> Option<String> {
     let target = resolve_pane_target(session_name);
-    Command::new("tmux")
+    crate::tmux::tmux_command()
         .args([
             "display-message",
             "-t",
@@ -899,11 +897,11 @@ mod tests {
     }
 
     fn tmux_available() -> bool {
-        Command::new("tmux").arg("-V").output().is_ok()
+        crate::tmux::tmux_command().arg("-V").output().is_ok()
     }
 
     fn create_tmux_session(session_name: &str) {
-        let output = Command::new("tmux")
+        let output = crate::tmux::tmux_command()
             .args(["new-session", "-d", "-s", session_name, "sh"])
             .output()
             .expect("tmux new-session");
@@ -916,13 +914,13 @@ mod tests {
     }
 
     fn kill_tmux_session(session_name: &str) {
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", session_name])
             .output();
     }
 
     fn clear_global_option(option_key: &str) {
-        let _ = Command::new("tmux")
+        let _ = crate::tmux::tmux_command()
             .args(["set-option", "-gu"])
             .arg(option_key)
             .output();
@@ -1399,6 +1397,7 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let temp = TempDir::new().unwrap();
         setup_test_home(&temp);
@@ -1459,6 +1458,7 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let temp = TempDir::new().unwrap();
         setup_test_home(&temp);
@@ -1489,6 +1489,7 @@ mod tests {
             eprintln!("Skipping test: tmux not available");
             return;
         }
+        crate::tmux::isolate_tmux_socket();
 
         let temp = TempDir::new().unwrap();
         setup_test_home(&temp);

@@ -357,7 +357,7 @@ fn apply_session_option_updates(updates: &[SessionOptionUpdate]) -> Result<()> {
     }
 
     let args = build_batched_session_option_args(updates);
-    let output = Command::new("tmux").args(&args).output()?;
+    let output = crate::tmux::tmux_command().args(&args).output()?;
     if output.status.success() {
         return Ok(());
     }
