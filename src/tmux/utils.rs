@@ -1494,6 +1494,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         setup_test_home(&temp);
 
+        // Global options only persist while a server is alive on the socket, so
+        // anchor one with a throwaway session instead of relying on test order.
+        let anchor = format!("aoe_clear_prev_anchor_{}", std::process::id());
+        create_tmux_session(&anchor);
+
         let client_name = format!("/tmp/clear_prev_client_{}", std::process::id());
         let option_key = client_context_option_key(AOE_PREV_SESSION_OPTION_PREFIX, &client_name);
         set_global_option(&option_key, "aoe_target");
@@ -1507,6 +1512,7 @@ mod tests {
 
         assert_eq!(get_global_option(&option_key), None);
         clear_global_option(&option_key);
+        kill_tmux_session(&anchor);
     }
 
     #[test]

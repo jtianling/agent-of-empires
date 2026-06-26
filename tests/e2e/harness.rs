@@ -13,7 +13,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -22,21 +23,65 @@ use tempfile::TempDir;
 // tmux socket isolation
 // ---------------------------------------------------------------------------
 
-/// Dedicated `TMUX_TMPDIR` for e2e tests.
-///
-/// `aoe` never passes `-S` to tmux: it picks the socket from `$TMUX` when set,
-/// otherwise falls back to the default socket under `$TMUX_TMPDIR` (or `/tmp`).
-/// The `aoe add --launch` / `session fork` / `session attach` paths run as bare
-/// CLI subprocesses with no inherited `$TMUX`, so without this their sessions
-/// land on the user's *global* default socket -- mingling with, and getting
-/// reaped alongside, the user's real sessions. Pointing every aoe subprocess and
-/// every socket-less cleanup command at an e2e-only directory keeps those
-/// fallback sessions on a private socket that can never collide with real ones,
-/// while still being a single shared location the leak sweeps can scan.
-fn e2e_tmux_tmpdir() -> PathBuf {
+/// Shared parent for every e2e test's private `TMUX_TMPDIR`. Each test gets its
+/// OWN subdirectory under here (see [`per_test_tmux_tmpdir`]) so no two tests
+/// ever share a tmux server -- which restores the structural per-test isolation
+/// that `socket-per-profile` would otherwise lose (every test resolves the same
+/// `default` profile, so a shared `TMUX_TMPDIR` would mean a shared socket).
+/// This is also the single place the cross-run leak sweep scans.
+fn e2e_tmux_root() -> PathBuf {
     let dir = std::env::temp_dir().join("aoe-e2e-tmux");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Allocate a fresh, unique `TMUX_TMPDIR` for one test. Kept short (just a
+/// `<pid>-<seq>` leaf) so the projected socket path `<tmpdir>/tmux-<uid>/default`
+/// stays well under the platform limit and never trips AoE's overlong-name
+/// fallback (which would rename the socket and desync the harness from `aoe`).
+fn per_test_tmux_tmpdir() -> PathBuf {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let leaf = format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let dir = e2e_tmux_root().join(leaf);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// The user's numeric uid, matching tmux's `tmux-<uid>` socket-dir convention.
+/// Queried once via `id -u` so the test crate needs no `libc` dependency.
+fn current_uid() -> &'static str {
+    static UID: OnceLock<String> = OnceLock::new();
+    UID.get_or_init(|| {
+        let out = Command::new("id")
+            .arg("-u")
+            .output()
+            .expect("failed to run `id -u`");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    })
+}
+
+/// Absolute path of the tmux socket `aoe` uses for a given `TMUX_TMPDIR`.
+///
+/// `aoe -L default` (from `AGENT_OF_EMPIRES_PROFILE=default`) resolves to
+/// `<tmpdir>/tmux-<uid>/default`. The harness pins this exact path with `-S` so
+/// its own tmux commands hit the same server `aoe` does. `-S` (an absolute
+/// path) is authoritative over `$TMUX`, so the harness is immune to an inherited
+/// `$TMUX` -- running the suite from inside a live AoE session can never reach
+/// the developer's socket.
+fn socket_path_in(tmpdir: &Path) -> PathBuf {
+    let dir = tmpdir.join(format!("tmux-{}", current_uid()));
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // tmux requires its socket parent dir to be private (0700).
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    dir.join("default")
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +177,7 @@ pub struct TuiTestHarness {
     _stub_dir: TempDir,
     binary_path: PathBuf,
     stub_path: PathBuf,
+    tmux_tmpdir: PathBuf,
     socket_path: PathBuf,
     spawned: bool,
     control_client: Option<Child>,
@@ -152,8 +198,12 @@ impl TuiTestHarness {
         // Unique session name to avoid collisions.
         let session_name = format!("aoe_e2e_{}_{}", test_name, std::process::id());
 
-        // Path to unique tmux socket for this test.
-        let socket_path = home_dir.path().join("tmux.sock");
+        // Each test gets its OWN private `TMUX_TMPDIR` so its `aoe -L default`
+        // server is unique -- no socket sharing, hence no cross-test
+        // contamination. The harness pins the exact resolved socket path with
+        // `-S` so its own tmux commands hit the same server `aoe` spawns.
+        let tmux_tmpdir = per_test_tmux_tmpdir();
+        let socket_path = socket_path_in(&tmux_tmpdir);
 
         // Create a fake `claude` script so `which claude` succeeds.
         let stub_path = stub_dir.path().to_path_buf();
@@ -205,6 +255,7 @@ last_seen_version = "{}"
             _stub_dir: stub_dir,
             binary_path,
             stub_path,
+            tmux_tmpdir,
             socket_path,
             spawned: false,
             control_client: None,
@@ -269,7 +320,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
-            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
             .expect("failed to run tmux new-session");
 
@@ -413,7 +464,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
-            .env("TMUX_TMPDIR", e2e_tmux_tmpdir());
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir);
 
         if let Some(tmux_env) = tmux_env {
             command.env("TMUX", tmux_env);
@@ -539,7 +590,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
-            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
             .expect("failed to run aoe CLI")
     }
@@ -555,7 +606,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
-            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TMUX", format!("{},1,0", self.socket_path.display()))
             .output()
             .expect("failed to run aoe CLI inside tmux")
@@ -570,7 +621,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
-            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TMUX", tmux_env)
             .output()
             .expect("failed to run aoe CLI with custom TMUX env")
@@ -932,11 +983,18 @@ impl Drop for TuiTestHarness {
             self.kill_session();
         }
 
-        // Sessions spawned by `aoe add --launch` (e.g. fork tests) land on the
-        // default tmux socket, not the harness socket, so kill_session() misses
-        // them. Sweep any session whose pane still lives inside this test's
-        // isolated HOME so orphan `claude` children don't survive the test.
-        kill_inner_aoe_sessions(self.home_dir.path());
+        // Tear down THIS test's private tmux server and remove its TMUX_TMPDIR.
+        // Each test owns a unique socket, so this touches only its own sessions
+        // (managed, fork, hand-split) -- never another test's, never the
+        // developer's live socket. `-S` (an absolute path) is authoritative over
+        // any inherited `$TMUX`, so this is safe even when the suite runs from
+        // inside a live AoE session.
+        let _ = Command::new("tmux")
+            .arg("-S")
+            .arg(&self.socket_path)
+            .arg("kill-server")
+            .output();
+        let _ = std::fs::remove_dir_all(&self.tmux_tmpdir);
 
         // Convert recording to GIF if one was produced.
         if let Some(cast_path) = &self.cast_path {
@@ -949,136 +1007,37 @@ impl Drop for TuiTestHarness {
     }
 }
 
-fn kill_inner_aoe_sessions(home_root: &Path) {
-    let canonical_root = home_root.canonicalize().ok();
-
-    let Ok(output) = Command::new("tmux")
-        .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_dead}",
-        ])
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-
-    let listing = String::from_utf8_lossy(&output.stdout);
-    let mut killed = std::collections::HashSet::new();
-    for line in listing.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let Some(session) = parts.next() else {
-            continue;
-        };
-        let path = parts.next().unwrap_or("");
-        let pane_dead = parts.next().unwrap_or("") == "1";
-        // When the pane cwd can still be canonicalized, match against the
-        // canonical HOME root. If it cannot (directory already deleted), fall
-        // back to raw string-prefix matching against both the raw and
-        // canonical HOME — a dead cwd inside our HOME is the strongest leak
-        // signal, but we still require a prefix match so unrelated sessions
-        // are never killed.
-        let under_root = match Path::new(path).canonicalize() {
-            Ok(resolved) => canonical_root
-                .as_ref()
-                .is_some_and(|root| resolved.starts_with(root)),
-            Err(_) => {
-                let raw = home_root.to_string_lossy();
-                let canon = canonical_root.as_deref().map(Path::to_string_lossy);
-                path.starts_with(raw.as_ref())
-                    || canon.as_deref().is_some_and(|c| path.starts_with(c))
-            }
-        };
-        // A dead pane on the e2e-private socket is a finished or leaked test
-        // session: the launched stub has exited, so tmux reports an empty cwd
-        // that the under_root match can't catch. This socket never holds real
-        // sessions, so reaping any dead `aoe_` session here is safe.
-        let dead_leak = pane_dead && session.starts_with("aoe_");
-        if !under_root && !dead_leak {
-            continue;
-        }
-        if killed.insert(session.to_string()) {
-            let _ = Command::new("tmux")
-                .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
-                .args(["kill-session", "-t", session])
-                .output();
-        }
-    }
-}
-
-/// Clean up tmux sessions leaked by prior test binaries that were killed
-/// before `Drop` could run (SIGKILL, CI timeout, Ctrl+\).
+/// Clean up tmux servers leaked by prior test binaries that were SIGKILL'd (CI
+/// timeout, Ctrl+\) before `Drop` could tear down their per-test `TMUX_TMPDIR`.
 ///
-/// Scans only the e2e-private socket (`TMUX_TMPDIR`), which never holds real
-/// sessions, so it safely reaps any `aoe_`-named session whose pane is dead (a
-/// finished or leaked test whose launched stub has already exited). It also
-/// keeps the older guard for a still-live pane: cwd looks like a platform temp
-/// dir AND no longer exists on disk.
-///
-/// Runs at most once per test binary via `Once`.
+/// Each test owns a private `TMUX_TMPDIR` subdir under [`e2e_tmux_root`]; on a
+/// clean exit `Drop` kill-servers and removes it. A killed run leaves the subdir
+/// (and its still-running tmux server + agent children) behind. This scans the
+/// root for leftover subdirs and kill-servers + removes each. The root only ever
+/// holds e2e-private sockets, so this can never reach the developer's sockets.
+/// Runs before this test allocates its own subdir, and at most once per binary.
 fn reap_stale_aoe_test_sessions() {
     static REAP: Once = Once::new();
     REAP.call_once(|| {
-        let Ok(output) = Command::new("tmux")
-            .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
-            .args([
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name}\t#{pane_current_path}\t#{pane_dead}",
-            ])
-            .output()
-        else {
+        let Ok(entries) = std::fs::read_dir(e2e_tmux_root()) else {
             return;
         };
-        if !output.status.success() {
-            return;
-        }
-
-        let listing = String::from_utf8_lossy(&output.stdout);
-        let mut to_kill = std::collections::HashSet::new();
-        for line in listing.lines() {
-            let mut parts = line.splitn(3, '\t');
-            let Some(session) = parts.next() else {
-                continue;
-            };
-            let path = parts.next().unwrap_or("");
-            let pane_dead = parts.next().unwrap_or("") == "1";
-            if !session.starts_with("aoe_") {
+        for entry in entries.flatten() {
+            let tmpdir = entry.path();
+            if !tmpdir.is_dir() {
                 continue;
             }
-            // A dead pane is a finished or leaked test session: the launched
-            // stub has exited and tmux reports an empty cwd, so the temp-dir +
-            // deleted check below can't catch it. Safe here because this scans
-            // only the e2e-private socket, which never holds real sessions.
-            if !pane_dead {
-                // Platform temp-dir fingerprint: macOS uses /var/folders/.../T/,
-                // Linux uses /tmp/. A real user session would not be rooted here.
-                let looks_temp = path.contains("/var/folders/")
-                    || path.starts_with("/tmp/")
-                    || path.starts_with("/private/tmp/")
-                    || path.starts_with("/private/var/folders/");
-                if !looks_temp {
-                    continue;
-                }
-                // Must be dead on disk. `exists()` follows symlinks; an existing
-                // path means either a live test or a path a user cares about.
-                if Path::new(path).exists() {
-                    continue;
-                }
+            let socket = tmpdir
+                .join(format!("tmux-{}", current_uid()))
+                .join("default");
+            if socket.exists() {
+                let _ = Command::new("tmux")
+                    .arg("-S")
+                    .arg(&socket)
+                    .arg("kill-server")
+                    .output();
             }
-            to_kill.insert(session.to_string());
-        }
-        for session in to_kill {
-            let _ = Command::new("tmux")
-                .env("TMUX_TMPDIR", e2e_tmux_tmpdir())
-                .args(["kill-session", "-t", &session])
-                .output();
+            let _ = std::fs::remove_dir_all(&tmpdir);
         }
     });
 }

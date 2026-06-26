@@ -15,6 +15,7 @@ pub use status_bar::{get_session_info_for_current, get_status_for_current_sessio
 pub use status_detection::detect_status_from_content;
 pub use utils::{get_agent_pane_id, set_agent_pane_id};
 
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{OnceLock, RwLock};
@@ -22,37 +23,83 @@ use std::time::{Duration, Instant};
 
 pub const SESSION_PREFIX: &str = "aoe_";
 
-/// Process-global tmux socket name. `None` (or unset) selects the default tmux
-/// socket (bare `tmux`); `Some(name)` makes every AoE tmux command run on
-/// `-L <name>`. Set once at startup from config, or pinned to a private label by
-/// tests. See `tmux_command()` and AGENTS.md "Tmux Session Safety".
+/// Process-global tmux socket name. `None` (or unset) selects a bare `tmux`
+/// command (ambient `$TMUX`); `Some(name)` makes every AoE tmux command run on
+/// `-L <name>`. The main TUI sets it once from its resolved profile (via
+/// [`init_tmux_socket_name`]); tests pin it to a private label. See
+/// `tmux_command()` and AGENTS.md "Tmux Session Safety".
 static TMUX_SOCKET_NAME: OnceLock<Option<String>> = OnceLock::new();
 
-/// Set AoE's tmux socket name once at startup from config. `None` = default
-/// socket (current behavior). First write wins.
+/// Conservative upper bound for the unix domain socket path tmux creates. macOS
+/// caps `sun_path` near 104 bytes (including the trailing NUL); staying well
+/// under it keeps the socket creatable even for long profile names.
+const MAX_SOCKET_PATH_LEN: usize = 100;
+
+/// Set AoE's tmux socket name once at startup from the resolved profile. `None`
+/// selects the bare-`tmux` (ambient `$TMUX`) path. First write wins.
 pub fn init_tmux_socket_name(name: Option<String>) {
     let _ = TMUX_SOCKET_NAME.set(name);
 }
 
-/// Resolve the socket name to pass as `-L`. Returns the configured name, or
-/// `None` for the default socket. CRITICAL SAFETY NET: under unit-test builds
-/// this NEVER returns `None` -- it lazily pins `aoe_test_<pid>` so a test that
-/// forgot to opt in still cannot reach the developer's default/live socket.
+/// Derive the tmux socket name (`-L <name>`) for a resolved profile. Uses the
+/// profile string verbatim so the name is trivially predictable, EXCEPT when the
+/// resulting socket path under `$TMUX_TMPDIR` would exceed the platform limit --
+/// then a deterministic short hash-based name (`aoe-<hash>`) is substituted so
+/// the socket can still be created. Every entry point for the same profile in
+/// the same environment derives the same name.
+pub fn socket_name_for_profile(profile: &str) -> String {
+    if projected_socket_path_len(profile) <= MAX_SOCKET_PATH_LEN {
+        profile.to_string()
+    } else {
+        format!("aoe-{}", short_socket_hash(profile))
+    }
+}
+
+/// Project the length of the unix domain socket path tmux would create for
+/// `name`: `<$TMUX_TMPDIR or /tmp>/tmux-<uid>/<name>`. The `uid` segment is
+/// reserved at its maximum width so the estimate never underestimates the path.
+fn projected_socket_path_len(name: &str) -> usize {
+    let tmpdir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    tmpdir.len() + "/tmux-".len() + 10 + "/".len() + name.len()
+}
+
+/// Deterministic short hash (16 hex chars) for the overlong-name fallback.
+fn short_socket_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Resolve the socket name to pass as `-L`. Resolution order (the `#[cfg(test)]`
+/// branch MUST precede the env-derived path so tests can never escape isolation):
+///   1. explicit init (main TUI / profile-carrying subcommand) -> that name
+///   2. `#[cfg(test)]` -> private `aoe_test_<pid>` (BEFORE any env read)
+///   3. `AGENT_OF_EMPIRES_PROFILE` env set & non-empty -> profile-derived name
+///   4. none of the above -> `None` (bare `tmux`, ambient `$TMUX`)
 fn resolved_socket_name() -> Option<String> {
     if let Some(name) = TMUX_SOCKET_NAME.get() {
         return name.clone();
     }
-    // Under unit-test builds, never fall through to the default socket: pin a
-    // private per-process label so a test that forgot to opt in is still safe.
+
+    // CRITICAL SAFETY NET: under unit-test builds, force a private per-process
+    // label BEFORE reading any env var, so a test that sets
+    // AGENT_OF_EMPIRES_PROFILE still cannot reach the developer's live socket.
     #[cfg(test)]
-    let fallback = {
+    let resolved = {
         let label = format!("aoe_test_{}", std::process::id());
         let _ = TMUX_SOCKET_NAME.set(Some(label.clone()));
         Some(label)
     };
+    // Real builds derive the socket from an explicitly-handed profile
+    // (`AGENT_OF_EMPIRES_PROFILE`, inherited or set by main). With no profile,
+    // fall back to bare `tmux` -- correct for in-server helpers that have none.
     #[cfg(not(test))]
-    let fallback = None;
-    fallback
+    let resolved = match std::env::var("AGENT_OF_EMPIRES_PROFILE") {
+        Ok(p) if !p.is_empty() => Some(socket_name_for_profile(&p)),
+        _ => None,
+    };
+    resolved
 }
 
 /// Build a `tmux` command targeting AoE's configured socket. EVERY AoE tmux
@@ -516,16 +563,51 @@ mod tests {
 
     #[test]
     fn test_build_tmux_command_with_socket_name_prepends_dash_l() {
-        let cmd = build_tmux_command(Some("jt"));
+        // Profile-derived name (explicit init or AGENT_OF_EMPIRES_PROFILE env)
+        // resolves to `-L <profile>`.
+        let cmd = build_tmux_command(Some("auto-myproj-3f2a"));
         assert_eq!(cmd.get_program().to_string_lossy(), "tmux");
         // `-L <name>` must come first so it precedes any subcommand appended later.
-        assert_eq!(cmd_args(&cmd), vec!["-L".to_string(), "jt".to_string()]);
+        assert_eq!(
+            cmd_args(&cmd),
+            vec!["-L".to_string(), "auto-myproj-3f2a".to_string()]
+        );
     }
 
     #[test]
     fn test_build_tmux_command_without_socket_name_is_bare() {
+        // No profile resolvable -> bare `tmux` (ambient `$TMUX`).
         let cmd = build_tmux_command(None);
         assert!(cmd_args(&cmd).is_empty(), "no -L/-S when socket name unset");
+    }
+
+    #[test]
+    fn test_socket_name_for_profile_is_verbatim() {
+        // The env-derived path uses the profile string verbatim as the `-L` name.
+        assert_eq!(
+            socket_name_for_profile("auto-agent-of-empires-3f2a"),
+            "auto-agent-of-empires-3f2a"
+        );
+    }
+
+    #[test]
+    fn test_socket_name_for_profile_overlong_falls_back_to_hash() {
+        // A pathologically long profile name (always exceeds the socket-path
+        // bound regardless of $TMUX_TMPDIR) gets a short deterministic hash name.
+        let long = "a".repeat(200);
+        let derived = socket_name_for_profile(&long);
+
+        assert_ne!(derived, long, "overlong name must not be used verbatim");
+        assert!(
+            derived.starts_with("aoe-"),
+            "fallback name should be hash-based: {derived}"
+        );
+        assert!(
+            projected_socket_path_len(&derived) <= MAX_SOCKET_PATH_LEN,
+            "fallback name must fit within the socket-path bound"
+        );
+        // Deterministic: two derivations of the same long name agree.
+        assert_eq!(derived, socket_name_for_profile(&long));
     }
 
     #[test]

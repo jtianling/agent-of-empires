@@ -93,10 +93,12 @@ pub fn run_codex_title_monitor(args: CodexTitleMonitorArgs) -> Result<()> {
 }
 
 pub fn run_monitor_notifications(args: MonitorNotificationsArgs) -> Result<()> {
+    crate::tmux::init_tmux_socket_name(Some(crate::tmux::socket_name_for_profile(&args.profile)));
     crate::tmux::notification_monitor::run_notification_monitor(&args.profile)
 }
 
 pub fn run_switch_session(args: SwitchSessionArgs) -> Result<()> {
+    crate::tmux::init_tmux_socket_name(Some(crate::tmux::socket_name_for_profile(&args.profile)));
     if args.back {
         crate::tmux::utils::switch_aoe_session_back(&args.profile, args.client_name.as_deref())
     } else if let Some(index) = args.index {

@@ -405,16 +405,6 @@ pub struct TmuxConfig {
     /// Mouse support mode (auto, enabled, disabled)
     #[serde(default)]
     pub mouse: TmuxMouseMode,
-
-    /// Dedicated tmux socket name AoE runs on (`tmux -L <name>`). `None` = the
-    /// default tmux socket (current behavior). A GLOBAL setting (not profile
-    /// overridable): all entry points share one tmux server so cross-profile
-    /// session switching keeps working. When set, AoE only sees sessions on this
-    /// socket -- sessions on the default socket will not appear until recreated
-    /// here. Defense-in-depth so unrelated tmux activity cannot disturb
-    /// AoE-managed sessions.
-    #[serde(default)]
-    pub socket_name: Option<String>,
 }
 
 impl Default for TmuxConfig {
@@ -422,7 +412,6 @@ impl Default for TmuxConfig {
         Self {
             status_bar: TmuxStatusBarMode::Auto,
             mouse: TmuxMouseMode::Auto,
-            socket_name: None,
         }
     }
 }

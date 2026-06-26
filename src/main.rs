@@ -34,15 +34,6 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Resolve AoE's tmux socket name once, before any command touches tmux, so
-    // every entry point (TUI, `aoe tmux ...` subcommands, hooks) shares one
-    // server. Best-effort: a missing/unreadable config means the default socket.
-    let tmux_socket_name = session::config::load_config()
-        .ok()
-        .flatten()
-        .and_then(|c| c.tmux.socket_name);
-    agent_of_empires::tmux::init_tmux_socket_name(tmux_socket_name);
-
     // Handle commands that don't need app data or migrations.
     // These work in read-only/sandboxed environments (e.g. Nix builds).
     match cli.command {
@@ -78,6 +69,13 @@ async fn main() -> Result<()> {
 
     let profile = session::resolve_profile(cli.profile);
     std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);
+    // Bind AoE's tmux socket to this profile so each profile/directory runs on
+    // its own tmux server. Done before any TUI/subcommand tmux work; the env var
+    // above lets spawned helpers (codex-title monitor, record-pane) resolve the
+    // same socket.
+    agent_of_empires::tmux::init_tmux_socket_name(Some(
+        agent_of_empires::tmux::socket_name_for_profile(&profile),
+    ));
     session::check_migration_hint(&profile);
 
     // TUI mode handles migrations with a spinner; CLI runs them silently
