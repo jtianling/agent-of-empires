@@ -18,14 +18,18 @@ AoE SHALL support a user-configurable tmux socket name via `TmuxConfig.tmux_sock
 - **AND** the user attaches to a managed session
 - **THEN** the attach and its keybinding/option setup SHALL target the same `-L <name>` socket
 
-### Requirement: Socket name editable in the settings TUI
+### Requirement: Socket name is a GLOBAL-only setting editable in the settings TUI
 
-The `tmux_socket_name` field SHALL be editable in the settings TUI like every other configurable field: a `FieldKey` variant, a `SettingField` entry, `apply_field_to_global()`/`apply_field_to_profile()` wiring, a `clear_profile_override()` case, and `TmuxConfigOverride` merge logic. The field SHALL carry help text noting that setting a socket name means AoE only sees sessions on that socket (pre-existing default-socket sessions will not appear until recreated there).
+The tmux socket name SHALL be a GLOBAL setting: all entry points must share one tmux server so cross-profile session switching keeps working, so it SHALL NOT be profile-overridable (not added to `TmuxConfigOverride`/`merge_configs()`). It SHALL be editable in the settings TUI via a `FieldKey` variant and a `SettingField` entry that is shown ONLY in the Global scope, applied through `apply_field_to_global()`. Blank input SHALL normalize to `None` (default socket). The field SHALL carry help text noting that setting a socket name means AoE only sees sessions on that socket (pre-existing default-socket sessions will not appear until recreated there) and that it takes effect on next launch.
 
-#### Scenario: Field is editable and persists
-- **WHEN** the user edits the tmux socket name in the settings TUI and saves
+#### Scenario: Field is editable in Global scope and persists
+- **WHEN** the user edits the tmux socket name in the Global settings scope and saves
 - **THEN** the value SHALL persist to config and be applied on the next startup
 
-#### Scenario: Profile override can be cleared
-- **WHEN** a profile sets a `tmux_socket_name` override and the user clears it
-- **THEN** the effective value SHALL fall back to the global config value via `merge_configs()`
+#### Scenario: Field is not offered as a profile override
+- **WHEN** the settings TUI is in the Profile or Repo scope
+- **THEN** the tmux socket name field SHALL NOT be shown (it is global-only)
+
+#### Scenario: Blank input clears to default socket
+- **WHEN** the user sets the tmux socket name to an empty/whitespace value
+- **THEN** the stored value SHALL be `None` (the default tmux socket)

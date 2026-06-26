@@ -727,6 +727,8 @@ impl SettingsView {
                     h.on_launch = None;
                 }
             }
+            // Global-only: no profile override to clear.
+            FieldKey::TmuxSocketName => {}
         }
 
         // Sync repo_config when in Repo scope

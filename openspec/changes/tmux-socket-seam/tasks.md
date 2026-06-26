@@ -1,30 +1,30 @@
 ## 1. Seam foundation
 
-- [ ] 1.1 In `src/tmux/mod.rs` add `static TMUX_SOCKET_NAME: OnceLock<Option<String>>`, `pub fn init_tmux_socket_name(name: Option<String>)`, and `resolved_socket_name()` (returns the configured name; under `#[cfg(test)]` lazily pins `aoe_test_<pid>` so it NEVER returns `None`).
-- [ ] 1.2 Add `pub(crate) fn tmux_command() -> Command` that builds `Command::new("tmux")` and appends `-L <name>` when `resolved_socket_name()` is `Some`.
-- [ ] 1.3 Replace the env-based `isolate_tmux_socket()` with one that pins the private label (via `init`/the cfg(test) path) AND `remove_var("TMUX")`/`("TMUX_PANE")`. Keep it `#[cfg(test)] pub(crate)`.
-- [ ] 1.4 Unit tests for the builder: configured name -> `-L name`; cfg(test) default -> `-L aoe_test_<pid>` even with no opt-in (assert on args; execute nothing).
+- [x] 1.1 In `src/tmux/mod.rs` add `static TMUX_SOCKET_NAME: OnceLock<Option<String>>`, `pub fn init_tmux_socket_name(name: Option<String>)`, and `resolved_socket_name()` (returns the configured name; under `#[cfg(test)]` lazily pins `aoe_test_<pid>` so it NEVER returns `None`).
+- [x] 1.2 Add `pub(crate) fn tmux_command() -> Command` (delegates to pure `build_tmux_command(Option<&str>)`) that appends `-L <name>` when a socket name is resolved.
+- [x] 1.3 Replace the env-based `isolate_tmux_socket()` with one that pins the private label AND `remove_var("TMUX")`/`("TMUX_PANE")`. Kept `#[cfg(test)] pub(crate)`.
+- [x] 1.4 Unit tests for the builder: configured name -> `-L name`; no name -> bare; cfg(test) default -> `-L aoe_test_<pid>` even with no opt-in (assert on args; execute nothing).
 
 ## 2. Route all tmux invocations through the seam
 
-- [ ] 2.1 Replace every production `Command::new("tmux")` (~74 sites in `src/tmux/{session,utils,status_bar,mod,notification_monitor}.rs`, `src/tui/{app,status_poller}.rs`, `src/db/reconcile.rs`, `src/process/mod.rs`) with `crate::tmux::tmux_command()` (or local `tmux_command()` within the module). Production behavior unchanged when no socket name set.
-- [ ] 2.2 Audit attach/keybinding/option paths (`src/cli/session.rs`, `src/tui/app.rs`, `src/tmux/status_bar.rs`) so `attach-session`, `setup_session_cycle_bindings`, and `set-option` calls also go through the seam and honor the socket name.
-- [ ] 2.3 Strengthen `tests/tmux_test_isolation_guard.rs`: fail on any bare `Command::new("tmux")` in production source outside `tmux_command()`; keep the destructive-command isolation marker check for tests.
+- [x] 2.1 Replaced all ~74 `Command::new("tmux")` sites (`src/tmux/{session,utils,status_bar,mod,notification_monitor}.rs`, `src/tui/{app,status_poller}.rs`, `src/db/reconcile.rs`, `src/process/mod.rs`) with the seam. Only the builder definition keeps a bare `Command::new("tmux")`.
+- [x] 2.2 Attach/keybinding/option paths honored: `Session::attach`, status-bar options, and the session-cycle bindings all build via the seam now; the guard (2.3) proves no bare tmux remains, so a configured socket is honored end-to-end. (`aoe tmux switch-session` invoked from bindings re-resolves the socket name on its own startup.)
+- [x] 2.3 Strengthened `tests/tmux_test_isolation_guard.rs`: `no_bare_tmux_command_outside_seam` + `integration_tests_pin_private_socket`.
 
 ## 3. Test isolation wiring
 
-- [ ] 3.1 `src/tmux/session.rs` + `src/tmux/utils.rs` tmux tests already call `isolate_tmux_socket()`; confirm they now go through the seam (`-L`) and stay `#[serial]`.
-- [ ] 3.2 `tests/tui_attach_detach.rs` `isolated_tmux()`: add `-L <unique>` (e.g. pid-based) in addition to clearing `$TMUX`/`$TMUX_PANE`; give the lifecycle test a pid-unique session name.
+- [x] 3.1 `src/tmux/session.rs` + `src/tmux/utils.rs` tmux tests go through the seam (`-L aoe_test_<pid>`) and remain `#[serial]`; `isolate_tmux_socket()` also clears `$TMUX`/`$TMUX_PANE`.
+- [x] 3.2 `tests/tui_attach_detach.rs` `isolated_tmux()` pins `-L aoe_test_attach_<pid>` and clears `$TMUX`/`$TMUX_PANE`; lifecycle test uses a pid-unique session name.
 
-## 4. Configurable socket name (feature 2)
+## 4. Configurable socket name (feature 2, GLOBAL-only)
 
-- [ ] 4.1 Add `tmux_socket_name: Option<String>` to `TmuxConfig` (`src/session/config.rs`, serde default `None`, update `Default`).
-- [ ] 4.2 At startup (after config load) call `crate::tmux::init_tmux_socket_name(resolved_config.tmux.tmux_socket_name.clone())`.
-- [ ] 4.3 Settings TUI: add `FieldKey` variant + `SettingField` entry (`src/tui/settings/fields.rs`) with help text about the "only sees sessions on that socket" caveat; wire `apply_field_to_global()` / `apply_field_to_profile()`; add `clear_profile_override()` case (`src/tui/settings/input.rs`).
-- [ ] 4.4 Add `tmux_socket_name` to `TmuxConfigOverride` in `src/session/profile_config.rs` with merge logic in `merge_configs()`.
+- [x] 4.1 Added `socket_name: Option<String>` to `TmuxConfig` (`src/session/config.rs`, serde default `None`, `Default` updated).
+- [x] 4.2 `main.rs` calls `agent_of_empires::tmux::init_tmux_socket_name(...)` right after CLI parse (best-effort `load_config`), covering all entry points incl. the early `aoe tmux ...` subcommands.
+- [x] 4.3 Settings TUI: `FieldKey::TmuxSocketName` + a Global-scope-only `SettingField` (OptionalText) with the "only sees sessions on this socket / takes effect next launch" help text; `apply_field_to_global` sets it (blank -> None); `clear_profile_override` no-op (global-only).
+- [x] 4.4 N/A by design: socket name is GLOBAL-only (all entry points must share one tmux server for cross-profile switching), so it is intentionally NOT added to `TmuxConfigOverride` / `merge_configs()`. The settings field is hidden outside Global scope to make this explicit.
 
 ## 5. Finalize and verify safely
 
-- [ ] 5.1 `cargo fmt`, `cargo clippy --all-targets` (no new warnings).
-- [ ] 5.2 Run ONLY the new pure builder/guard tests (assert built commands contain `-L <private>`; no tmux executed). Do NOT run the full `cargo test`, and do NOT run any destructive `tmux` subcommand on any server.
-- [ ] 5.3 If desired, a single OPTIONAL read-only sanity check may be run by the USER (not the agent) against a private socket only: `tmux -L aoe_test_probe new-session -d -s x \; kill-session -t x` -- never a bare/default `tmux`.
+- [x] 5.1 `cargo fmt` clean; `cargo clippy --all-targets` no new warnings (one pre-existing e2e doc-list warning untouched).
+- [x] 5.2 Ran only the pure builder/settings/guard tests (assert built commands carry `-L`; no tmux executed). Full `cargo test` and destructive `tmux` subcommands deliberately NOT run.
+- [ ] 5.3 OPTIONAL (user-run, not the agent): a read-only sanity check against a PRIVATE socket only -- `tmux -L aoe_test_probe new-session -d -s x \; kill-session -t x` -- never a bare/default `tmux`.

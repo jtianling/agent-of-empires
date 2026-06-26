@@ -69,6 +69,7 @@ pub enum FieldKey {
     // Tmux
     StatusBar,
     Mouse,
+    TmuxSocketName,
     // Session
     DefaultTool,
     CrossAgentTeamDefault,
@@ -709,7 +710,7 @@ fn build_tmux_fields(
     };
     let tmux_options = vec!["Auto".into(), "Enabled".into(), "Disabled".into()];
 
-    vec![
+    let mut fields = vec![
         SettingField {
             key: FieldKey::StatusBar,
             label: "Status Bar",
@@ -746,7 +747,24 @@ fn build_tmux_fields(
                 },
             ),
         },
-    ]
+    ];
+
+    // Socket name is a GLOBAL-only setting (all entry points must share one
+    // tmux server for cross-profile switching), so it is shown only in the
+    // Global scope and never as a profile override.
+    if scope == SettingsScope::Global {
+        fields.push(SettingField {
+            key: FieldKey::TmuxSocketName,
+            label: "Socket Name",
+            description: "Run AoE on a dedicated tmux server (tmux -L <name>). Empty = default socket. When set, AoE only sees sessions on this socket; existing default-socket sessions will not appear until recreated. Takes effect on next launch.",
+            value: FieldValue::OptionalText(global.tmux.socket_name.clone()),
+            category: SettingsCategory::Tmux,
+            has_override: false,
+            inherited_display: None,
+        });
+    }
+
+    fields
 }
 
 fn build_session_fields(
@@ -1200,6 +1218,10 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
                 _ => TmuxMouseMode::Disabled,
             };
         }
+        (FieldKey::TmuxSocketName, FieldValue::OptionalText(v)) => {
+            // Normalize empty input to None (default socket).
+            config.tmux.socket_name = v.as_ref().filter(|s| !s.trim().is_empty()).cloned();
+        }
         // Session
         (FieldKey::DefaultTool, FieldValue::Select { selected, .. }) => {
             config.session.default_tool =
@@ -1472,6 +1494,59 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
 mod tests {
     use super::*;
     use crate::session::{Config, ProfileConfig};
+
+    fn tmux_fields(scope: SettingsScope) -> Vec<SettingField> {
+        build_fields_for_category(
+            SettingsCategory::Tmux,
+            scope,
+            &Config::default(),
+            &ProfileConfig::default(),
+        )
+    }
+
+    #[test]
+    fn test_socket_name_is_global_only_field() {
+        // The tmux socket name is a global setting: shown in Global scope...
+        assert!(
+            tmux_fields(SettingsScope::Global)
+                .iter()
+                .any(|f| f.key == FieldKey::TmuxSocketName),
+            "socket name must be editable in Global scope"
+        );
+        // ...and never offered as a profile/repo override.
+        for scope in [SettingsScope::Profile, SettingsScope::Repo] {
+            assert!(
+                !tmux_fields(scope)
+                    .iter()
+                    .any(|f| f.key == FieldKey::TmuxSocketName),
+                "socket name must not appear as an override in {scope:?} scope"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_socket_name_normalizes_empty_to_none() {
+        let mut config = Config::default();
+
+        let set = SettingField {
+            key: FieldKey::TmuxSocketName,
+            label: "",
+            description: "",
+            value: FieldValue::OptionalText(Some("jt".to_string())),
+            category: SettingsCategory::Tmux,
+            has_override: false,
+            inherited_display: None,
+        };
+        apply_field_to_global(&set, &mut config);
+        assert_eq!(config.tmux.socket_name.as_deref(), Some("jt"));
+
+        let clear = SettingField {
+            value: FieldValue::OptionalText(Some("   ".to_string())),
+            ..set
+        };
+        apply_field_to_global(&clear, &mut config);
+        assert_eq!(config.tmux.socket_name, None, "blank input clears to None");
+    }
 
     #[test]
     fn test_profile_field_has_no_override_after_global_change() {
