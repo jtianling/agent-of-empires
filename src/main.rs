@@ -13,11 +13,21 @@ async fn main() -> Result<()> {
     let mut debug_log_warning: Option<String> = None;
     if std::env::var("AGENT_OF_EMPIRES_DEBUG").is_ok() {
         // Log to file to avoid corrupting the TUI on stderr.
+        //
+        // Append (not truncate): a single AoE action spawns several processes
+        // that all enable debug logging (the TUI, `add`, `session start`, the
+        // notification/codex-title monitors, and `__record-pane` on every hook).
+        // `File::create` truncates, so concurrent processes would clobber each
+        // other's log and leave it useless. Appending keeps one interleaved
+        // timeline; POSIX O_APPEND makes per-line writes atomic across processes.
         let log_path = agent_of_empires::session::get_app_dir().map(|d| d.join("debug.log"));
-        let log_file = log_path
-            .as_ref()
-            .ok()
-            .and_then(|p| std::fs::File::create(p).ok());
+        let log_file = log_path.as_ref().ok().and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+        });
         if let Some(file) = log_file {
             tracing_subscriber::fmt()
                 .with_env_filter("agent_of_empires=debug")
