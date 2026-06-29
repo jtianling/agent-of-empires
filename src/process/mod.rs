@@ -18,7 +18,15 @@ pub fn get_pane_pid(target: &str) -> Option<u32> {
         return None;
     }
 
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    // A dead pane (the command exited but `remain-on-exit` keeps it visible)
+    // reports `#{pane_pid}` as 0. Treat that as "no process": returning Some(0)
+    // here would feed pid 0 into kill_process_tree, whose descendant walk from 0
+    // covers the ENTIRE system process tree. Filter out 0 (and the init pid 1).
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()
+        .filter(|&pid| pid > 1)
 }
 
 /// Get the foreground process group leader PID for a given shell PID
@@ -60,9 +68,24 @@ pub fn get_process_comm(pid: u32) -> Option<String> {
     }
 }
 
+/// A pid that must never be used as the root of a kill: 0 is the kernel /
+/// dead-pane sentinel and 1 is init/launchd. Walking descendants from either
+/// would enumerate (and SIGTERM/SIGKILL) the entire system process tree.
+fn is_unsafe_kill_root(pid: u32) -> bool {
+    pid <= 1
+}
+
 /// Kill a process and all its descendants
 /// Sends SIGTERM first, then SIGKILL to any survivors
 pub fn kill_process_tree(pid: u32) {
+    // Hard guard against catastrophic kills. A dead tmux pane resolves to pane
+    // pid 0; without this, kill_process_tree(0) would tear down every process on
+    // the machine (including this one). Callers should already avoid pid <= 1,
+    // but this backstop makes the invariant unconditional.
+    if is_unsafe_kill_root(pid) {
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     {
         linux::kill_process_tree(pid);
@@ -77,5 +100,20 @@ pub fn kill_process_tree(pid: u32) {
     {
         let _ = pid;
         // No-op on unsupported platforms, fall back to tmux kill-session only
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_unsafe_kill_root() {
+        // 0 (kernel / dead-pane sentinel) and 1 (init/launchd) must be rejected
+        // so kill_process_tree never walks the whole system tree from them.
+        assert!(is_unsafe_kill_root(0));
+        assert!(is_unsafe_kill_root(1));
+        assert!(!is_unsafe_kill_root(2));
+        assert!(!is_unsafe_kill_root(99999));
     }
 }
