@@ -21,12 +21,12 @@ pub fn get_pane_pid(target: &str) -> Option<u32> {
     // A dead pane (the command exited but `remain-on-exit` keeps it visible)
     // reports `#{pane_pid}` as 0. Treat that as "no process": returning Some(0)
     // here would feed pid 0 into kill_process_tree, whose descendant walk from 0
-    // covers the ENTIRE system process tree. Filter out 0 (and the init pid 1).
+    // covers the ENTIRE system process tree. Reject 0 (and the init pid 1).
     String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
         .ok()
-        .filter(|&pid| pid > 1)
+        .filter(|&pid| !is_unsafe_kill_root(pid))
 }
 
 /// Get the foreground process group leader PID for a given shell PID
@@ -71,7 +71,12 @@ pub fn get_process_comm(pid: u32) -> Option<String> {
 /// A pid that must never be used as the root of a kill: 0 is the kernel /
 /// dead-pane sentinel and 1 is init/launchd. Walking descendants from either
 /// would enumerate (and SIGTERM/SIGKILL) the entire system process tree.
-fn is_unsafe_kill_root(pid: u32) -> bool {
+///
+/// The single source of truth for this invariant. Used both as the
+/// `kill_process_tree` backstop and to filter pids at their source (a dead tmux
+/// pane reports `pane_pid` 0), so a bad pid is dropped before it ever reaches a
+/// kill rather than relying on the backstop alone.
+pub fn is_unsafe_kill_root(pid: u32) -> bool {
     pid <= 1
 }
 

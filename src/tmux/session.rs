@@ -229,7 +229,11 @@ impl Session {
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
-                    .filter_map(|l| l.trim().parse().ok())
+                    .filter_map(|l| l.trim().parse::<u32>().ok())
+                    // A dead pane reports pane_pid 0; drop 0 (and init pid 1) at
+                    // the source so it never reaches kill_process_tree, whose
+                    // walk from 0 would target the whole system process tree.
+                    .filter(|&pid| !process::is_unsafe_kill_root(pid))
                     .collect()
             })
             .unwrap_or_default()
