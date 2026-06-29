@@ -460,9 +460,13 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
     }
     assert_eq!(pane_title, "Codex Wait Title");
 
+    // Drive Codex into a real Waiting state. A bare `› ` input prompt is Codex's
+    // IDLE prompt (see detect_codex_status / test_detect_codex_status_idle_at_prompt),
+    // so it must NOT be used here. An approval dialog ("Press enter to confirm")
+    // is a genuine Waiting signal that should flip the pane title to the ✋ hand.
     h.type_text_to_target(
         &tmux_name,
-        "printf '› Ask Codex to do anything\\n'; sleep 2",
+        "printf 'Press enter to confirm or esc to cancel\\n'; sleep 2",
     );
     h.send_keys_to_target(&tmux_name, "Enter");
 

@@ -636,6 +636,23 @@ last_seen_version = "{}"
         &self.binary_path
     }
 
+    /// Install a long-lived stub for an agent binary (e.g. "claude", "codex",
+    /// "gemini") into the harness stub dir so `which <name>` succeeds AND the
+    /// agent pane launched for it stays alive. The default `claude` stub exits
+    /// immediately; the restart/recovery tests need the instance's primary pane
+    /// to survive long enough to be tracked and then respawned with a resume
+    /// command, so they install a sleeping stub for the tool under test.
+    pub fn install_tool_stub(&self, name: &str) {
+        let stub = self.stub_path.join(name);
+        std::fs::write(&stub, "#!/bin/sh\nexec sleep 2147483647\n").expect("write tool stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod tool stub");
+        }
+    }
+
     pub fn tmux_socket_path(&self) -> &Path {
         &self.socket_path
     }

@@ -122,16 +122,18 @@ fn run_record_pane(
         .success()
 }
 
-fn add_and_start(h: &TuiTestHarness, title: &str) -> String {
+/// Add + start an instance whose primary agent is `tool` (claude/codex/gemini).
+///
+/// The instance tool must match the agent recorded for slot 0 in the test:
+/// `R` builds the primary pane's resume command from `self.tool`
+/// (`get_tool_command()`), so a mismatched tool -- or a `--cmd-override` that
+/// replaces the tool with a shell -- would suppress the very `--resume <id>`
+/// these tests assert on. A long-lived stub for `tool` is installed so the
+/// started primary pane survives to be tracked and respawned.
+fn add_and_start(h: &TuiTestHarness, title: &str, tool: &str) -> String {
+    h.install_tool_stub(tool);
     let project = h.project_path();
-    let add = h.run_cli(&[
-        "add",
-        project.to_str().unwrap(),
-        "-t",
-        title,
-        "--cmd-override",
-        "sh",
-    ]);
+    let add = h.run_cli(&["add", project.to_str().unwrap(), "-t", title, "-c", tool]);
     assert!(
         add.status.success(),
         "aoe add failed: {}",
@@ -269,7 +271,7 @@ fn r_resumes_every_tracked_pane_from_its_own_id() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_resume_all");
-    let instance_id = add_and_start(&h, "Multi Pane Resume All");
+    let instance_id = add_and_start(&h, "Multi Pane Resume All", "claude");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Multi Pane Resume All");
@@ -315,7 +317,7 @@ fn claude_pane_resume_command_has_resume_flag_and_no_exit_keys() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_claude_resume");
-    let instance_id = add_and_start(&h, "Claude Resume Cmd");
+    let instance_id = add_and_start(&h, "Claude Resume Cmd", "claude");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Claude Resume Cmd");
@@ -345,7 +347,7 @@ fn codex_pane_resume_command_uses_resume_subcommand() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_codex_resume");
-    let instance_id = add_and_start(&h, "Codex Resume Cmd");
+    let instance_id = add_and_start(&h, "Codex Resume Cmd", "codex");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Codex Resume Cmd");
@@ -381,7 +383,7 @@ fn single_tracked_pane_resumes_from_its_id() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_single_slot");
-    let instance_id = add_and_start(&h, "Single Slot Resume");
+    let instance_id = add_and_start(&h, "Single Slot Resume", "claude");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Single Slot Resume");
@@ -411,7 +413,7 @@ fn no_tracked_panes_restarts_primary_pane_fresh() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_no_slots");
-    let instance_id = add_and_start(&h, "No Slots Fallback");
+    let instance_id = add_and_start(&h, "No Slots Fallback", "claude");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "No Slots Fallback");
@@ -432,9 +434,9 @@ fn no_tracked_panes_restarts_primary_pane_fresh() {
     press_restart(&h);
 
     // Fallback: the primary @aoe_agent_pane is restarted fresh with the instance
-    // launch command (here the `sh` stub from `--cmd-override`), with no resume
-    // flag harvested from a nonexistent slot.
-    wait_for_pane_start_command_contains(&h, &primary, "sh");
+    // launch command (here the claude tool), with no resume flag harvested from a
+    // nonexistent slot.
+    wait_for_pane_start_command_contains(&h, &primary, "claude");
     let cmd = pane_start_command(&h, &primary);
     assert!(
         !cmd.contains("--resume"),
@@ -456,7 +458,7 @@ fn no_resume_pane_restarts_fresh_without_blocking_sibling() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_failure_isolation");
-    let instance_id = add_and_start(&h, "Failure Isolation");
+    let instance_id = add_and_start(&h, "Failure Isolation", "gemini");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Failure Isolation");
@@ -501,7 +503,7 @@ fn empty_native_session_id_restarts_pane_fresh() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_empty_id");
-    let instance_id = add_and_start(&h, "Empty Id Fresh");
+    let instance_id = add_and_start(&h, "Empty Id Fresh", "claude");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Empty Id Fresh");

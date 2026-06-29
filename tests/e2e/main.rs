@@ -33,4 +33,3 @@ mod profile_picker;
 mod sandbox;
 mod session_rename;
 mod tui_launch;
-mod unified_view;

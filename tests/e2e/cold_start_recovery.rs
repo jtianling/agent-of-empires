@@ -123,16 +123,15 @@ fn run_record_pane(
         .success()
 }
 
-fn add_and_start(h: &TuiTestHarness, title: &str) -> String {
+/// Add + start an instance whose primary agent is `tool`. The instance tool must
+/// match slot 0's recorded agent: recovery rebuilds the primary pane's resume
+/// command from `self.tool` (`get_tool_command()`), so a `--cmd-override` that
+/// swaps in a shell would suppress the `--resume <id>` these tests assert on. A
+/// long-lived stub for `tool` keeps the started primary pane alive to be tracked.
+fn add_and_start(h: &TuiTestHarness, title: &str, tool: &str) -> String {
+    h.install_tool_stub(tool);
     let project = h.project_path();
-    let add = h.run_cli(&[
-        "add",
-        project.to_str().unwrap(),
-        "-t",
-        title,
-        "--cmd-override",
-        "sh",
-    ]);
+    let add = h.run_cli(&["add", project.to_str().unwrap(), "-t", title, "-c", tool]);
     assert!(
         add.status.success(),
         "aoe add failed: {}",
@@ -226,6 +225,21 @@ fn slot_panes(db: &Path, instance_id: &str) -> Vec<String> {
         .collect()
 }
 
+/// Persisted `agent_slot.native_session_id` values for an instance, in ascending
+/// slot order (aligned element-for-element with [`slot_panes`]).
+fn slot_natives(db: &Path, instance_id: &str) -> Vec<String> {
+    let out = sqlite_query(
+        db,
+        &format!(
+            "SELECT native_session_id FROM agent_slot WHERE instance_id='{instance_id}' ORDER BY slot;"
+        ),
+    );
+    out.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn pane_start_command(h: &TuiTestHarness, pane_id: &str) -> String {
     h.tmux_display_message(pane_id, "#{pane_start_command}")
 }
@@ -274,7 +288,7 @@ fn wait_for_slot0_rebound(db: &Path, instance_id: &str, old: &str) -> String {
 }
 
 /// Seed a started instance with `slots.len()` tracked agent panes, each captured
-/// + reconciled into `agent_slot`, then return `(instance_id, session_name,
+/// and reconciled into `agent_slot`, then return `(instance_id, session_name,
 /// project_cwd, old_pane_ids)`. The home-view TUI is left running (sized large so
 /// the later recovery splits fit) and the managed session is alive on return.
 fn seed_recoverable(
@@ -282,7 +296,7 @@ fn seed_recoverable(
     title: &str,
     slots: &[&str],
 ) -> (String, String, String, Vec<String>) {
-    let instance_id = add_and_start(h, title);
+    let instance_id = add_and_start(h, title, "claude");
     let db = db_path(h);
     let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, title);
     let project = h.project_path().to_str().unwrap().to_string();
@@ -415,7 +429,25 @@ fn recover_rebuilds_session_with_n_panes_resumed_and_writes_back() {
     let new_panes = slot_panes(&db, &instance_id);
     assert_eq!(new_panes.len(), slots.len());
 
-    for (i, native_id) in slots.iter().enumerate() {
+    // The seed's live reconcile assigns slot numbers by ascending pane index,
+    // which need not match the order this test recorded the sessions in (for 3+
+    // panes a right-split lands at a lower index than an earlier one). So assert
+    // against each slot's OWN persisted native_session_id, read back by slot and
+    // aligned with `new_panes`, rather than the positional `slots[i]`. Recovery
+    // is correct as long as every slot's rebuilt pane resumes that slot's own
+    // session and all seeded sessions survive exactly once.
+    let new_natives = slot_natives(&db, &instance_id);
+    assert_eq!(new_natives.len(), slots.len());
+    let mut got_natives: Vec<&str> = new_natives.iter().map(String::as_str).collect();
+    let mut want_natives: Vec<&str> = slots.to_vec();
+    got_natives.sort_unstable();
+    want_natives.sort_unstable();
+    assert_eq!(
+        got_natives, want_natives,
+        "every seeded session must survive recovery exactly once"
+    );
+
+    for (i, native_id) in new_natives.iter().enumerate() {
         // Write-back: each slot points at a brand-new pane id.
         assert_ne!(
             new_panes[i], old_panes[i],
@@ -427,7 +459,7 @@ fn recover_rebuilds_session_with_n_panes_resumed_and_writes_back() {
             new_panes[i],
             live_panes
         );
-        // Each recovered pane resumes from its own native_session_id.
+        // Each recovered pane resumes from ITS slot's own native_session_id.
         wait_for_pane_start_command_contains(&h, &new_panes[i], &format!("--resume {native_id}"));
         let cmd = pane_start_command(&h, &new_panes[i]);
         assert!(
