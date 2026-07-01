@@ -1985,3 +1985,97 @@ fn test_o_key_clamps_cursor_when_list_shrinks() {
     let valid_max = env.view.flat_items.len().saturating_sub(1);
     assert!(env.view.cursor <= valid_max);
 }
+
+/// Render the full HomeView into a wide off-screen buffer and return the last
+/// row (the status bar) as a single string.
+fn render_status_bar_text(view: &mut HomeView) -> String {
+    use crate::tui::styles::Theme;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let width: u16 = 120;
+    let height: u16 = 20;
+    let theme = Theme::default();
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &theme, None))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let y = height - 1;
+    (0..width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect::<String>()
+}
+
+#[test]
+#[serial]
+fn test_status_bar_shows_sort_label_for_non_manual_order() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.sort_order = SortOrder::Newest;
+
+    let status = render_status_bar_text(&mut env.view);
+    assert!(
+        status.contains("Sort: Newest"),
+        "status bar should show the sort label, got: {status:?}"
+    );
+    assert!(
+        !status.contains("J/K"),
+        "non-manual order should not show the J/K move hint, got: {status:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_bar_shows_move_hint_in_manual_order() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.sort_order = SortOrder::Manual;
+    env.view.rebuild_flat_items();
+
+    let status = render_status_bar_text(&mut env.view);
+    assert!(
+        status.contains("Sort: Manual"),
+        "status bar should show the Manual label, got: {status:?}"
+    );
+    assert!(
+        status.contains("J/K") && status.contains("Move"),
+        "manual order should show the J/K move hint, got: {status:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_bar_sort_label_updates_after_cycling() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    assert_eq!(env.view.sort_order, SortOrder::Newest);
+
+    let status = render_status_bar_text(&mut env.view);
+    assert!(status.contains("Sort: Newest"), "got: {status:?}");
+    assert!(!status.contains("J/K"), "got: {status:?}");
+
+    // Cycle Newest -> Oldest via the `o` key and re-render.
+    env.view.handle_key(key(KeyCode::Char('o')));
+    let status = render_status_bar_text(&mut env.view);
+    assert!(
+        status.contains("Sort: Oldest"),
+        "label should reflect the cycled order, got: {status:?}"
+    );
+
+    // Cycle through to Manual; the move hint should then appear.
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
+    assert_eq!(env.view.sort_order, SortOrder::Manual);
+    let status = render_status_bar_text(&mut env.view);
+    assert!(status.contains("Sort: Manual"), "got: {status:?}");
+    assert!(
+        status.contains("J/K") && status.contains("Move"),
+        "got: {status:?}"
+    );
+}

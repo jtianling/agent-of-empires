@@ -8,6 +8,7 @@ use super::{
     get_indent, HomeView, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR, ICON_EXPANDED, ICON_IDLE,
     ICON_RUNNING, ICON_STARTING, ICON_STOPPED, ICON_UNKNOWN, ICON_WAITING,
 };
+use crate::session::config::SortOrder;
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
 use crate::tui::styles::Theme;
@@ -552,8 +553,35 @@ impl HomeView {
             }
         }
 
-        let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.selection));
-        frame.render_widget(status, area);
+        // Right-aligned sort indicator: `o Sort: <label>`, plus a `J/K Move`
+        // hint only in Manual (the sole mode where J/K reordering is active).
+        let mut sort_spans = vec![
+            Span::styled(" o", key_style),
+            Span::styled(format!(" Sort: {}", self.sort_order.label()), desc_style),
+        ];
+        if self.sort_order == SortOrder::Manual {
+            sort_spans.extend([
+                Span::styled(" · ", sep_style),
+                Span::styled("J/K", key_style),
+                Span::styled(" Move", desc_style),
+            ]);
+        }
+        sort_spans.push(Span::styled(" ", desc_style));
+        let sort_line = Line::from(sort_spans);
+
+        // Split into a flexible left region (existing hints, truncates first)
+        // and a fixed-width right region (sort indicator) so they never overlap.
+        let sort_width = sort_line.width() as u16;
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(sort_width)])
+            .split(area);
+
+        let bar_bg = Style::default().bg(theme.selection);
+        let left = Paragraph::new(Line::from(spans)).style(bar_bg);
+        frame.render_widget(left, chunks[0]);
+        let right = Paragraph::new(sort_line).style(bar_bg);
+        frame.render_widget(right, chunks[1]);
     }
 
     fn render_update_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme, info: &UpdateInfo) {
