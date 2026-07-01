@@ -21,10 +21,21 @@ const AGENT_DIRS: &[&str] = &[
     ".agents",
 ];
 
-/// Well-known root-level agent config files that should be synced to worktrees.
-/// These files are typically `.gitignore`'d and contain project-level instructions
-/// for AI agents.
-const AGENT_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
+/// Well-known agent config files that should be synced to worktrees.
+/// These files are typically `.gitignore`'d and contain project-level
+/// instructions or MCP config for AI agents.
+///
+/// Entries may be nested relative paths (a file inside an agent directory, e.g.
+/// `.codex/config.toml`), not only repo-root files. The sync step creates the
+/// target's parent directory before copying so nested entries land correctly.
+const AGENT_FILES: &[&str] = &[
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".mcp.json",
+    "opencode.json",
+    "opencode.jsonc",
+    ".codex/config.toml",
+];
 
 use error::{GitError, Result};
 use template::{resolve_template, TemplateVars};
@@ -41,6 +52,30 @@ fn is_tracked(repo_path: &Path, path: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Returns `true` if any intermediate parent component of `rel_path` under
+/// `base` (every component except the final one) exists and is a symlink.
+///
+/// Nested `AGENT_FILES` entries (e.g. `.codex/config.toml`) must not be synced
+/// or cleaned up through a symlinked ancestor: writing or removing the final
+/// path would follow the symlink and touch a file outside the worktree. The
+/// `is_tracked` git check does not protect against this because git does not
+/// traverse symlinks. Root-level entries have no intermediate components, so
+/// this always returns `false` for them.
+fn has_symlinked_ancestor(base: &Path, rel_path: &str) -> bool {
+    let components: Vec<_> = Path::new(rel_path).components().collect();
+    let mut current = base.to_path_buf();
+    for comp in components.iter().take(components.len().saturating_sub(1)) {
+        current = current.join(comp);
+        if std::fs::symlink_metadata(&current)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Recursively copy a directory and all its contents.
@@ -308,6 +343,29 @@ impl GitWorktree {
             if is_tracked(source_dir, file_name) {
                 continue;
             }
+            // Never sync a nested entry through a symlinked ancestor: copying
+            // would follow the symlink and write outside the worktree.
+            if has_symlinked_ancestor(worktree_dir, file_name) {
+                tracing::warn!(
+                    "Skipping agent file {} in worktree: parent path contains a symlink",
+                    file_name
+                );
+                continue;
+            }
+
+            // Nested entries (e.g. `.codex/config.toml`) need their parent
+            // directory created first; for root-level files the parent is the
+            // worktree root, which already exists, so this is a no-op.
+            if let Some(parent) = target_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!(
+                        "Failed to create parent dir for agent file {} in worktree: {}",
+                        file_name,
+                        e
+                    );
+                    continue;
+                }
+            }
 
             let copy_result = if is_symlink {
                 std::fs::read_link(&source_path)
@@ -361,6 +419,17 @@ impl GitWorktree {
                 continue;
             }
             if is_tracked(worktree_dir, file_name) {
+                continue;
+            }
+            // Never remove a nested entry through a symlinked ancestor: it would
+            // delete a file outside the worktree. Leave it and force worktree
+            // removal instead (which unlinks the symlink, not its target).
+            if has_symlinked_ancestor(worktree_dir, file_name) {
+                tracing::warn!(
+                    "Skipping cleanup of agent file {}: parent path contains a symlink",
+                    file_name
+                );
+                all_ok = false;
                 continue;
             }
             if let Err(e) = std::fs::remove_file(&file_path) {
@@ -1609,7 +1678,7 @@ mod tests {
 
         std::fs::write(
             repo_path.join(".gitignore"),
-            ".claude\n.codex\n.agents\nCLAUDE.md\nAGENTS.md\n",
+            ".claude\n.codex\n.agents\nCLAUDE.md\nAGENTS.md\n.mcp.json\nopencode.json\nopencode.jsonc\n",
         )
         .unwrap();
 
@@ -1628,6 +1697,8 @@ mod tests {
         // Create agent config files
         std::fs::write(repo_path.join("CLAUDE.md"), "# Claude instructions").unwrap();
         std::fs::write(repo_path.join("AGENTS.md"), "# Agents instructions").unwrap();
+        std::fs::write(repo_path.join(".mcp.json"), "{\"mcpServers\":{}}").unwrap();
+        std::fs::write(repo_path.join("opencode.json"), "{\"mcp\":{}}").unwrap();
 
         // Create .agents directory
         let agents_dir = repo_path.join(".agents");
@@ -1707,6 +1778,255 @@ mod tests {
         assert!(result);
         assert!(!worktree_dir.path().join("CLAUDE.md").exists());
         assert!(!worktree_dir.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn test_sync_agent_files_copies_mcp_json() {
+        let (_dir, repo_path) = setup_repo_with_agent_files();
+        let target_dir = TempDir::new().unwrap();
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        assert!(target_dir.path().join(".mcp.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(target_dir.path().join(".mcp.json")).unwrap(),
+            "{\"mcpServers\":{}}"
+        );
+    }
+
+    #[test]
+    fn test_sync_agent_files_copies_opencode_json() {
+        let (_dir, repo_path) = setup_repo_with_agent_files();
+        let target_dir = TempDir::new().unwrap();
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        assert!(target_dir.path().join("opencode.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(target_dir.path().join("opencode.json")).unwrap(),
+            "{\"mcp\":{}}"
+        );
+    }
+
+    /// Set up a repo where `.codex/` is partially tracked (so the agent-directory
+    /// sync skips it) but `.codex/config.toml` itself is untracked. The nested
+    /// file entry in `AGENT_FILES` must still deliver `config.toml`, creating the
+    /// `.codex/` dir in the worktree.
+    fn setup_repo_with_nested_codex() -> (TempDir, PathBuf) {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+
+        // Ignore only the nested config file, leaving other .codex content trackable.
+        std::fs::write(repo_path.join(".gitignore"), ".codex/config.toml\n").unwrap();
+
+        let codex_dir = repo_path.join(".codex");
+        std::fs::create_dir(&codex_dir).unwrap();
+        std::fs::write(codex_dir.join("tracked.txt"), "tracked").unwrap();
+        std::fs::write(codex_dir.join("config.toml"), "[codex]").unwrap();
+
+        // Track .gitignore and .codex/tracked.txt so .codex is partially tracked.
+        {
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(".gitignore")).unwrap();
+            index.add_path(Path::new(".codex/tracked.txt")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Add tracked codex",
+                &tree,
+                &[&head],
+            )
+            .unwrap();
+        }
+
+        (dir, repo_path)
+    }
+
+    #[test]
+    fn test_sync_agent_files_copies_nested_codex_config() {
+        let (_dir, repo_path) = setup_repo_with_nested_codex();
+        let target_dir = TempDir::new().unwrap();
+
+        // Sanity: the agent-dir sync would skip .codex because it is tracked.
+        assert!(is_tracked(&repo_path, ".codex"));
+        // ...but the nested config.toml itself is not tracked.
+        assert!(!is_tracked(&repo_path, ".codex/config.toml"));
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        let nested = target_dir.path().join(".codex/config.toml");
+        assert!(
+            nested.exists(),
+            "nested .codex/config.toml should be synced"
+        );
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "[codex]");
+    }
+
+    #[test]
+    fn test_has_symlinked_ancestor() {
+        let base = TempDir::new().unwrap();
+
+        // Root-level entries have no intermediate components.
+        assert!(!has_symlinked_ancestor(base.path(), ".mcp.json"));
+
+        // Real nested directory ancestor is fine.
+        std::fs::create_dir(base.path().join(".codex")).unwrap();
+        assert!(!has_symlinked_ancestor(base.path(), ".codex/config.toml"));
+
+        // A symlinked ancestor is detected.
+        let external = TempDir::new().unwrap();
+        std::fs::remove_dir(base.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(external.path(), base.path().join(".codex")).unwrap();
+        assert!(has_symlinked_ancestor(base.path(), ".codex/config.toml"));
+    }
+
+    #[test]
+    fn test_sync_agent_files_skips_symlinked_ancestor() {
+        // Source repo has an untracked .codex/config.toml the sync would copy.
+        let (_dir, repo_path) = setup_repo_with_nested_codex();
+        let target_dir = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+
+        // In the worktree, .codex is a symlink pointing outside the worktree.
+        std::os::unix::fs::symlink(external.path(), target_dir.path().join(".codex")).unwrap();
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        // The sync must NOT follow the symlink and write config.toml externally.
+        assert!(
+            !external.path().join("config.toml").exists(),
+            "sync must not write a nested file through a symlinked ancestor"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_agent_files_skips_symlinked_ancestor() {
+        let worktree = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        std::fs::write(external.path().join("config.toml"), "EXTERNAL").unwrap();
+
+        // .codex in the worktree is a symlink to an external directory.
+        std::os::unix::fs::symlink(external.path(), worktree.path().join(".codex")).unwrap();
+
+        GitWorktree::cleanup_agent_config_from_worktree(worktree.path());
+
+        // The external file must survive: cleanup must never delete a nested
+        // entry through a symlinked ancestor (the `.codex` symlink itself may be
+        // unlinked, but its target and contents must be left untouched).
+        assert!(
+            external.path().join("config.toml").exists(),
+            "cleanup must not delete a nested file through a symlinked ancestor"
+        );
+    }
+
+    #[test]
+    fn test_sync_agent_files_does_not_overwrite_existing() {
+        let (_dir, repo_path) = setup_repo_with_agent_files();
+        let target_dir = TempDir::new().unwrap();
+
+        // Pre-existing .mcp.json in the worktree must not be overwritten.
+        std::fs::write(target_dir.path().join(".mcp.json"), "PRE-EXISTING").unwrap();
+
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        assert_eq!(
+            std::fs::read_to_string(target_dir.path().join(".mcp.json")).unwrap(),
+            "PRE-EXISTING"
+        );
+    }
+
+    #[test]
+    fn test_sync_agent_files_skips_tracked_mcp_json() {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap().to_path_buf();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+
+        // Track .mcp.json (no .gitignore entry).
+        std::fs::write(repo_path.join(".mcp.json"), "{\"tracked\":true}").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".mcp.json")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &repo.signature().unwrap(),
+            &repo.signature().unwrap(),
+            "Add tracked .mcp.json",
+            &tree,
+            &[&head],
+        )
+        .unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        GitWorktree::sync_agent_config_to_worktree(&repo_path, target_dir.path());
+
+        // Tracked file must NOT be copied (git worktree already provides it).
+        assert!(!target_dir.path().join(".mcp.json").exists());
+
+        drop(dir);
+    }
+
+    #[test]
+    fn test_cleanup_agent_files_removes_mcp_and_nested_codex() {
+        let worktree_dir = TempDir::new().unwrap();
+        let repo = git2::Repository::init(worktree_dir.path()).unwrap();
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+
+        std::fs::write(
+            worktree_dir.path().join(".gitignore"),
+            ".mcp.json\n.codex/config.toml\n",
+        )
+        .unwrap();
+
+        // Untracked (gitignored) files that AoE may have copied in.
+        std::fs::write(worktree_dir.path().join(".mcp.json"), "{}").unwrap();
+        let codex_dir = worktree_dir.path().join(".codex");
+        std::fs::create_dir(&codex_dir).unwrap();
+        std::fs::write(codex_dir.join("config.toml"), "[codex]").unwrap();
+
+        // A tracked file that must be left alone.
+        std::fs::write(worktree_dir.path().join("AGENTS.md"), "# tracked").unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(".gitignore")).unwrap();
+            index.add_path(Path::new("AGENTS.md")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        let result = GitWorktree::cleanup_agent_config_from_worktree(worktree_dir.path());
+
+        assert!(result);
+        assert!(!worktree_dir.path().join(".mcp.json").exists());
+        assert!(!worktree_dir.path().join(".codex/config.toml").exists());
+        // Tracked file left in place.
+        assert!(worktree_dir.path().join("AGENTS.md").exists());
     }
 
     #[test]
