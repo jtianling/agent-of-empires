@@ -1052,7 +1052,7 @@ impl HomeView {
             }
         }
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
         self.search_matches = scored.into_iter().map(|(idx, _)| idx).collect();
         // Clamp match_index in case matches shrank
         if self.search_matches.is_empty() {
@@ -1107,7 +1107,7 @@ impl HomeView {
             }
         }
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
         self.search_matches = scored.into_iter().map(|(idx, _)| idx).collect();
 
         if let Some(&best) = self.search_matches.first() {

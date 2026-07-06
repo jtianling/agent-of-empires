@@ -158,10 +158,10 @@ impl DiffView {
                     state.selected -= 1;
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if state.selected < state.branches.len().saturating_sub(1) {
-                    state.selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j')
+                if state.selected < state.branches.len().saturating_sub(1) =>
+            {
+                state.selected += 1;
             }
             _ => {}
         }
