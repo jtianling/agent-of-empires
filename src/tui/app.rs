@@ -419,11 +419,11 @@ impl App {
         // Global keybindings
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL)
-            | (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                if !self.home.has_dialog() {
-                    self.should_quit = true;
-                    return Ok(());
-                }
+            | (KeyCode::Char('q'), KeyModifiers::NONE)
+                if !self.home.has_dialog() =>
+            {
+                self.should_quit = true;
+                return Ok(());
             }
             _ => {}
         }
@@ -706,36 +706,17 @@ impl App {
 
         let tmux_session = instance.tmux_session()?;
 
-        // Determine whether the agent pane needs to be (re)started.
-        // Grace period: skip for freshly started/respawned instances (the brief
-        // bash wrapper phase would otherwise trigger is_pane_running_shell).
+        // Determine whether the agent pane needs to be (re)started. Attaching
+        // must preserve whatever is currently in the pane -- a running agent,
+        // or the shell the pane-died hook dropped into after the agent exited
+        // -- so only a missing session or a truly dead pane triggers a restart.
         let is_starting = matches!(
             instance.status,
             crate::session::Status::Starting | crate::session::Status::Restarting
         );
         let session_exists = tmux_session.exists();
         let multi_pane = session_exists && tmux_session.pane_count() > 1;
-
-        // For multi-pane sessions the is_pane_running_shell check is unreliable:
-        // user-created shell panes (Ctrl+B %) are legitimate and should not
-        // trigger a restart. Only restart when the agent pane itself is dead.
-        // Also trust hook status over shell detection (wrapper scripts like
-        // Devbox run agents via shell, making is_pane_running_shell unreliable).
-        //
-        // Note: we intentionally do NOT freshness-gate this read. The purpose
-        // here is "does this instance have a hook-based agent that installed
-        // a status file at all?", which is a stable fact even after the
-        // status value itself goes stale. Gating on freshness would cause
-        // spurious restarts on long-idle hook-based agents, which is the
-        // opposite of what this code guards against.
-        let hook_tracked = crate::hooks::read_hook_status(&instance.id).is_some();
-        let needs_restart = !is_starting
-            && (!session_exists
-                || tmux_session.is_pane_dead()
-                || (!multi_pane
-                    && !hook_tracked
-                    && !instance.expects_shell()
-                    && tmux_session.is_pane_running_shell()));
+        let needs_restart = !is_starting && (!session_exists || tmux_session.is_pane_dead());
 
         if needs_restart {
             if multi_pane {
@@ -819,6 +800,7 @@ impl App {
                         &session_name,
                         &inst.project_path,
                         &right_cmd,
+                        right_tool != "shell",
                     ) {
                         tracing::warn!("Failed to split right pane: {}", e);
                     }

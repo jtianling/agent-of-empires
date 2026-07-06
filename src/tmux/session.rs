@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use super::{
     get_cached_pane_info, refresh_session_cache, session_exists_from_cache,
     utils::{
-        append_remain_on_exit_args, append_store_pane_id_args, append_store_project_path_args,
-        get_agent_pane_id, is_pane_dead, is_pane_running_shell,
+        append_pane_died_hook_args, append_remain_on_exit_args, append_store_pane_id_args,
+        append_store_project_path_args, get_agent_pane_id, is_pane_dead, is_pane_running_shell,
     },
     SESSION_PREFIX,
 };
@@ -61,21 +61,29 @@ impl Session {
     }
 
     pub fn create(&self, working_dir: &str, command: Option<&str>) -> Result<()> {
-        self.create_with_size(working_dir, command, None)
+        self.create_with_size(working_dir, command, None, true)
     }
 
+    /// Create the session. `remain_on_exit` keeps the pane alive when its
+    /// process exits so the pane-died hook can drop it into a shell; pass
+    /// `false` for panes that already run a shell (exit should close them
+    /// directly instead of respawning another shell).
     pub fn create_with_size(
         &self,
         working_dir: &str,
         command: Option<&str>,
         size: Option<(u16, u16)>,
+        remain_on_exit: bool,
     ) -> Result<()> {
         if self.exists() {
             return Ok(());
         }
 
         let mut args = build_create_args(&self.name, working_dir, command, size);
-        append_remain_on_exit_args(&mut args, &self.name);
+        if remain_on_exit {
+            append_remain_on_exit_args(&mut args, &self.name);
+        }
+        append_pane_died_hook_args(&mut args, &self.name);
         append_store_pane_id_args(&mut args, &self.name);
         append_store_project_path_args(&mut args, &self.name, working_dir);
 
@@ -248,9 +256,14 @@ impl Session {
             .unwrap_or(0)
     }
 
-    pub fn respawn_agent_pane(&self, command: &str, working_dir: &str) -> Result<()> {
+    pub fn respawn_agent_pane(
+        &self,
+        command: &str,
+        working_dir: &str,
+        remain_on_exit: bool,
+    ) -> Result<()> {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
-        respawn_pane_target(&target, command, working_dir)
+        respawn_pane_target(&target, command, working_dir, remain_on_exit)
     }
 
     /// Send a message to the agent, handling multi-line text with Shift+Enter
@@ -379,10 +392,24 @@ fn clear_cached_capture(session_name: &str) {
 
 /// Respawn an explicit tmux pane target (e.g. `%37`) with `command`, killing
 /// the current pane process first (`respawn-pane -k`) and running in `working_dir`.
-pub fn respawn_pane_target(pane: &str, command: &str, working_dir: &str) -> Result<()> {
-    let output = crate::tmux::tmux_command()
-        .args(["respawn-pane", "-k", "-c", working_dir, "-t", pane, command])
-        .output()?;
+/// When `remain_on_exit` is set, re-enables remain-on-exit on the pane (the
+/// pane-died shell-fallback hook turns it off when it fires); pass `false`
+/// for commands that are themselves a shell.
+pub fn respawn_pane_target(
+    pane: &str,
+    command: &str,
+    working_dir: &str,
+    remain_on_exit: bool,
+) -> Result<()> {
+    let mut args: Vec<String> = ["respawn-pane", "-k", "-c", working_dir, "-t", pane, command]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if remain_on_exit {
+        append_remain_on_exit_args(&mut args, pane);
+    }
+
+    let output = crate::tmux::tmux_command().args(&args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -422,9 +449,15 @@ pub fn send_keys_to_pane_target(pane: &str, keys: &[&str]) -> Result<()> {
 }
 
 /// Split an existing session's window horizontally and run a command in the new
-/// right pane. Sets `remain-on-exit on` on the new pane so it stays visible if
-/// the command exits.
-pub fn split_window_right(session_name: &str, working_dir: &str, command: &str) -> Result<()> {
+/// right pane. When `remain_on_exit` is set, the new pane stays alive if the
+/// command exits (letting the pane-died hook drop it into a shell); pass
+/// `false` for panes that already run a shell.
+pub fn split_window_right(
+    session_name: &str,
+    working_dir: &str,
+    command: &str,
+    remain_on_exit: bool,
+) -> Result<()> {
     let mut args = vec![
         "split-window".to_string(),
         "-h".to_string(),
@@ -438,7 +471,9 @@ pub fn split_window_right(session_name: &str, working_dir: &str, command: &str) 
     // Set remain-on-exit on the new (right) pane. After split-window the new
     // pane is the active pane, so we can target it without an explicit pane ID
     // by using the session name (which resolves to the active pane).
-    append_remain_on_exit_args(&mut args, session_name);
+    if remain_on_exit {
+        append_remain_on_exit_args(&mut args, session_name);
+    }
 
     // Select the original (left) pane back so that the user lands on the agent pane
     args.extend([
@@ -473,6 +508,7 @@ pub fn split_window_right_capture_pane(
     session_name: &str,
     working_dir: &str,
     command: &str,
+    remain_on_exit: bool,
 ) -> Result<String> {
     let mut args = vec![
         "split-window".to_string(),
@@ -487,7 +523,9 @@ pub fn split_window_right_capture_pane(
         command.to_string(),
     ];
 
-    append_remain_on_exit_args(&mut args, session_name);
+    if remain_on_exit {
+        append_remain_on_exit_args(&mut args, session_name);
+    }
 
     args.extend([
         ";".to_string(),
@@ -629,6 +667,109 @@ mod tests {
         // Clean up
         let _ = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
+            .output();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_pane_died_hook_drops_pane_into_shell() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        crate::tmux::isolate_tmux_socket();
+
+        let id = format!("deadfall{}", std::process::id());
+        let session = Session::new(&id, "test_deadfall").expect("session");
+        session
+            .create("/tmp", Some("sleep 1"))
+            .expect("create session");
+        let name = Session::generate_name(&id, "test_deadfall");
+
+        // After the command exits, the pane-died hook should respawn the pane
+        // into the user's shell instead of leaving a dead pane.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut in_shell = false;
+        while std::time::Instant::now() < deadline {
+            if crate::tmux::utils::is_pane_running_shell(&name) {
+                in_shell = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(in_shell, "pane should fall back to a shell after exit");
+        assert!(
+            !crate::tmux::utils::is_pane_dead(&name),
+            "pane should not stay dead after the fallback hook fires"
+        );
+
+        // Exiting the fallback shell should close the pane and end the
+        // session (the hook turned remain-on-exit off).
+        let _ = crate::tmux::tmux_command()
+            .args(["send-keys", "-t", &name, "exit", "Enter"])
+            .output();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut gone = false;
+        while std::time::Instant::now() < deadline {
+            let exists = crate::tmux::tmux_command()
+                .args(["has-session", "-t", &name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !exists {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(gone, "session should end when the fallback shell exits");
+
+        let _ = crate::tmux::tmux_command()
+            .args(["kill-session", "-t", &name])
+            .output();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_shell_pane_closes_on_single_exit() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        crate::tmux::isolate_tmux_socket();
+
+        let id = format!("shellexit{}", std::process::id());
+        let session = Session::new(&id, "test_shellexit").expect("session");
+        // Shell sessions are created without remain-on-exit: a single exit
+        // must close the pane (and session) with no fallback-shell respawn.
+        session
+            .create_with_size("/tmp", Some("sh"), Some((80, 24)), false)
+            .expect("create session");
+        let name = Session::generate_name(&id, "test_shellexit");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = crate::tmux::tmux_command()
+            .args(["send-keys", "-t", &name, "exit", "Enter"])
+            .output();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut gone = false;
+        while std::time::Instant::now() < deadline {
+            let exists = crate::tmux::tmux_command()
+                .args(["has-session", "-t", &name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !exists {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(gone, "shell session should end after a single exit");
+
+        let _ = crate::tmux::tmux_command()
+            .args(["kill-session", "-t", &name])
             .output();
     }
 
@@ -859,7 +1000,21 @@ mod tests {
             .map(|s| s.trim().to_string())
             .expect("pane id");
 
-        respawn_pane_target(&pane_id, "sleep 99", "/tmp").expect("respawn target");
+        respawn_pane_target(&pane_id, "sleep 99", "/tmp", true).expect("respawn target");
+
+        // respawn_pane_target must re-enable remain-on-exit (the pane-died
+        // hook turns it off when it fires).
+        let remain = crate::tmux::tmux_command()
+            .args(["show-options", "-p", "-t", &pane_id, "remain-on-exit"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        assert!(
+            remain.contains("on"),
+            "respawned pane should have remain-on-exit on, got {:?}",
+            remain
+        );
 
         let start_cmd = crate::tmux::tmux_command()
             .args([

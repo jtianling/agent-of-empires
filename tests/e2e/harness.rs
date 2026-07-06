@@ -370,8 +370,11 @@ last_seen_version = "{}"
             command
         };
 
+        // stdin must stay open (piped, never written): with a closed stdin,
+        // BSD `script` forwards the EOF as ^D into the attached pane, which
+        // cleanly exits any interactive shell running there.
         let child = command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -423,8 +426,10 @@ last_seen_version = "{}"
             command
         };
 
+        // Keep stdin open (see attach_control_client) so `script` never
+        // forwards an EOF-as-^D keystroke into the attached pane.
         command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -472,8 +477,10 @@ last_seen_version = "{}"
             command.env_remove("TMUX");
         }
 
+        // Keep stdin open (see attach_control_client) so `script` never
+        // forwards an EOF-as-^D keystroke into the attached pane.
         command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

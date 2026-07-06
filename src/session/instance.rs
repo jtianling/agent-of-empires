@@ -514,7 +514,12 @@ impl Instance {
 
         let cmd = self.build_agent_command(None);
         tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
-        session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
+        session.create_with_size(
+            &self.project_path,
+            cmd.as_deref(),
+            size,
+            !self.expects_shell(),
+        )?;
 
         self.run_auto_confirm();
 
@@ -999,7 +1004,7 @@ impl Instance {
             .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
 
         session.kill_agent_pane_process_tree();
-        session.respawn_agent_pane(&cmd, &self.project_path)?;
+        session.respawn_agent_pane(&cmd, &self.project_path, !self.expects_shell())?;
 
         self.run_auto_confirm();
 
@@ -1785,7 +1790,9 @@ impl Instance {
 
         tmux::kill_pane_process_tree_target(tmux_pane);
 
-        if let Err(err) = tmux::respawn_pane_target(tmux_pane, &command, cwd) {
+        if let Err(err) =
+            tmux::respawn_pane_target(tmux_pane, &command, cwd, !pane_agent_is_shell(agent))
+        {
             return PaneResumeOutcome::Error(err.to_string());
         }
 
@@ -1794,6 +1801,16 @@ impl Instance {
         } else {
             PaneResumeOutcome::DegradedToFresh
         }
+    }
+}
+
+/// Whether a tracked pane's recorded agent is a plain shell. Shell panes
+/// should close when their process exits instead of getting the pane-died
+/// fallback (which would respawn another shell).
+fn pane_agent_is_shell(agent: &str) -> bool {
+    match crate::agents::get_agent(agent) {
+        Some(def) => def.name == "shell" || crate::tmux::utils::is_shell_command(def.binary),
+        None => crate::tmux::utils::is_shell_command(agent),
     }
 }
 
@@ -1843,7 +1860,9 @@ fn rebuild_recovery_panes(
     paired.push((ordered[0].clone(), Some(primary_pane)));
 
     for slot in ordered.iter().skip(1) {
-        match tmux::split_window_right_capture_pane(session_name, &slot.cwd, "") {
+        // Placeholder pane runs the default shell until the resume flow
+        // respawns it with the slot's agent command, so no remain-on-exit yet.
+        match tmux::split_window_right_capture_pane(session_name, &slot.cwd, "", false) {
             Ok(pane_id) => paired.push((slot.clone(), Some(pane_id))),
             Err(e) => {
                 tracing::warn!(

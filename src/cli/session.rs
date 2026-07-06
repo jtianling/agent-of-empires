@@ -197,7 +197,12 @@ async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
         .build_agent_command(None)
         .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", inst.tool))?;
 
-    crate::tmux::split_window_right(&session_name, &inst.project_path, &command)?;
+    crate::tmux::split_window_right(
+        &session_name,
+        &inst.project_path,
+        &command,
+        !inst.expects_shell(),
+    )?;
 
     println!(
         "✓ Added agent pane to session: {} (pane {} of {})",

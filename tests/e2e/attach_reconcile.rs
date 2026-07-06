@@ -192,8 +192,11 @@ fn attach_client(h: &TuiTestHarness, target: &str) -> Child {
             .arg("/dev/null");
         c
     };
+    // Keep stdin open (piped, never written): with a closed stdin, BSD
+    // `script` forwards the EOF as ^D into the attached pane, which cleanly
+    // exits the shell session under test.
     command
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

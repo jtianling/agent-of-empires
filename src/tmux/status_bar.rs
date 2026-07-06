@@ -354,6 +354,10 @@ pub fn apply_all_tmux_options(
         tracing::debug!("Failed to enable tmux title passthrough: {}", e);
     }
 
+    // Backfill the pane-died shell-fallback hook for sessions created before
+    // the hook existed (new sessions get it atomically at creation).
+    crate::tmux::utils::install_pane_died_hook(session_name);
+
     // Set an initial pane title so agents that don't write their own OSC 0
     // (e.g. Codex CLI) show something meaningful instead of the hostname.
     // Agents that do set titles (Claude Code, Gemini) will overwrite this.

@@ -773,6 +773,60 @@ pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str) {
     ]);
 }
 
+/// Command string for the session's `pane-died` hook: turn remain-on-exit off
+/// on the dead pane, then respawn it into the user's interactive shell. The
+/// respawned shell keeps the pane's working directory and scrollback, so the
+/// user lands at a prompt instead of tmux's "Pane is dead" banner. Turning
+/// remain-on-exit off first means exiting that fallback shell closes the pane
+/// (and the session, when it is the last pane) normally.
+fn pane_died_hook_command() -> String {
+    format!(
+        "set-option -p remain-on-exit off ; respawn-pane \"{}\"",
+        crate::session::environment::user_shell()
+    )
+}
+
+/// Append `; set-hook -t <target> pane-died ...` to an in-flight tmux argument
+/// list so the shell-fallback hook is installed atomically with session
+/// creation. See [`pane_died_hook_command`].
+pub fn append_pane_died_hook_args(args: &mut Vec<String>, target: &str) {
+    args.extend([
+        ";".to_string(),
+        "set-hook".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "pane-died".to_string(),
+        pane_died_hook_command(),
+    ]);
+}
+
+/// Install (or refresh) the `pane-died` shell-fallback hook on an existing
+/// session. Used to backfill sessions created before the hook existed.
+pub fn install_pane_died_hook(session_name: &str) {
+    let result = crate::tmux::tmux_command()
+        .args([
+            "set-hook",
+            "-t",
+            session_name,
+            "pane-died",
+            &pane_died_hook_command(),
+        ])
+        .output();
+    match result {
+        Ok(o) if !o.status.success() => {
+            tracing::debug!(
+                "Failed to set pane-died hook on {}: {}",
+                session_name,
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        Err(e) => {
+            tracing::debug!("Failed to set pane-died hook on {}: {}", session_name, e);
+        }
+        _ => {}
+    }
+}
+
 pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
     let output = crate::tmux::tmux_command()
         .args(["show-option", "-t", session_name, "-v", "@aoe_agent_pane"])
