@@ -255,8 +255,13 @@ fn establish_tracked_panes(
 }
 
 fn press_restart(h: &TuiTestHarness) {
-    // `R` triggers Action::RespawnAgentPane for the selected (only) instance.
+    // `R` triggers Action::RespawnAgentPane (Resume) for the selected instance.
     h.send_keys("R");
+}
+
+fn press_fresh_restart(h: &TuiTestHarness) {
+    // `r` triggers Action::RespawnAgentPane (Fresh) for the selected instance.
+    h.send_keys("r");
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +540,100 @@ fn empty_native_session_id_restarts_pane_fresh() {
         "a claude pane with an empty native_session_id must restart fresh, got: {:?}",
         cmd
     );
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: `r` restarts every tracked pane fresh (no resume flag)
+// Requirement: `R` still resumes; `e` opens the rename dialog
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn r_restarts_every_tracked_pane_fresh_without_resume() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("multi_pane_fresh_restart");
+    let instance_id = add_and_start(&h, "Multi Pane Fresh", "claude");
+    let db = db_path(&h);
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Multi Pane Fresh");
+
+    // Three tracked claude panes, each with a valid, distinct native_session_id
+    // that WOULD resume under `R`.
+    let panes = establish_tracked_panes(
+        &mut h,
+        &instance_id,
+        &session_name,
+        &[
+            ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa0", None),
+            ("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1", None),
+            ("cccccccc-cccc-4ccc-8ccc-ccccccccccc2", None),
+        ],
+        &db,
+    );
+
+    press_fresh_restart(&h);
+
+    // Every tracked pane must be respawned with the fresh claude command and NO
+    // resume flag, even though each slot has a valid resume id.
+    for pane in &panes {
+        wait_for_pane_start_command_contains(&h, pane, "claude");
+        let cmd = pane_start_command(&h, pane);
+        assert!(
+            !cmd.contains("--resume"),
+            "fresh restart (`r`) must carry no resume flag for pane {}, got: {:?}",
+            pane,
+            cmd
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn shift_r_still_resumes_after_rebind() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("multi_pane_resume_after_rebind");
+    let instance_id = add_and_start(&h, "Resume After Rebind", "claude");
+    let db = db_path(&h);
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Resume After Rebind");
+
+    let panes = establish_tracked_panes(
+        &mut h,
+        &instance_id,
+        &session_name,
+        &[("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", None)],
+        &db,
+    );
+
+    press_restart(&h);
+
+    // `R` (Shift) keeps resuming from the persisted id.
+    wait_for_pane_start_command_contains(
+        &h,
+        &panes[0],
+        "claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+    );
+}
+
+#[test]
+#[serial]
+fn e_opens_the_rename_dialog() {
+    crate::harness::require_tmux!();
+
+    let mut h = TuiTestHarness::new("multi_pane_edit_rename");
+    let _instance_id = add_and_start(&h, "Edit Rename Target", "claude");
+
+    h.spawn_tui();
+    h.wait_for("Agent of Empires");
+    h.wait_for("Edit Rename Target");
+
+    // `e` opens the session rename/edit dialog.
+    h.send_keys("e");
+    h.wait_for("Edit Session");
 }
 
 // ---------------------------------------------------------------------------

@@ -843,7 +843,7 @@ impl Instance {
                 .or_else(|| crate::hooks::read_hook_session_id(&self.id))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "No active codex session to fork yet. Press 'r' (restart) on the parent to capture a resume token, then try again."
+                        "No active codex session to fork yet. Press 'R' (resume restart) on the parent to capture a resume token, then try again."
                     )
                 }),
             "opencode" => self.resolve_opencode_session_id(),
@@ -985,11 +985,84 @@ impl Instance {
     /// Respawn only the agent pane, preserving the tmux session layout.
     /// Runs on-launch hooks, rebuilds the agent command, and respawns the pane.
     pub fn respawn_agent_pane(&mut self) -> Result<()> {
-        self.respawn_agent_pane_with_resume(None)
+        self.respawn_single_pane(RestartMode::Resume)
     }
 
-    fn respawn_agent_pane_with_resume(&mut self, resume_token: Option<&str>) -> Result<()> {
-        let effective_resume_token = self.resolved_resume_token(resume_token);
+    /// Respawn the single primary `@aoe_agent_pane` fresh, without ever consulting
+    /// or injecting the instance's stored `resume_token`. Used by the fresh
+    /// restart action's no-tracked-slots fallback so a fresh restart never
+    /// reinjects history.
+    pub fn respawn_agent_pane_fresh(&mut self) -> Result<()> {
+        self.respawn_single_pane(RestartMode::Fresh)
+    }
+
+    /// For a fresh restart, agents that pre-allocate a conversation id via
+    /// `session_id_flag` (e.g. Claude `--session-id`) must NOT reuse the current
+    /// `agent_session_id`: the just-killed conversation still owns it and the
+    /// agent refuses to start with a session id that is already in use. Allocate a
+    /// new UUID so the fresh restart begins a brand-new conversation. No-op for
+    /// agents without `session_id_flag` or when a command override is in effect.
+    fn reallocate_session_id_for_fresh(&mut self) {
+        if self.has_command_override() {
+            return;
+        }
+        let uses_session_id = crate::agents::get_agent(&self.tool)
+            .and_then(|a| a.session_id_flag)
+            .is_some();
+        if uses_session_id {
+            self.agent_session_id = Some(Uuid::new_v4().to_string());
+        }
+    }
+
+    /// Speculatively prepare a brand-new conversation identity for a fresh
+    /// restart: reallocate the pre-allocated `--session-id` and drop any persisted
+    /// `fork_pending` (a fresh restart must never re-fork a parent). Returns the
+    /// previous `(agent_session_id, fork_pending)` so the caller can roll back if
+    /// the respawn never actually starts. Returns `None` for `RestartMode::Resume`,
+    /// which leaves identity untouched.
+    fn begin_fresh_identity(&mut self, mode: RestartMode) -> Option<FreshIdentitySnapshot> {
+        if mode != RestartMode::Fresh {
+            return None;
+        }
+        let snapshot = (self.agent_session_id.clone(), self.fork_pending.clone());
+        self.reallocate_session_id_for_fresh();
+        self.fork_pending = None;
+        Some(snapshot)
+    }
+
+    /// Roll back a fresh identity prepared by [`begin_fresh_identity`] when the
+    /// respawn failed, so a never-launched session id or an abandoned fork token is
+    /// not persisted. A successful respawn keeps the new identity (no-op here).
+    fn rollback_fresh_identity_on_failure(
+        &mut self,
+        snapshot: Option<FreshIdentitySnapshot>,
+        success: bool,
+    ) {
+        if let Some((prev_id, prev_fork)) = snapshot {
+            if !success {
+                self.agent_session_id = prev_id;
+                self.fork_pending = prev_fork;
+            }
+        }
+    }
+
+    fn respawn_single_pane(&mut self, mode: RestartMode) -> Result<()> {
+        // A fresh restart must not reuse the pre-allocated `--session-id` or re-fork
+        // a persisted parent; prepare a new identity, then commit it only if the
+        // respawn succeeds (roll back on failure so a phantom id is not persisted).
+        let snapshot = self.begin_fresh_identity(mode);
+        let result = self.respawn_single_pane_inner(mode);
+        self.rollback_fresh_identity_on_failure(snapshot, result.is_ok());
+        result
+    }
+
+    fn respawn_single_pane_inner(&mut self, mode: RestartMode) -> Result<()> {
+        // `Fresh` bypasses `resolved_resume_token` entirely so the command never
+        // carries the stored `resume_token`; `Resume` keeps the existing fallback.
+        let effective_resume_token = match mode {
+            RestartMode::Resume => self.resolved_resume_token(None),
+            RestartMode::Fresh => None,
+        };
         let session = self.tmux_session()?;
         if !session.exists() {
             anyhow::bail!("Session does not exist");
@@ -1017,25 +1090,36 @@ impl Instance {
         Ok(())
     }
 
-    /// Resume every tracked agent pane of this instance from the persisted
-    /// `agent_slot` store. Each pane is killed and respawned with the resume
-    /// command built from its own `native_session_id`; a pane that cannot resume
-    /// degrades to a fresh restart of that pane only and does not abort the
-    /// remaining panes. Returns the per-pane outcomes (one per slot). When the
-    /// instance has no tracked slots the caller falls back to the single-pane
-    /// `respawn_agent_pane` behavior.
+    /// Restart every tracked agent pane of this instance from the persisted
+    /// `agent_slot` store. Each pane is killed and respawned; in
+    /// [`RestartMode::Resume`] the command is built from the pane's own
+    /// `native_session_id` (a pane that cannot resume degrades to a fresh restart
+    /// of that pane only), while [`RestartMode::Fresh`] forces the no-resume path
+    /// for every pane (full launch context, no resume flag). A per-pane failure
+    /// does not abort the remaining panes. Returns the per-pane outcomes (one per
+    /// slot). When the instance has no tracked slots the caller falls back to the
+    /// single-pane respawn behavior.
     pub fn resume_all_tracked_panes(
         &mut self,
         slots: &[crate::db::AgentSlot],
+        mode: RestartMode,
     ) -> Vec<PaneResumeOutcome> {
         self.status = Status::Restarting;
         self.last_error = None;
+
+        // A fresh restart must not reuse the pre-allocated `--session-id` for the
+        // primary pane (slot 0 builds with the instance's `agent_session_id`) nor
+        // re-fork a persisted parent. Prepare a new identity, but commit it only if
+        // slot 0 actually respawns (roll back otherwise, so a phantom id/fork is not
+        // persisted by the subsequent save).
+        let snapshot = self.begin_fresh_identity(mode);
 
         if let Some(ref hook_cmds) = self.resolve_on_launch_hooks() {
             self.execute_on_launch_hooks(hook_cmds);
         }
 
         let mut outcomes = Vec::with_capacity(slots.len());
+        let mut primary_respawned = false;
         for slot in slots {
             let outcome = self.resume_launch_pane(
                 &slot.agent,
@@ -1043,7 +1127,11 @@ impl Instance {
                 &slot.tmux_pane,
                 &slot.cwd,
                 slot.slot == 0,
+                mode,
             );
+            if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
+                primary_respawned = true;
+            }
             if let PaneResumeOutcome::Error(ref err) = outcome {
                 tracing::warn!(
                     "Failed to resume pane {} (slot {}) for '{}': {}",
@@ -1055,6 +1143,14 @@ impl Instance {
             }
             outcomes.push(outcome);
         }
+
+        // Commit the fresh identity only when the primary pane launched; a fresh
+        // restart also abandons the stale `resume_token` so a later fork does not
+        // reuse the pre-fresh conversation.
+        if snapshot.is_some() && primary_respawned {
+            self.clear_resume_token();
+        }
+        self.rollback_fresh_identity_on_failure(snapshot, primary_respawned);
 
         self.run_auto_confirm();
         self.apply_tmux_options(&Self::current_profile());
@@ -1131,6 +1227,7 @@ impl Instance {
                 new_pane,
                 &slot.cwd,
                 slot.slot == 0,
+                RestartMode::Resume,
             );
             if let PaneResumeOutcome::Error(ref err) = outcome {
                 tracing::warn!(
@@ -1699,6 +1796,21 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
     )
 }
 
+/// Whether the multi-pane fan-out resumes each pane from its persisted
+/// `native_session_id` (`Resume`) or restarts every pane fresh with no resume
+/// flag (`Fresh`). `Fresh` forces the no-resume path for every pane while still
+/// building the full launch context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartMode {
+    Resume,
+    Fresh,
+}
+
+/// Snapshot of the identity fields a fresh restart speculatively mutates
+/// (`agent_session_id`, `fork_pending`), captured so the restart can roll them
+/// back if the respawn never actually starts a new conversation.
+type FreshIdentitySnapshot = (Option<String>, Option<String>);
+
 /// Outcome of resuming a single tracked pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneResumeOutcome {
@@ -1746,6 +1858,7 @@ impl Instance {
         agent: &str,
         native_session_id: &str,
         is_primary: bool,
+        mode: RestartMode,
     ) -> Option<(String, bool)> {
         let Some(def) = crate::agents::get_agent(agent) else {
             // Unknown agent: only the recorded name can act as the binary, and
@@ -1754,7 +1867,11 @@ impl Instance {
             return is_safe_command_token(agent).then(|| (agent.to_string(), false));
         };
 
-        let resumed = def.resume.is_some() && is_valid_resume_token(native_session_id);
+        // `Fresh` forces the no-resume path: still build the full launch context
+        // via `build_pane_command`, but never append a resume flag.
+        let resumed = mode == RestartMode::Resume
+            && def.resume.is_some()
+            && is_valid_resume_token(native_session_id);
         let resume_token = resumed.then_some(native_session_id);
         let command = self.build_pane_command(def.name, resume_token, is_primary)?;
         Some((command, resumed))
@@ -1779,11 +1896,12 @@ impl Instance {
         tmux_pane: &str,
         cwd: &str,
         is_primary: bool,
+        mode: RestartMode,
     ) -> PaneResumeOutcome {
         // Build (and validate) the command before killing the pane, so a pane we
         // cannot safely respawn is left running rather than killed and abandoned.
         let Some((command, resumed)) =
-            self.build_pane_resume_plan(agent, native_session_id, is_primary)
+            self.build_pane_resume_plan(agent, native_session_id, is_primary, mode)
         else {
             return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
         };
@@ -2315,7 +2433,12 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(resumed);
         assert!(
@@ -2325,11 +2448,200 @@ mod tests {
     }
 
     #[test]
+    fn test_build_pane_resume_plan_fresh_mode_never_resumes() {
+        // Fresh mode must force the no-resume path for every pane even with a
+        // valid token: full launch context, but no resume flag.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Fresh,
+            )
+            .unwrap();
+        assert!(!resumed, "Fresh mode must not resume");
+        assert!(
+            !cmd.contains("--resume"),
+            "Fresh mode must carry no resume flag, got: {cmd}"
+        );
+        assert!(
+            cmd.contains("claude"),
+            "Fresh mode must still carry the launch command, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_fresh_single_pane_ignores_stored_resume_token() {
+        // Decision 2: the fresh single-pane path must NOT consult the instance's
+        // stored resume_token. The Resume path would inject it (via
+        // resolved_resume_token); the Fresh path builds the command with None.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.resume_token = Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string());
+
+        // Sanity: the Resume path would reinject the stored token.
+        let resume_effective = inst.resolved_resume_token(None);
+        let resume_cmd = inst
+            .build_agent_command(resume_effective.as_deref())
+            .unwrap();
+        assert!(
+            resume_cmd.contains("--resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"),
+            "resume path should inject stored token, got: {resume_cmd}"
+        );
+
+        // Fresh path: build with None (bypassing resolved_resume_token) -> no
+        // resume flag or token, even though resume_token is set.
+        let fresh_cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            !fresh_cmd.contains("--resume"),
+            "fresh single-pane restart must carry no resume flag, got: {fresh_cmd}"
+        );
+        assert!(
+            !fresh_cmd.contains("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"),
+            "fresh single-pane restart must not inject stored token, got: {fresh_cmd}"
+        );
+    }
+
+    #[test]
+    fn test_fresh_restart_reallocates_session_id() {
+        // CRITICAL: a fresh restart must not reuse the pre-allocated --session-id.
+        // The just-killed conversation still owns it and Claude refuses to start
+        // with a session id that is already in use.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let old_id = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string();
+        inst.agent_session_id = Some(old_id.clone());
+
+        // Sanity: before reallocation the fresh command carries the OLD id.
+        let before = inst.build_agent_command(None).unwrap();
+        assert!(
+            before.contains(&format!("--session-id {old_id}")),
+            "sanity: fresh build reuses old session id before reallocation, got: {before}"
+        );
+
+        inst.reallocate_session_id_for_fresh();
+
+        let new_id = inst.agent_session_id.clone().unwrap();
+        assert_ne!(
+            new_id, old_id,
+            "fresh restart must allocate a new session id"
+        );
+        let after = inst.build_agent_command(None).unwrap();
+        assert!(
+            after.contains(&format!("--session-id {new_id}")),
+            "fresh build must carry the new session id, got: {after}"
+        );
+        assert!(
+            !after.contains(&old_id),
+            "fresh build must not carry the old session id, got: {after}"
+        );
+    }
+
+    #[test]
+    fn test_reallocate_session_id_noop_without_session_id_flag() {
+        // codex has no session_id_flag -> reallocation is a no-op.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.agent_session_id = Some("keep-me".to_string());
+        inst.reallocate_session_id_for_fresh();
+        assert_eq!(inst.agent_session_id.as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn test_fresh_identity_rollback_on_failure_restores_id_and_fork() {
+        // CRITICAL: a failed fresh respawn must not persist the never-launched new
+        // session id (or a dropped fork); the snapshot is restored.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let old_id = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string();
+        inst.agent_session_id = Some(old_id.clone());
+        inst.fork_pending = Some("parent-token".to_string());
+
+        let snapshot = inst.begin_fresh_identity(RestartMode::Fresh);
+        assert!(snapshot.is_some());
+        // Speculative mutation happened: new id, fork dropped.
+        assert_ne!(inst.agent_session_id.as_deref(), Some(old_id.as_str()));
+        assert!(inst.fork_pending.is_none());
+
+        inst.rollback_fresh_identity_on_failure(snapshot, false);
+        assert_eq!(inst.agent_session_id.as_deref(), Some(old_id.as_str()));
+        assert_eq!(inst.fork_pending.as_deref(), Some("parent-token"));
+    }
+
+    #[test]
+    fn test_fresh_identity_commit_on_success_keeps_new_id() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let old_id = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string();
+        inst.agent_session_id = Some(old_id.clone());
+
+        let snapshot = inst.begin_fresh_identity(RestartMode::Fresh);
+        let new_id = inst.agent_session_id.clone();
+        inst.rollback_fresh_identity_on_failure(snapshot, true);
+        assert_eq!(inst.agent_session_id, new_id);
+        assert_ne!(inst.agent_session_id.as_deref(), Some(old_id.as_str()));
+    }
+
+    #[test]
+    fn test_fresh_identity_ignores_pending_fork() {
+        // CRITICAL: a fresh restart must not re-fork a persisted parent. After
+        // begin_fresh_identity the command carries no fork flag.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.fork_pending = Some("parent-token".to_string());
+
+        // Sanity: with fork_pending set, the command would fork.
+        assert!(inst
+            .build_agent_command(None)
+            .unwrap()
+            .contains("--fork-session"));
+
+        inst.begin_fresh_identity(RestartMode::Fresh);
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            !cmd.contains("--fork-session"),
+            "fresh restart must not re-fork, got: {cmd}"
+        );
+        assert!(!cmd.contains("parent-token"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_codex_fresh_clears_resume_token_so_fork_does_not_reuse_it() {
+        // CRITICAL: codex has no agent_session_id; fork_token() falls back to
+        // resume_token. A fresh restart clears it so a later fork does not reuse the
+        // pre-fresh conversation.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.resume_token = Some("019d1af9-a899-7df1-8f7d-a244126e5ded".to_string());
+
+        // Before: fork would reuse the stale resume token.
+        assert_eq!(
+            inst.fork_token().ok().as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded")
+        );
+
+        // A fresh restart clears it (the commit step in the respawn paths).
+        inst.clear_resume_token();
+        assert_ne!(
+            inst.fork_token().ok().as_deref(),
+            Some("019d1af9-a899-7df1-8f7d-a244126e5ded"),
+            "fork must not reuse the pre-fresh resume token"
+        );
+    }
+
+    #[test]
     fn test_build_pane_resume_plan_codex_uses_resume_subcommand() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "codex".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("codex", "019d1af9-a899-7df1-8f7d-a244126e5ded", true)
+            .build_pane_resume_plan(
+                "codex",
+                "019d1af9-a899-7df1-8f7d-a244126e5ded",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(resumed);
         assert!(
@@ -2342,7 +2654,9 @@ mod tests {
     fn test_build_pane_resume_plan_empty_id_restarts_fresh() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
-        let (cmd, resumed) = inst.build_pane_resume_plan("claude", "", true).unwrap();
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan("claude", "", true, RestartMode::Resume)
+            .unwrap();
         assert!(!resumed);
         assert!(
             !cmd.contains("--resume"),
@@ -2357,7 +2671,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "abc; rm -rf ~", true)
+            .build_pane_resume_plan("claude", "abc; rm -rf ~", true, RestartMode::Resume)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -2376,7 +2690,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "gemini".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("gemini", "gemini-sess-0", true)
+            .build_pane_resume_plan("gemini", "gemini-sess-0", true, RestartMode::Resume)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -2395,7 +2709,7 @@ mod tests {
         // bare-binary fresh launch.
         let inst = Instance::new("test", "/tmp/test");
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("mystery", "some-id", false)
+            .build_pane_resume_plan("mystery", "some-id", false, RestartMode::Resume)
             .unwrap();
         assert!(!resumed);
         assert_eq!(cmd, "mystery");
@@ -2406,7 +2720,7 @@ mod tests {
         // An unknown agent name with shell metacharacters must not be executed.
         let inst = Instance::new("test", "/tmp/test");
         assert!(inst
-            .build_pane_resume_plan("evil; rm -rf ~", "some-id", false)
+            .build_pane_resume_plan("evil; rm -rf ~", "some-id", false, RestartMode::Resume)
             .is_none());
     }
 
@@ -2436,7 +2750,12 @@ mod tests {
         inst.yolo_mode = true;
 
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(resumed, "expected a resume plan, got fresh");
         assert!(
@@ -2478,7 +2797,12 @@ mod tests {
         let id = inst.id.clone();
 
         let (cmd, _resumed) = inst
-            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(
             cmd.contains(&format!("AOE_INSTANCE_ID='{id}'")),
@@ -2494,7 +2818,12 @@ mod tests {
         let container = DockerContainer::generate_name(&inst.id);
 
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(resumed);
         assert!(
@@ -2516,7 +2845,12 @@ mod tests {
         inst.yolo_mode = false;
 
         let (cmd, _resumed) = inst
-            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(
             !cmd.contains("--dangerously-skip-permissions"),
@@ -2539,7 +2873,7 @@ mod tests {
         let id = inst.id.clone();
 
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "not a valid; token", true)
+            .build_pane_resume_plan("claude", "not a valid; token", true, RestartMode::Resume)
             .unwrap();
         assert!(!resumed, "invalid token must degrade to fresh");
         assert!(
@@ -2570,13 +2904,13 @@ mod tests {
         inst.tool = "claude".to_string();
 
         assert!(
-            inst.build_pane_resume_plan("evil; rm -rf ~", "some-id", true)
+            inst.build_pane_resume_plan("evil; rm -rf ~", "some-id", true, RestartMode::Resume)
                 .is_none(),
             "unsafe agent name must be refused"
         );
 
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "abc; rm -rf ~", true)
+            .build_pane_resume_plan("claude", "abc; rm -rf ~", true, RestartMode::Resume)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -2595,14 +2929,21 @@ mod tests {
         inst.yolo_mode = true;
 
         let (primary, _) = inst
-            .build_pane_resume_plan("claude", "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11", true)
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+            )
             .unwrap();
         assert!(
             primary.contains("--dangerously-skip-permissions"),
             "claude pane must carry its CliFlag, got: {primary}"
         );
 
-        let (secondary, _) = inst.build_pane_resume_plan("pi", "ignored", false).unwrap();
+        let (secondary, _) = inst
+            .build_pane_resume_plan("pi", "ignored", false, RestartMode::Resume)
+            .unwrap();
         assert!(
             !secondary.contains("--dangerously-skip-permissions"),
             "pi (AlwaysYolo) pane must not carry claude's flag, got: {secondary}"

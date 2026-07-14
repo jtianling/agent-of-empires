@@ -465,9 +465,9 @@ impl App {
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
             }
-            Action::RespawnAgentPane(id) => {
+            Action::RespawnAgentPane(id, mode) => {
                 if let Some(inst) = self.home.get_instance(&id).cloned() {
-                    // Ignore a second R while a multi-pane restart is in flight.
+                    // Ignore a second R/r while a multi-pane restart is in flight.
                     if inst.restart_in_flight {
                         return Ok(());
                     }
@@ -510,7 +510,12 @@ impl App {
                         // primary @aoe_agent_pane with the single-pane behavior.
                         let mut respawn_result = Ok(());
                         self.home.mutate_instance(&id, |inst| {
-                            respawn_result = inst.respawn_agent_pane();
+                            respawn_result = match mode {
+                                crate::session::RestartMode::Resume => inst.respawn_agent_pane(),
+                                crate::session::RestartMode::Fresh => {
+                                    inst.respawn_agent_pane_fresh()
+                                }
+                            };
                         });
 
                         if let Err(e) = respawn_result {
@@ -528,7 +533,7 @@ impl App {
                         let mut outcomes = Vec::new();
                         self.home.mutate_instance(&id, |inst| {
                             inst.restart_in_flight = true;
-                            outcomes = inst.resume_all_tracked_panes(&slots);
+                            outcomes = inst.resume_all_tracked_panes(&slots, mode);
                             inst.restart_in_flight = false;
                         });
 
@@ -1009,7 +1014,7 @@ impl App {
 pub enum Action {
     Quit,
     AttachSession(String),
-    RespawnAgentPane(String),
+    RespawnAgentPane(String, crate::session::RestartMode),
     RecoverInstance(String),
     SwitchProfile(String),
     EditFile(PathBuf),

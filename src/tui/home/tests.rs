@@ -739,17 +739,17 @@ fn test_cursor_moves_over_full_list_during_search() {
 
 #[test]
 #[serial]
-fn test_r_opens_rename_dialog() {
+fn test_e_opens_rename_dialog() {
     let mut env = create_test_env_with_sessions(3);
     env.view.update_selected();
     assert!(env.view.rename_dialog.is_none());
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     assert!(env.view.rename_dialog.is_some());
 }
 
 #[test]
 #[serial]
-fn test_r_opens_group_rename_dialog_on_group() {
+fn test_e_opens_group_rename_dialog_on_group() {
     let mut env = create_test_env_with_groups();
     env.view.cursor = 1;
     env.view.update_selected();
@@ -757,7 +757,7 @@ fn test_r_opens_group_rename_dialog_on_group() {
     assert!(selected_group.is_some());
     assert!(env.view.group_rename_dialog.is_none());
     assert!(env.view.rename_dialog.is_none());
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     assert!(env.view.rename_dialog.is_none());
     assert!(env.view.group_rename_dialog.is_some());
     assert_eq!(
@@ -771,11 +771,114 @@ fn test_r_opens_group_rename_dialog_on_group() {
 
 #[test]
 #[serial]
+fn test_r_does_not_open_group_rename_dialog() {
+    let mut env = create_test_env_with_groups();
+    env.view.cursor = 1;
+    env.view.update_selected();
+    assert!(env.view.selected_group.is_some());
+    assert!(env.view.group_rename_dialog.is_none());
+    env.view.handle_key(key(KeyCode::Char('r')));
+    assert!(env.view.group_rename_dialog.is_none());
+    assert!(env.view.rename_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn test_r_triggers_fresh_restart_action() {
+    let mut env = create_test_env_with_sessions(3);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    let action = env.view.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(
+        action,
+        Some(Action::RespawnAgentPane(
+            id,
+            crate::session::RestartMode::Fresh
+        ))
+    );
+    assert!(env.view.rename_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn test_shift_r_triggers_resume_action() {
+    let mut env = create_test_env_with_sessions(3);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    let action = env.view.handle_key(key(KeyCode::Char('R')));
+    assert_eq!(
+        action,
+        Some(Action::RespawnAgentPane(
+            id,
+            crate::session::RestartMode::Resume
+        ))
+    );
+}
+
+#[test]
+#[serial]
+fn test_ctrl_and_alt_r_do_not_trigger_fresh_restart() {
+    // Fresh restart is destructive (kills tracked panes). Only a bare `r`
+    // (no modifiers) may trigger it; modifier combos must be a no-op so an
+    // unregistered Ctrl+r / Alt+r never destroys a session.
+    let mut env = create_test_env_with_sessions(3);
+    env.view.update_selected();
+    for modifier in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        let action = env
+            .view
+            .handle_key(KeyEvent::new(KeyCode::Char('r'), modifier));
+        assert_ne!(
+            action,
+            Some(Action::RespawnAgentPane(
+                env.view.selected_session.clone().unwrap(),
+                crate::session::RestartMode::Fresh
+            )),
+            "modifier {modifier:?} + r must not trigger a fresh restart"
+        );
+        assert!(env.view.rename_dialog.is_none());
+    }
+}
+
+#[test]
+#[serial]
+fn test_codex_fork_not_ready_hint_points_to_resume_restart() {
+    // Codex fork needs a captured resume_token. `R` (resume restart) preserves it;
+    // `r` (fresh restart) clears it, so the guard hint must point to `R`.
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let storage = Storage::new("test").unwrap();
+    let mut inst = Instance::new("codexsession", "/tmp/codex");
+    inst.tool = "codex".to_string();
+    inst.resume_token = None;
+    storage.save(&[inst]).unwrap();
+    let tools = AvailableTools::with_tools(&["codex"]);
+    let mut view =
+        HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
+    view.update_selected();
+
+    view.handle_key(key(KeyCode::Char('f')));
+
+    let dialog = view.info_dialog.as_ref().expect("Fork Not Ready dialog");
+    assert_eq!(dialog.title(), "Fork Not Ready");
+    assert!(
+        dialog.message().contains("'R'"),
+        "hint should point to R (resume restart), got: {}",
+        dialog.message()
+    );
+    assert!(
+        !dialog.message().contains("'r' (restart)"),
+        "hint must not point to the fresh-restart r, got: {}",
+        dialog.message()
+    );
+}
+
+#[test]
+#[serial]
 fn test_has_dialog_returns_true_for_rename_dialog() {
     let mut env = create_test_env_with_sessions(1);
     env.view.update_selected();
     assert!(!env.view.has_dialog());
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     assert!(env.view.has_dialog());
 }
 
@@ -785,7 +888,7 @@ fn test_group_rename_conflict_opens_merge_confirmation() {
     let mut env = create_test_env_with_group_rename_conflict();
     env.view.select_group_by_path("temp/api");
 
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     env.view
         .group_rename_dialog
         .as_mut()
@@ -811,7 +914,7 @@ fn test_accepting_group_merge_applies_rename() {
     let mut env = create_test_env_with_group_rename_conflict();
     env.view.select_group_by_path("temp/api");
 
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     env.view
         .group_rename_dialog
         .as_mut()
@@ -857,7 +960,7 @@ fn test_declining_group_merge_has_no_side_effects() {
         .collect();
 
     env.view.select_group_by_path("temp/api");
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     env.view
         .group_rename_dialog
         .as_mut()
@@ -892,7 +995,7 @@ fn test_group_rename_updates_sessions_and_creates_intermediate_groups() {
     let mut env = create_test_env_with_groups();
     env.view.select_group_by_path("personal");
 
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     env.view
         .group_rename_dialog
         .as_mut()
@@ -925,7 +1028,7 @@ fn test_group_rename_updates_directory_without_renaming() {
     let mut env = create_test_env_with_groups();
     env.view.select_group_by_path("personal");
 
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     env.view
         .group_rename_dialog
         .as_mut()
@@ -946,7 +1049,7 @@ fn test_group_merge_confirmation_preserves_directory_update() {
     let mut env = create_test_env_with_group_rename_conflict();
     env.view.select_group_by_path("temp/api");
 
-    env.view.handle_key(key(KeyCode::Char('r')));
+    env.view.handle_key(key(KeyCode::Char('e')));
     let dialog = env.view.group_rename_dialog.as_mut().unwrap();
     dialog.set_path_value("work/api");
     dialog.set_directory_value("/tmp/merged-api");

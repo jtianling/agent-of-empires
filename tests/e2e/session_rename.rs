@@ -101,7 +101,7 @@ fn test_tui_rename_updates_tmux_session_name_without_killing_shell() {
     h.spawn_tui();
     h.wait_for("Agent of Empires");
     h.wait_for("Old Title");
-    h.send_keys("r");
+    h.send_keys("e");
     h.wait_for("Edit Session");
     h.type_text("New Title");
     h.send_keys("Enter");
@@ -160,7 +160,7 @@ fn test_tui_cross_profile_rename_updates_tmux_session_name_without_killing_shell
     h.spawn_tui();
     h.wait_for("Agent of Empires");
     h.wait_for("Default Title");
-    h.send_keys("r");
+    h.send_keys("e");
     h.wait_for("Edit Session");
     h.type_text("Moved Title");
     h.send_keys("Down");

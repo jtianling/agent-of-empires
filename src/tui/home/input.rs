@@ -643,13 +643,14 @@ impl HomeView {
                     return None;
                 }
 
-                // Codex needs a resume_token (only available after graceful
-                // restart `r`). Claude can resolve its session from disk,
-                // so no guard needed here for claude.
+                // Codex needs a resume_token (only available after a graceful
+                // resume restart `R`, which preserves the token; a fresh restart
+                // `r` clears it). Claude can resolve its session from disk, so no
+                // guard needed here for claude.
                 if inst.tool == "codex" && inst.resume_token.is_none() {
                     self.info_dialog = Some(InfoDialog::new(
                         "Fork Not Ready",
-                        "Press 'r' (restart) on the parent codex session to capture a resume token, then try forking again.",
+                        "Press 'R' (resume restart) on the parent codex session to capture a resume token, then try forking again.",
                     ));
                     return None;
                 }
@@ -785,7 +786,10 @@ impl HomeView {
                             return None;
                         }
                     }
-                    return Some(Action::RespawnAgentPane(id.to_string()));
+                    return Some(Action::RespawnAgentPane(
+                        id.to_string(),
+                        crate::session::RestartMode::Resume,
+                    ));
                 }
             }
             KeyCode::Char('V') => {
@@ -795,7 +799,20 @@ impl HomeView {
                     }
                 }
             }
-            KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
+                if let Some(id) = &self.selected_session {
+                    if let Some(inst) = self.get_instance(id) {
+                        if inst.status == Status::Deleting {
+                            return None;
+                        }
+                    }
+                    return Some(Action::RespawnAgentPane(
+                        id.to_string(),
+                        crate::session::RestartMode::Fresh,
+                    ));
+                }
+            }
+            KeyCode::Char('e') => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {

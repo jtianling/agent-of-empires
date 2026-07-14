@@ -155,7 +155,7 @@ The terminal teardown sequence in `src/tui/mod.rs` SHALL include a title reset s
 - **THEN** the title reset SHALL execute as part of the teardown sequence, before `LeaveAlternateScreen`
 
 ### Requirement: R keybinding restarts agent pane only
-The TUI home screen SHALL support the `R` (Shift+R) keybinding to restart only the AoE-managed agent pane of the selected session, without destroying the session or its layout.
+The TUI home screen SHALL support the `R` (Shift+R) keybinding to resume the AoE-managed agent panes of the selected session, without destroying the session or its layout. `R` SHALL keep its existing resume behavior (fan out to every tracked pane and resume each from its persisted `native_session_id`).
 
 #### Scenario: R on session with dead agent pane
 - **WHEN** the user presses `R` on a selected session
@@ -181,7 +181,7 @@ The TUI home screen SHALL support the `R` (Shift+R) keybinding to restart only t
 
 #### Scenario: R is shown in help overlay
 - **WHEN** the user opens the help overlay (`?`)
-- **THEN** the help SHALL list `R` as "Restart agent" or similar description
+- **THEN** the help SHALL list `R` as "Resume agent panes" or similar description
 
 ### Requirement: Session list displays numeric indices
 The TUI session list SHALL display a right-aligned numeric index (1-99) as a fixed-width prefix before the status icon for each visible session. Group headers SHALL show blank space in the index column to maintain alignment.
@@ -276,6 +276,37 @@ The home-view status bar SHALL display the current session-list sort order and t
 - **WHEN** the terminal is too narrow to fit both the left key hints and the right sort indicator
 - **THEN** the left key hints SHALL truncate within their region
 - **AND** the right sort indicator SHALL remain visible without overlapping the left hints
+
+### Requirement: r keybinding restarts agent panes fresh
+The TUI home screen SHALL support the `r` (lowercase, no Shift) keybinding to restart every tracked agent pane of the selected session with a fresh command that carries no resume flag, preserving the session layout.
+
+#### Scenario: r triggers a fresh restart on a session
+- **WHEN** the user presses `r` on a selected session
+- **THEN** the system SHALL initiate a fresh restart of the session's tracked agent panes
+- **AND** the session layout SHALL be preserved
+
+#### Scenario: r on session being deleted is a no-op
+- **WHEN** the user presses `r` on a session with status `Deleting`
+- **THEN** the keybinding SHALL be a no-op
+
+#### Scenario: r is shown in help overlay
+- **WHEN** the user opens the help overlay (`?`)
+- **THEN** the help SHALL list `r` as "Restart agent panes (fresh)" or similar description
+
+### Requirement: e keybinding opens the edit/rename dialog
+The TUI home screen SHALL support the `e` keybinding to open the rename/edit dialog for the selected session, and the group-rename dialog when a group is selected.
+
+#### Scenario: e opens the session rename dialog
+- **WHEN** the user presses `e` on a selected session
+- **THEN** the system SHALL open the session rename/edit dialog pre-filled with the session's current title, group, and profile
+
+#### Scenario: e on session being deleted is a no-op
+- **WHEN** the user presses `e` on a session with status `Deleting`
+- **THEN** the keybinding SHALL be a no-op
+
+#### Scenario: e is shown in help overlay
+- **WHEN** the user opens the help overlay (`?`)
+- **THEN** the help SHALL list `e` as "Edit/rename session" or similar description
 
 ## Functional Requirements
 
