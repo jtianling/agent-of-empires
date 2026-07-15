@@ -1327,7 +1327,13 @@ fn test_cross_agent_team_field_visible_for_claude() {
 }
 
 #[test]
-fn test_cross_agent_team_field_hidden_for_non_claude() {
+fn test_cross_agent_team_field_visible_for_codex() {
+    let dialog = NewSessionDialog::new_with_tools(vec!["codex"], TEST_PATH.to_string());
+    assert!(dialog.has_cross_agent_team_field());
+}
+
+#[test]
+fn test_cross_agent_team_field_hidden_for_unsupported_tool() {
     let mut dialog =
         NewSessionDialog::new_with_tools(vec!["opencode", "claude"], TEST_PATH.to_string());
     dialog.tool_index = 0; // opencode
@@ -1338,7 +1344,7 @@ fn test_cross_agent_team_field_hidden_for_non_claude() {
 
 #[test]
 fn test_cross_agent_team_field_hidden_when_sandbox() {
-    let mut dialog = single_tool_dialog();
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["codex"], TEST_PATH.to_string());
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
     assert!(!dialog.has_cross_agent_team_field());
@@ -1353,7 +1359,7 @@ fn test_cross_agent_team_default_from_config() {
     global.session.cross_agent_team_channel = "server:custom-channel".to_string();
 
     let dialog =
-        NewSessionDialog::new_with_config(vec!["claude"], "/tmp/project".to_string(), global);
+        NewSessionDialog::new_with_config(vec!["codex"], "/tmp/project".to_string(), global);
 
     assert!(dialog.cross_agent_team);
     assert_eq!(dialog.cross_agent_team_channel, "server:custom-channel");
@@ -1361,7 +1367,7 @@ fn test_cross_agent_team_default_from_config() {
 
 #[test]
 fn test_cross_agent_team_toggle_and_submit() {
-    let mut dialog = single_tool_dialog();
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["codex"], TEST_PATH.to_string());
     // title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4
     dialog.focused_field = 4;
     assert!(!dialog.cross_agent_team);
@@ -1376,6 +1382,25 @@ fn test_cross_agent_team_toggle_and_submit() {
         }
         _ => panic!("Expected Submit"),
     }
+}
+
+#[test]
+fn test_codex_cross_agent_team_toggle_is_independent_of_yolo() {
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["codex"], TEST_PATH.to_string());
+    dialog.focused_field = 4;
+    assert!(!dialog.yolo_mode);
+    assert!(!dialog.cross_agent_team);
+
+    dialog.handle_key(key(KeyCode::Char(' ')));
+
+    assert!(!dialog.yolo_mode);
+    assert!(dialog.cross_agent_team);
+
+    dialog.focused_field = 3;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+
+    assert!(dialog.yolo_mode);
+    assert!(dialog.cross_agent_team);
 }
 
 #[test]

@@ -127,12 +127,11 @@ pub struct SessionConfig {
     #[serde(default)]
     pub yolo_mode_default: bool,
 
-    /// Enable Cross Agent Team mode by default for new claude sessions
+    /// Enable Cross Agent Team mode by default for supported tools
     #[serde(default)]
     pub cross_agent_team_default: bool,
 
-    /// Development-channels string appended after
-    /// `--dangerously-load-development-channels` for Cross Agent Team sessions
+    /// Claude development-channels string appended for Cross Agent Team sessions
     #[serde(default = "default_cross_agent_team_channel")]
     pub cross_agent_team_channel: String,
 

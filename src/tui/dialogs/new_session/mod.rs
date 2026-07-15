@@ -61,8 +61,7 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     },
     FieldHelp {
         name: "Cross Agent Teams",
-        description:
-            "Launch claude with xats development channels and auto-confirm startup screens",
+        description: "Launch the selected tool with its local xats integration",
     },
     FieldHelp {
         name: "Worktree",
@@ -101,9 +100,9 @@ pub struct NewSessionData {
     /// The sandbox image to use (always populated from the input field).
     pub sandbox_image: String,
     pub yolo_mode: bool,
-    /// Whether to launch in Cross Agent Team mode (claude only, non-sandboxed).
+    /// Whether to launch in Cross Agent Team mode for a supported non-sandboxed tool.
     pub cross_agent_team: bool,
-    /// Development-channels string for Cross Agent Team launches.
+    /// Claude development-channels string for Cross Agent Team launches.
     pub cross_agent_team_channel: String,
     /// Additional environment entries for the container.
     /// `KEY` = pass through from host, `KEY=VALUE` = set explicitly.
@@ -558,12 +557,11 @@ impl NewSessionDialog {
             || self.right_pane_needs_yolo()
     }
 
-    /// Cross Agent Team is claude-only and unavailable while Sandbox is enabled
-    /// (the development-channels server is a local-only service).
+    /// Cross Agent Team supports Claude and Codex, and is unavailable in Sandbox.
     pub(super) fn has_cross_agent_team_field(&self) -> bool {
         self.available_tools
             .get(self.tool_index)
-            .is_some_and(|&t| t == "claude")
+            .is_some_and(|&t| crate::session::Instance::supports_cross_agent_team_tool(t))
             && !self.sandbox_enabled
     }
 

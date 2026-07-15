@@ -58,6 +58,19 @@ const AUTO_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// on screen (Claude has moved past the confirmation prompts).
 const AUTO_CONFIRM_DONE_GRACE: Duration = Duration::from_millis(1200);
 
+const CODEX_XATS_APP_SERVER_HOST: &str = "127.0.0.1";
+const CODEX_XATS_APP_SERVER_PORT: &str = "8799";
+const CODEX_XATS_APP_SERVER_URL: &str = "ws://127.0.0.1:8799";
+const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp";
+const CODEX_XATS_MISSING_PANE: &str = "[xats] Missing TMUX_PANE for Codex pre-registration.";
+const CODEX_XATS_MISSING_UUIDGEN: &str =
+    "[xats] Missing uuidgen required for Codex pre-registration.";
+const CODEX_XATS_MISSING_NC: &str = "[xats] Missing nc required to check the Codex app-server.";
+const CODEX_XATS_MISSING_NPX: &str = "[xats] Missing npx required for Codex pre-registration.";
+const CODEX_XATS_INVALID_UUID: &str = "[xats] uuidgen returned an invalid Codex agent UUID.";
+const CODEX_XATS_APP_SERVER_UNAVAILABLE: &str =
+    "[xats] Codex app-server is not listening on ws://127.0.0.1:8799.";
+
 /// Strip ANSI/CSI escape sequences (e.g. SGR color codes) from captured pane
 /// content. Claude colors the warning title per-word, so `tmux capture-pane -e`
 /// interleaves escape codes between words ("Loading\x1b[0m development...");
@@ -176,8 +189,9 @@ pub struct Instance {
     pub tool: String,
     #[serde(default)]
     pub yolo_mode: bool,
-    /// When set (claude, non-sandboxed only), launches with the xats
-    /// development-channels flag and auto-confirms Claude's startup screens.
+    /// When set for a supported non-sandboxed tool, launches with its xats
+    /// integration. Claude uses development channels, while Codex uses a
+    /// pane-local app-server bootstrap.
     #[serde(default)]
     pub cross_agent_team: bool,
     /// Development-channels string appended after
@@ -315,9 +329,23 @@ impl Instance {
         self.yolo_mode
     }
 
-    /// Whether this instance launches in Cross Agent Team mode (claude only).
+    pub fn supports_cross_agent_team_tool(tool: &str) -> bool {
+        matches!(tool, "claude" | "codex")
+    }
+
+    /// Whether this instance launches with tool-specific Cross Agent Team behavior.
     pub fn is_cross_agent_team(&self) -> bool {
-        self.cross_agent_team && self.tool == "claude"
+        self.cross_agent_team
+            && !self.is_sandboxed()
+            && Self::supports_cross_agent_team_tool(&self.tool)
+    }
+
+    fn is_claude_cross_agent_team(&self) -> bool {
+        self.is_cross_agent_team() && self.tool == "claude"
+    }
+
+    fn is_codex_cross_agent_team(&self) -> bool {
+        self.is_cross_agent_team() && self.tool == "codex"
     }
 
     /// Auto-confirm Claude's startup screens (dev-channels warning and the
@@ -329,7 +357,7 @@ impl Instance {
     /// (a background thread would stall once attach starts). No-ops when the
     /// session is not in Cross Agent Team mode.
     fn run_auto_confirm(&self) {
-        if !self.is_cross_agent_team() {
+        if !self.is_claude_cross_agent_team() {
             return;
         }
         let Ok(session) = self.tmux_session() else {
@@ -360,8 +388,8 @@ impl Instance {
     /// The `--dangerously-load-development-channels <channel>` flag for Cross
     /// Agent Team launches, or `None` when the mode is off. Falls back to the
     /// default channel when the stored channel is empty.
-    fn cross_agent_team_flag(&self) -> Option<String> {
-        if !self.is_cross_agent_team() {
+    fn claude_cross_agent_team_flag(&self) -> Option<String> {
+        if !self.is_claude_cross_agent_team() {
             return None;
         }
         let channel = if self.cross_agent_team_channel.is_empty() {
@@ -373,6 +401,73 @@ impl Instance {
             "--dangerously-load-development-channels {}",
             channel
         ))
+    }
+
+    fn codex_xats_bootstrap_command(&self, cmd: &str) -> String {
+        let base = self.get_tool_command();
+        let suffix = cmd.strip_prefix(base).unwrap_or_default();
+        let project_path = shell_escape(&self.project_path);
+        let app_server_url = shell_escape(CODEX_XATS_APP_SERVER_URL);
+        let codex_command = format!(
+            "{base} --remote {app_server_url} -C {project_path} \
+             -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\"{suffix}"
+        );
+        let script = format!(
+            "if [ -z \"${{TMUX_PANE:-}}\" ]; then \
+                 printf '%s\\n' '{missing_pane}' >&2; \
+                 exit 1; \
+             fi; \
+             if ! command -v uuidgen >/dev/null 2>&1; then \
+                 printf '%s\\n' '{missing_uuidgen}' >&2; \
+                 exit 1; \
+             fi; \
+             if ! command -v nc >/dev/null 2>&1; then \
+                 printf '%s\\n' '{missing_nc}' >&2; \
+                 exit 1; \
+             fi; \
+             if ! command -v npx >/dev/null 2>&1; then \
+                 printf '%s\\n' '{missing_npx}' >&2; \
+                 exit 1; \
+             fi; \
+             xats_agent_id=\"$(uuidgen)\" || {{ \
+                 printf '%s\\n' '[xats] Failed to generate a Codex agent UUID.' >&2; \
+                 exit 1; \
+             }}; \
+             case \"$xats_agent_id\" in \
+                 ????????-????-????-????-????????????) ;; \
+                 *) \
+                     printf '%s\\n' '{invalid_uuid}' >&2; \
+                     exit 1 \
+                     ;; \
+             esac; \
+             case \"$xats_agent_id\" in \
+                 *[!0-9A-Fa-f-]*) \
+                     printf '%s\\n' '{invalid_uuid}' >&2; \
+                     exit 1 \
+                     ;; \
+                 *) ;; \
+             esac; \
+             if ! nc -z {host} {port} >/dev/null 2>&1; then \
+                 printf '%s\\n' '{app_server_unavailable}' >&2; \
+                 exit 1; \
+             fi; \
+             if ! npx --no-install {package} pre-register-codex-pane \
+                 --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"; then \
+                 printf '%s\\n' '[xats] Failed to pre-register the Codex pane.' >&2; \
+                 exit 1; \
+             fi; \
+             exec {codex_command}",
+            host = CODEX_XATS_APP_SERVER_HOST,
+            port = CODEX_XATS_APP_SERVER_PORT,
+            package = CODEX_XATS_PACKAGE,
+            missing_pane = CODEX_XATS_MISSING_PANE,
+            missing_uuidgen = CODEX_XATS_MISSING_UUIDGEN,
+            missing_nc = CODEX_XATS_MISSING_NC,
+            missing_npx = CODEX_XATS_MISSING_NPX,
+            invalid_uuid = CODEX_XATS_INVALID_UUID,
+            app_server_unavailable = CODEX_XATS_APP_SERVER_UNAVAILABLE,
+        );
+        format!("sh -c {}", shell_escape(&script))
     }
 
     fn has_custom_command(&self) -> bool {
@@ -631,8 +726,11 @@ impl Instance {
                             }
                         }
                     }
-                    if let Some(flag) = self.cross_agent_team_flag() {
+                    if let Some(flag) = self.claude_cross_agent_team_flag() {
                         cmd = format!("{} {}", cmd, flag);
+                    }
+                    if is_primary && self.is_codex_cross_agent_team() {
+                        cmd = self.codex_xats_bootstrap_command(&cmd);
                     }
                     wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
                 })
@@ -655,8 +753,11 @@ impl Instance {
                         }
                     }
                 }
-                if let Some(flag) = self.cross_agent_team_flag() {
+                if let Some(flag) = self.claude_cross_agent_team_flag() {
                     cmd = format!("{} {}", cmd, flag);
+                }
+                if is_primary && self.is_codex_cross_agent_team() {
+                    cmd = self.codex_xats_bootstrap_command(&cmd);
                 }
                 if self.expects_shell() && env_vars.is_empty() {
                     let escaped_dir = shell_escape(&self.project_path);
@@ -2373,7 +2474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cross_agent_team_ignored_for_non_claude() {
+    fn test_codex_cross_agent_team_does_not_use_claude_flag() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
@@ -2383,6 +2484,145 @@ mod tests {
             !cmd.contains("--dangerously-load-development-channels"),
             "dev-channels flag should be claude-only, got {cmd}"
         );
+        assert!(
+            cmd.contains("pre-register-codex-pane"),
+            "expected Codex xats bootstrap, got {cmd}"
+        );
+    }
+
+    fn codex_xats_instance() -> Instance {
+        let mut inst = Instance::new("test", "/tmp/project path");
+        inst.tool = "codex".to_string();
+        inst.command = "codex".to_string();
+        inst.cross_agent_team = true;
+        inst
+    }
+
+    #[test]
+    fn test_cross_agent_team_supported_tool_helpers() {
+        assert!(Instance::supports_cross_agent_team_tool("claude"));
+        assert!(Instance::supports_cross_agent_team_tool("codex"));
+        assert!(!Instance::supports_cross_agent_team_tool("opencode"));
+
+        let mut inst = codex_xats_instance();
+        assert!(inst.is_cross_agent_team());
+        assert!(!inst.is_claude_cross_agent_team());
+        assert!(inst.is_codex_cross_agent_team());
+
+        inst.sandbox_info = Some(SandboxInfo {
+            enabled: true,
+            container_id: None,
+            image: "test-image".to_string(),
+            container_name: "test".to_string(),
+            created_at: None,
+            extra_env: None,
+            custom_instruction: None,
+        });
+        assert!(!inst.is_cross_agent_team());
+    }
+
+    #[test]
+    fn test_codex_xats_fresh_command_is_non_yolo_by_default() {
+        let cmd = codex_xats_instance().build_agent_command(None).unwrap();
+
+        assert!(cmd.contains("pre-register-codex-pane"));
+        assert!(cmd.contains("--remote"));
+        assert!(cmd.contains(CODEX_XATS_APP_SERVER_URL));
+        assert!(cmd.contains("xats.agent_id="));
+        assert!(cmd.contains("/tmp/project path"));
+        assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("CROSS_AGENT_TEAMS_MCP_TOKEN"));
+    }
+
+    #[test]
+    fn test_codex_xats_yolo_command_preserves_yolo_flag() {
+        let mut inst = codex_xats_instance();
+        inst.yolo_mode = true;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(cmd.contains("pre-register-codex-pane"));
+        assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn test_codex_xats_resume_preserves_native_token() {
+        let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
+        let cmd = codex_xats_instance()
+            .build_agent_command(Some(token))
+            .unwrap();
+
+        assert!(cmd.contains(&format!("resume {token}")));
+        assert!(cmd.find("--remote").unwrap() < cmd.find(&format!("resume {token}")).unwrap());
+    }
+
+    #[test]
+    fn test_codex_xats_restart_plans_reapply_bootstrap() {
+        let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
+        let inst = codex_xats_instance();
+
+        let (resume_cmd, resumed) = inst
+            .build_pane_resume_plan("codex", token, true, RestartMode::Resume)
+            .expect("Codex resume plan");
+        assert!(resumed);
+        assert!(resume_cmd.contains("pre-register-codex-pane"));
+        assert!(resume_cmd.contains(&format!("resume {token}")));
+
+        let (fresh_cmd, resumed) = inst
+            .build_pane_resume_plan("codex", token, true, RestartMode::Fresh)
+            .expect("Codex fresh plan");
+        assert!(!resumed);
+        assert!(fresh_cmd.contains("pre-register-codex-pane"));
+        assert!(!fresh_cmd.contains(&format!("resume {token}")));
+    }
+
+    #[test]
+    fn test_codex_xats_fork_preserves_parent_token() {
+        let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
+        let mut parent = codex_xats_instance();
+        parent.resume_token = Some(token.to_string());
+        let fork = parent
+            .create_fork("fork".to_string(), None)
+            .expect("Codex fork should build");
+
+        let cmd = fork.build_agent_command(None).unwrap();
+
+        assert!(cmd.contains(&format!("fork {token}")));
+        assert!(cmd.contains("pre-register-codex-pane"));
+        assert!(cmd.find("--remote").unwrap() < cmd.find(&format!("fork {token}")).unwrap());
+    }
+
+    #[test]
+    fn test_codex_xats_bootstrap_has_explicit_failure_diagnostics() {
+        let cmd = codex_xats_instance().build_agent_command(None).unwrap();
+
+        for diagnostic in [
+            CODEX_XATS_MISSING_PANE,
+            CODEX_XATS_MISSING_UUIDGEN,
+            CODEX_XATS_MISSING_NC,
+            CODEX_XATS_MISSING_NPX,
+            CODEX_XATS_INVALID_UUID,
+            CODEX_XATS_APP_SERVER_UNAVAILABLE,
+            "[xats] Failed to pre-register the Codex pane.",
+        ] {
+            assert!(
+                cmd.contains(diagnostic),
+                "missing diagnostic {diagnostic:?}: {cmd}"
+            );
+        }
+        assert!(cmd.contains("exit 1"));
+    }
+
+    #[test]
+    fn test_codex_cross_agent_team_disabled_uses_normal_command() {
+        let mut inst = codex_xats_instance();
+        inst.cross_agent_team = false;
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(!cmd.contains("pre-register-codex-pane"));
+        assert!(!cmd.contains("--remote"));
+        assert!(!cmd.contains("xats.agent_id"));
     }
 
     #[test]

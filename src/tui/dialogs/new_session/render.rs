@@ -1278,7 +1278,7 @@ impl NewSessionDialog {
                 continue; // YOLO (hidden for terminal and AlwaysYolo agents)
             }
             if idx == 6 && !has_cross_agent_team {
-                continue; // Cross Agent Team (claude-only, non-sandbox)
+                continue; // Cross Agent Team (supported tools, non-sandbox)
             }
             // idx 7 (Worktree) always shown
             if idx == 8 && !has_sandbox {

@@ -20,6 +20,7 @@ mod harness;
 mod agent_session_store;
 mod attach_reconcile;
 mod cli;
+mod codex_xats;
 mod cold_start_recovery;
 mod errors;
 mod fork;

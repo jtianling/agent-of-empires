@@ -876,7 +876,7 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::CrossAgentTeamDefault,
             label: "Cross Agent Team Default",
-            description: "Enable Cross Agent Team mode by default for new claude sessions",
+            description: "Enable Cross Agent Team mode by default for supported tools",
             value: FieldValue::Bool(cross_agent_team_default),
             category: SettingsCategory::Session,
             has_override: cat_default_override,
@@ -888,8 +888,7 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::CrossAgentTeamChannel,
             label: "Cross Agent Team Channel",
-            description:
-                "Channel appended after --dangerously-load-development-channels for Cross Agent Team",
+            description: "Claude channel appended after --dangerously-load-development-channels",
             value: FieldValue::Text(cross_agent_team_channel),
             category: SettingsCategory::Session,
             has_override: cat_channel_override,
