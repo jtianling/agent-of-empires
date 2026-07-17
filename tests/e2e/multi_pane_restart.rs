@@ -260,8 +260,8 @@ fn press_restart(h: &TuiTestHarness) {
 }
 
 fn press_fresh_restart(h: &TuiTestHarness) {
-    // `r` triggers Action::RespawnAgentPane (Fresh) for the selected instance.
-    h.send_keys("r");
+    // `C` triggers Action::RespawnAgentPane (Fresh) for the selected instance.
+    h.send_keys("C");
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +549,7 @@ fn empty_native_session_id_restarts_pane_fresh() {
 
 #[test]
 #[serial]
-fn r_restarts_every_tracked_pane_fresh_without_resume() {
+fn c_restarts_every_tracked_pane_clean_without_resume() {
     crate::harness::require_tmux!();
     require_sqlite3!();
 

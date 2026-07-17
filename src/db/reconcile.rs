@@ -182,9 +182,43 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
         if let Err(e) = reconcile_session(&store, inst, &panes, primary.as_deref()) {
             tracing::debug!("reconcile: session {} failed: {}", inst.id, e);
         }
+        capture_coherent_layout(&store, &inst.id, &session_name, &panes);
     }
 
     gc_orphan_pane_live(&store, &live_panes);
+}
+
+fn capture_coherent_layout(
+    store: &Store,
+    instance_id: &str,
+    session_name: &str,
+    panes: &[(u32, String)],
+) {
+    let Ok(slots) = store.read_slots_for_instance(instance_id) else {
+        return;
+    };
+    let live: HashSet<&str> = panes.iter().map(|(_, id)| id.as_str()).collect();
+    let durable: HashSet<&str> = slots.iter().map(|slot| slot.tmux_pane.as_str()).collect();
+    if live != durable || live.is_empty() {
+        return;
+    }
+    let Ok(layout) = crate::tmux::session_window_layout(session_name) else {
+        return;
+    };
+    let Ok(layout_ids) = crate::tmux::layout::pane_ids(&layout) else {
+        return;
+    };
+    let layout_set: HashSet<&str> = layout_ids.iter().map(String::as_str).collect();
+    if layout_ids.len() != live.len() || layout_set != live {
+        return;
+    }
+    if let Err(e) = store.upsert_layout_snapshot(instance_id, &layout, crate::db::now_unix()) {
+        tracing::debug!(
+            "reconcile: persist layout for {} failed: {}",
+            instance_id,
+            e
+        );
+    }
 }
 
 /// Reconcile a single session's panes into durable slots.

@@ -192,6 +192,54 @@ impl Store {
             "DELETE FROM agent_slot WHERE instance_id = ?1",
             [instance_id],
         )?;
+        self.delete_layout_snapshot(instance_id)?;
+        Ok(())
+    }
+
+    pub fn read_layout_snapshot(&self, instance_id: &str) -> Result<Option<LayoutSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT instance_id, window_layout, captured_at FROM instance_layout WHERE instance_id = ?1",
+        )?;
+        let mut rows = stmt.query([instance_id])?;
+        Ok(match rows.next()? {
+            Some(r) => Some(LayoutSnapshot {
+                instance_id: r.get(0)?,
+                window_layout: r.get(1)?,
+                captured_at: r.get(2)?,
+            }),
+            None => None,
+        })
+    }
+
+    /// Store a coherent layout, avoiding a database write when it is unchanged.
+    pub fn upsert_layout_snapshot(
+        &self,
+        instance_id: &str,
+        window_layout: &str,
+        captured_at: i64,
+    ) -> Result<bool> {
+        let changed = match self.read_layout_snapshot(instance_id)? {
+            Some(old) => old.window_layout != window_layout,
+            None => true,
+        };
+        if changed {
+            self.conn.execute(
+                "INSERT INTO instance_layout (instance_id, window_layout, captured_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(instance_id) DO UPDATE SET
+                 window_layout = excluded.window_layout,
+                 captured_at = excluded.captured_at",
+                rusqlite::params![instance_id, window_layout, captured_at],
+            )?;
+        }
+        Ok(changed)
+    }
+
+    pub fn delete_layout_snapshot(&self, instance_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM instance_layout WHERE instance_id = ?1",
+            [instance_id],
+        )?;
         Ok(())
     }
 
@@ -235,6 +283,13 @@ pub struct AgentSlot {
     pub last_seen_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutSnapshot {
+    pub instance_id: String,
+    pub window_layout: String,
+    pub captured_at: i64,
+}
+
 fn apply_pragmas(conn: &Connection) -> Result<()> {
     // WAL mode tolerates concurrent hook-subprocess writers plus the reconciler;
     // a short busy timeout avoids spurious "database is locked" errors on tiny
@@ -274,6 +329,12 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             kind               TEXT NOT NULL,
             detail             TEXT,
             created_at         INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS instance_layout (
+            instance_id        TEXT PRIMARY KEY,
+            window_layout      TEXT NOT NULL,
+            captured_at        INTEGER NOT NULL
         );",
     )?;
     backfill_agent_slot_tmux_pane(conn)?;
@@ -449,10 +510,36 @@ mod tests {
         store
             .upsert_agent_slot("other", 0, "claude", "s", "/tmp", "%2", 1)
             .unwrap();
+        store
+            .upsert_layout_snapshot("inst", "0000,1x1,0,0,1", 1)
+            .unwrap();
 
         store.delete_slots_for_instance("inst").unwrap();
         assert!(store.read_slots_for_instance("inst").unwrap().is_empty());
+        assert!(store.read_layout_snapshot("inst").unwrap().is_none());
         assert_eq!(store.read_slots_for_instance("other").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn layout_snapshot_upserts_only_when_changed_and_deletes() {
+        let (_tmp, store) = temp_store();
+        assert!(store
+            .upsert_layout_snapshot("inst", "aaaa,layout", 1)
+            .unwrap());
+        assert!(!store
+            .upsert_layout_snapshot("inst", "aaaa,layout", 2)
+            .unwrap());
+        assert_eq!(
+            store
+                .read_layout_snapshot("inst")
+                .unwrap()
+                .unwrap()
+                .captured_at,
+            1
+        );
+        assert!(store.upsert_layout_snapshot("inst", "bbbb,new", 3).unwrap());
+        store.delete_layout_snapshot("inst").unwrap();
+        assert!(store.read_layout_snapshot("inst").unwrap().is_none());
     }
 
     #[test]

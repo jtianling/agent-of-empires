@@ -784,11 +784,12 @@ fn test_r_does_not_open_group_rename_dialog() {
 
 #[test]
 #[serial]
-fn test_r_triggers_fresh_restart_action() {
+fn test_c_triggers_clean_restart_action_and_lowercase_r_is_removed() {
     let mut env = create_test_env_with_sessions(3);
     env.view.update_selected();
     let id = env.view.selected_session.clone().unwrap();
-    let action = env.view.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(env.view.handle_key(key(KeyCode::Char('r'))), None);
+    let action = env.view.handle_key(key(KeyCode::Char('C')));
     assert_eq!(
         action,
         Some(Action::RespawnAgentPane(
@@ -817,23 +818,25 @@ fn test_shift_r_triggers_resume_action() {
 
 #[test]
 #[serial]
-fn test_ctrl_and_alt_r_do_not_trigger_fresh_restart() {
-    // Fresh restart is destructive (kills tracked panes). Only a bare `r`
-    // (no modifiers) may trigger it; modifier combos must be a no-op so an
-    // unregistered Ctrl+r / Alt+r never destroys a session.
+fn test_modified_c_does_not_trigger_clean_restart() {
     let mut env = create_test_env_with_sessions(3);
     env.view.update_selected();
-    for modifier in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+    for modifier in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ] {
         let action = env
             .view
-            .handle_key(KeyEvent::new(KeyCode::Char('r'), modifier));
+            .handle_key(KeyEvent::new(KeyCode::Char('C'), modifier));
         assert_ne!(
             action,
             Some(Action::RespawnAgentPane(
                 env.view.selected_session.clone().unwrap(),
                 crate::session::RestartMode::Fresh
             )),
-            "modifier {modifier:?} + r must not trigger a fresh restart"
+            "modifier {modifier:?} + c must not trigger a clean restart"
         );
         assert!(env.view.rename_dialog.is_none());
     }
@@ -841,9 +844,28 @@ fn test_ctrl_and_alt_r_do_not_trigger_fresh_restart() {
 
 #[test]
 #[serial]
+fn test_shift_r_recovers_recoverable_session_and_v_is_removed() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    env.view.recoverable_ids.insert(id.clone());
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('R'))),
+        Some(Action::RecoverInstance(id))
+    );
+    assert_eq!(env.view.handle_key(key(KeyCode::Char('V'))), None);
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('C'))),
+        None,
+        "clean restart must be disabled while cold recovery is available"
+    );
+}
+
+#[test]
+#[serial]
 fn test_codex_fork_not_ready_hint_points_to_resume_restart() {
     // Codex fork needs a captured resume_token. `R` (resume restart) preserves it;
-    // `r` (fresh restart) clears it, so the guard hint must point to `R`.
+    // `C` (clean restart) clears it, so the guard hint must point to `R`.
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();

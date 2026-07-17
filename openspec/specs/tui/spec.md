@@ -19,7 +19,8 @@ operations available via CLI are also available in the TUI, plus additional view
 │                        │                              │
 │  [n]ew  [d]elete  [?]  │  [Enter] attach              │
 │  [s] settings          │  [D] diff view               │
-│                        │  [r] restart                 │
+│                        │  [R] resume/recover           │
+│                        │  [C] clean restart            │
 └────────────────────────┴──────────────────────────────┘
 
 ┌─ Diff View ────────────────────────────────────────────┐
@@ -50,8 +51,8 @@ operations available via CLI are also available in the TUI, plus additional view
 | `Enter` | Attach to selected agent session |
 | `D` | Open diff view for selected session |
 | `d` | Delete selected session |
-| `r` | Restart selected session |
-| `R` | Restart agent pane only |
+| `R` | Resume a live session or recover a persisted session |
+| `C` | Clean-restart agent panes in a live session |
 | `s` | Open settings |
 | `?` | Show help |
 | `q` | Quit (only plain `q` with no modifiers; `Ctrl+Q` is ignored to prevent accidental quit after tmux detach) |
@@ -154,34 +155,61 @@ The terminal teardown sequence in `src/tui/mod.rs` SHALL include a title reset s
 - **WHEN** the TUI exits and restores the terminal
 - **THEN** the title reset SHALL execute as part of the teardown sequence, before `LeaveAlternateScreen`
 
-### Requirement: R keybinding restarts agent pane only
-The TUI home screen SHALL support the `R` (Shift+R) keybinding to resume the AoE-managed agent panes of the selected session, without destroying the session or its layout. `R` SHALL keep its existing resume behavior (fan out to every tracked pane and resume each from its persisted `native_session_id`).
+### Requirement: R keybinding resumes or recovers the selected session
+The TUI home screen SHALL support the `R` (Shift+R) keybinding as the state-aware action for returning to the selected session's persisted conversations. When the tmux session exists, `R` SHALL resume every tracked pane from its persisted `native_session_id` without changing the layout. When the selected instance is recoverable because its tmux session does not exist but durable slots remain, `R` SHALL rebuild and recover it from those slots.
 
 #### Scenario: R on session with dead agent pane
-- **WHEN** the user presses `R` on a selected session
-- **AND** the agent pane is dead
-- **THEN** the system SHALL respawn the agent pane with the original agent command
+- **WHEN** the user presses `R` on a selected session whose tmux session exists
+- **AND** an agent pane is dead
+- **THEN** the system SHALL respawn every tracked agent pane through resume mode
 - **AND** the session status SHALL transition to `Starting`
 - **AND** the session layout SHALL be preserved
 
 #### Scenario: R on session with running agent pane
-- **WHEN** the user presses `R` on a selected session
-- **AND** the agent pane is alive
-- **THEN** the system SHALL force-restart the agent pane (kill + respawn)
+- **WHEN** the user presses `R` on a selected session whose tmux session exists
+- **AND** an agent pane is alive
+- **THEN** the system SHALL force-restart every tracked agent pane in resume mode
 - **AND** the session status SHALL transition to `Starting`
 
-#### Scenario: R on session that does not exist
-- **WHEN** the user presses `R` on a selected session
-- **AND** the tmux session does not exist
-- **THEN** the system SHALL start the session normally (same as attach behavior)
+#### Scenario: R on recoverable session
+- **WHEN** the user presses `R` on a selected instance with durable slots whose tmux session does not exist
+- **THEN** the system SHALL invoke cold recovery for that instance
+- **AND** it SHALL rebuild the session and resume its persisted panes
+
+#### Scenario: R on missing non-recoverable session
+- **WHEN** the user presses `R` on a selected instance whose tmux session does not exist
+- **AND** the instance has no durable slots
+- **THEN** the system SHALL retain the existing normal-start fallback behavior
 
 #### Scenario: R on session being deleted
 - **WHEN** the user presses `R` on a session with status `Deleting`
 - **THEN** the keybinding SHALL be a no-op
 
-#### Scenario: R is shown in help overlay
-- **WHEN** the user opens the help overlay (`?`)
-- **THEN** the help SHALL list `R` as "Resume agent panes" or similar description
+#### Scenario: R is shown contextually
+- **WHEN** the selected instance is recoverable
+- **THEN** the home status bar SHALL show `R` as the recover action
+- **AND** the help overlay SHALL describe `R` as the resume/recover action
+
+#### Scenario: R is shown for a live session
+- **WHEN** the selected instance is not recoverable
+- **THEN** the home status bar SHALL show `R` as the resume action
+
+### Requirement: C keybinding restarts agent panes clean
+The TUI home screen SHALL support the `C` (Shift+C) keybinding to restart every tracked agent pane of the selected live session with a fresh command that carries no resume flag, preserving the session layout.
+
+#### Scenario: C triggers a clean restart on a live session
+- **WHEN** the user presses `C` on a selected session whose tmux session exists
+- **THEN** the system SHALL initiate a fresh restart of the session's tracked agent panes
+- **AND** the session layout SHALL be preserved
+- **AND** no persisted resume token SHALL be passed to the relaunched commands
+
+#### Scenario: C on session being deleted is a no-op
+- **WHEN** the user presses `C` on a session with status `Deleting`
+- **THEN** the keybinding SHALL be a no-op
+
+#### Scenario: C is shown in help and status hints
+- **WHEN** the user opens the help overlay or views the home status bar for a selected live session
+- **THEN** the TUI SHALL list `C` as the clean or fresh restart action
 
 ### Requirement: Session list displays numeric indices
 The TUI session list SHALL display a right-aligned numeric index (1-99) as a fixed-width prefix before the status icon for each visible session. Group headers SHALL show blank space in the index column to maintain alignment.
@@ -276,22 +304,6 @@ The home-view status bar SHALL display the current session-list sort order and t
 - **WHEN** the terminal is too narrow to fit both the left key hints and the right sort indicator
 - **THEN** the left key hints SHALL truncate within their region
 - **AND** the right sort indicator SHALL remain visible without overlapping the left hints
-
-### Requirement: r keybinding restarts agent panes fresh
-The TUI home screen SHALL support the `r` (lowercase, no Shift) keybinding to restart every tracked agent pane of the selected session with a fresh command that carries no resume flag, preserving the session layout.
-
-#### Scenario: r triggers a fresh restart on a session
-- **WHEN** the user presses `r` on a selected session
-- **THEN** the system SHALL initiate a fresh restart of the session's tracked agent panes
-- **AND** the session layout SHALL be preserved
-
-#### Scenario: r on session being deleted is a no-op
-- **WHEN** the user presses `r` on a session with status `Deleting`
-- **THEN** the keybinding SHALL be a no-op
-
-#### Scenario: r is shown in help overlay
-- **WHEN** the user opens the help overlay (`?`)
-- **THEN** the help SHALL list `r` as "Restart agent panes (fresh)" or similar description
 
 ### Requirement: e keybinding opens the edit/rename dialog
 The TUI home screen SHALL support the `e` keybinding to open the rename/edit dialog for the selected session, and the group-rename dialog when a group is selected.

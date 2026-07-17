@@ -499,13 +499,13 @@ pub fn split_window_right(
     Ok(())
 }
 
-/// Like [`split_window_right`] but returns the new pane's id. Cold-start recovery
-/// needs pane ids in creation (slot) order: `session_pane_ids` lists by
-/// `pane_index`, which diverges from creation order once a session has 3+ panes
-/// (every split inserts a pane immediately right of pane 0, so newer panes take
-/// lower indexes). `-P -F '#{pane_id}'` makes tmux print the created pane's id.
+/// Split the target pane horizontally and return the new pane's id.
+///
+/// Cold-start recovery chains each split from the pane created immediately
+/// before it. tmux assigns custom-layout leaves in window pane-list order, so
+/// this preserves durable slot order when the saved layout is applied.
 pub fn split_window_right_capture_pane(
-    session_name: &str,
+    target_pane: &str,
     working_dir: &str,
     command: &str,
     remain_on_exit: bool,
@@ -517,22 +517,15 @@ pub fn split_window_right_capture_pane(
         "-F".to_string(),
         "#{pane_id}".to_string(),
         "-t".to_string(),
-        session_name.to_string(),
+        target_pane.to_string(),
         "-c".to_string(),
         working_dir.to_string(),
         command.to_string(),
     ];
 
     if remain_on_exit {
-        append_remain_on_exit_args(&mut args, session_name);
+        append_remain_on_exit_args(&mut args, target_pane);
     }
-
-    args.extend([
-        ";".to_string(),
-        "select-pane".to_string(),
-        "-t".to_string(),
-        format!("{}:.0", session_name),
-    ]);
 
     let output = crate::tmux::tmux_command().args(&args).output()?;
     if !output.status.success() {
@@ -550,6 +543,45 @@ pub fn split_window_right_capture_pane(
         Some(pane_id) => Ok(pane_id.to_string()),
         None => bail!("split-window did not report a pane id"),
     }
+}
+
+/// Read the active window's serialized layout for one session.
+pub fn session_window_layout(session_name: &str) -> Result<String> {
+    let output = crate::tmux::tmux_command()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            session_name,
+            "#{window_layout}",
+        ])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Failed to read window layout: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let layout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if layout.is_empty() {
+        bail!("tmux returned an empty window layout");
+    }
+    Ok(layout)
+}
+
+/// Apply a serialized layout to the session's active window. The layout is
+/// passed as one argv value, never through a shell.
+pub fn apply_window_layout(session_name: &str, layout: &str) -> Result<()> {
+    let output = crate::tmux::tmux_command()
+        .args(["select-layout", "-t", session_name, layout])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Failed to apply window layout: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }
 
 fn sanitize_session_name(name: &str) -> String {

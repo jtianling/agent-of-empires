@@ -501,12 +501,10 @@ impl HomeView {
 
         // Normal mode keybindings
         match key.code {
-            KeyCode::Esc => {
-                if !self.search_matches.is_empty() {
-                    self.search_matches.clear();
-                    self.search_match_index = 0;
-                    self.search_query = Input::default();
-                }
+            KeyCode::Esc if !self.search_matches.is_empty() => {
+                self.search_matches.clear();
+                self.search_match_index = 0;
+                self.search_query = Input::default();
             }
             KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => return Some(Action::Quit),
             KeyCode::Char('?') => {
@@ -786,21 +784,22 @@ impl HomeView {
                             return None;
                         }
                     }
+                    if self.is_recoverable(id) {
+                        return Some(Action::RecoverInstance(id.to_string()));
+                    }
                     return Some(Action::RespawnAgentPane(
                         id.to_string(),
                         crate::session::RestartMode::Resume,
                     ));
                 }
             }
-            KeyCode::Char('V') => {
+            KeyCode::Char('C')
+                if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
                 if let Some(id) = &self.selected_session {
                     if self.is_recoverable(id) {
-                        return Some(Action::RecoverInstance(id.to_string()));
+                        return None;
                     }
-                }
-            }
-            KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
-                if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
@@ -887,11 +886,9 @@ impl HomeView {
                 self.cursor = 0;
                 self.update_selected();
             }
-            KeyCode::End | KeyCode::Char('G') => {
-                if !self.flat_items.is_empty() {
-                    self.cursor = self.flat_items.len() - 1;
-                    self.update_selected();
-                }
+            KeyCode::End | KeyCode::Char('G') if !self.flat_items.is_empty() => {
+                self.cursor = self.flat_items.len() - 1;
+                self.update_selected();
             }
             KeyCode::Enter => {
                 if let Some(id) = &self.selected_session {

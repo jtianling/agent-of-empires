@@ -3,7 +3,7 @@
 //! After a reboot every tmux session is gone but an instance's `agent_slot`
 //! rows survive in the store. AoE classifies such an instance as *recoverable*,
 //! marks it in the home list, and lets the user rebuild + resume it by pressing
-//! `V` on the focused row. Recovery recreates the tmux session, recreates one
+//! `R` on the focused row. Recovery recreates the tmux session, recreates one
 //! pane per persisted slot (slot 0 as the primary `@aoe_agent_pane`, the rest
 //! split off), resume-launches each pane from its `agent_slot.native_session_id`
 //! via the same per-pane resume core the `R` flow uses, and writes the new pane
@@ -25,7 +25,7 @@
 //! real on-disk `cwd` so the recovery `split-window`/`respawn-pane` `-c <cwd>`
 //! invocations succeed deterministically. Cold start is then simulated by
 //! killing the managed tmux session while the home-view TUI stays up; the poller
-//! flips the instance to `[recoverable]` and `V` triggers the rebuild.
+//! flips the instance to `[recoverable]` and `R` triggers the rebuild.
 //!
 //! Everything lives on the harness's isolated private tmux socket and temp HOME;
 //! the agent binaries are never really run (only the command strings matter), so
@@ -244,6 +244,19 @@ fn pane_start_command(h: &TuiTestHarness, pane_id: &str) -> String {
     h.tmux_display_message(pane_id, "#{pane_start_command}")
 }
 
+fn pane_position(h: &TuiTestHarness, pane_id: &str) -> (u32, u32) {
+    let position = h.tmux_display_message(pane_id, "#{pane_left},#{pane_top}");
+    let (left, top) = position
+        .split_once(',')
+        .unwrap_or_else(|| panic!("invalid pane position for {pane_id}: {position:?}"));
+    (
+        left.parse()
+            .unwrap_or_else(|_| panic!("invalid pane_left for {pane_id}: {left:?}")),
+        top.parse()
+            .unwrap_or_else(|_| panic!("invalid pane_top for {pane_id}: {top:?}")),
+    )
+}
+
 /// Poll a pane's start command until it contains `needle`, or panic with the
 /// last seen value and a screen dump. Recovery is synchronous in the V handler
 /// but the respawn command may take a tick to surface in tmux.
@@ -373,7 +386,7 @@ fn recover_rebuilds_session_with_n_panes_resumed_and_writes_back() {
     // is focused.
     h.assert_screen_contains("Recover");
 
-    h.send_keys("V");
+    h.send_keys("R");
 
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
 
@@ -470,6 +483,165 @@ fn recover_rebuilds_session_with_n_panes_resumed_and_writes_back() {
     }
 }
 
+#[test]
+#[serial]
+fn recover_preserves_nested_left_and_stacked_right_layout() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_nested_layout");
+    let slots = [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+        "cccccccc-cccc-4ccc-8ccc-ccccccccccc3",
+    ];
+    let (instance_id, session_name, _project, old_panes) =
+        seed_recoverable(&mut h, "Nested Layout Recover", &slots);
+    let db = db_path(&h);
+
+    let primary = old_panes[0].clone();
+    for pane in &old_panes[1..] {
+        assert!(tmux(&h, &["kill-pane", "-t", pane]).status.success());
+    }
+    let right_out = tmux(
+        &h,
+        &[
+            "split-window",
+            "-h",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &primary,
+        ],
+    );
+    assert!(right_out.status.success());
+    let right = String::from_utf8_lossy(&right_out.stdout)
+        .trim()
+        .to_string();
+    let bottom_out = tmux(
+        &h,
+        &["split-window", "-v", "-P", "-F", "#{pane_id}", "-t", &right],
+    );
+    assert!(bottom_out.status.success());
+    let bottom = String::from_utf8_lossy(&bottom_out.stdout)
+        .trim()
+        .to_string();
+    run_record_pane(&h, &right, &instance_id, slots[1], &_project);
+    run_record_pane(&h, &bottom, &instance_id, slots[2], &_project);
+    let live_layout = h.tmux_display_message(&session_name, "#{window_layout}");
+    let start = Instant::now();
+    while sqlite_query(
+        &db,
+        &format!("SELECT window_layout FROM instance_layout WHERE instance_id='{instance_id}';"),
+    ) != live_layout
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "nested layout was not persisted"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let saved = sqlite_query(
+        &db,
+        &format!("SELECT window_layout FROM instance_layout WHERE instance_id='{instance_id}';"),
+    );
+    assert!(
+        saved.contains('{') && saved.contains('['),
+        "precondition: saved layout must be nested, got {saved:?}"
+    );
+
+    let old_panes = slot_panes(&db, &instance_id);
+    let old_positions: Vec<(u32, u32)> = old_panes
+        .iter()
+        .map(|pane| pane_position(&h, pane))
+        .collect();
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+    assert_ne!(
+        wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]),
+        old_panes[0]
+    );
+
+    let geometry = tmux(
+        &h,
+        &[
+            "list-panes",
+            "-t",
+            &session_name,
+            "-F",
+            "#{pane_left},#{pane_top},#{pane_width},#{pane_height}",
+        ],
+    );
+    let panes: Vec<Vec<u32>> = String::from_utf8_lossy(&geometry.stdout)
+        .lines()
+        .map(|line| {
+            line.split(',')
+                .map(|value| value.parse().unwrap())
+                .collect()
+        })
+        .collect();
+    assert_eq!(panes.len(), 3);
+    let left = panes.iter().filter(|pane| pane[0] == 0).count();
+    let right_left = panes.iter().map(|pane| pane[0]).max().unwrap();
+    let right: Vec<&Vec<u32>> = panes.iter().filter(|pane| pane[0] == right_left).collect();
+    assert_eq!(left, 1, "expected one full-height left pane: {panes:?}");
+    assert_eq!(
+        right.len(),
+        2,
+        "expected two stacked right panes: {panes:?}"
+    );
+    assert_ne!(
+        right[0][1], right[1][1],
+        "right panes must be vertically stacked"
+    );
+
+    let new_panes = slot_panes(&db, &instance_id);
+    let new_positions: Vec<(u32, u32)> = new_panes
+        .iter()
+        .map(|pane| pane_position(&h, pane))
+        .collect();
+    assert_eq!(
+        new_positions, old_positions,
+        "each durable slot must return to its original spatial position"
+    );
+}
+
+#[test]
+#[serial]
+fn invalid_layout_snapshot_falls_back_and_recovers_every_pane() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_invalid_layout");
+    let slots = [
+        "dddddddd-dddd-4ddd-8ddd-ddddddddddd1",
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2",
+    ];
+    let (instance_id, session_name, _project, old_panes) =
+        seed_recoverable(&mut h, "Invalid Layout Recover", &slots);
+    let db = db_path(&h);
+    cold_start(&h, &session_name);
+    sqlite_query(
+        &db,
+        &format!(
+            "INSERT INTO instance_layout(instance_id, window_layout, captured_at)
+             VALUES('{instance_id}', 'invalid', 1)
+             ON CONFLICT(instance_id) DO UPDATE SET window_layout='invalid';"
+        ),
+    );
+    h.send_keys("R");
+    assert_ne!(
+        wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]),
+        old_panes[0]
+    );
+    assert_eq!(session_pane_ids(&h, &session_name).len(), slots.len());
+    let new_panes = slot_panes(&db, &instance_id);
+    for (pane, native) in new_panes.iter().zip(slot_natives(&db, &instance_id)) {
+        wait_for_pane_start_command_contains(&h, pane, &format!("--resume {native}"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Requirement: Per-pane degrade and isolation on recovery
 //   6.3a: a slot with an empty native_session_id degrades to a fresh launch for
@@ -500,7 +672,7 @@ fn recover_degrades_empty_native_id_to_fresh_while_sibling_resumes() {
         &format!("UPDATE agent_slot SET native_session_id='' WHERE instance_id='{instance_id}' AND slot=1;"),
     );
 
-    h.send_keys("V");
+    h.send_keys("R");
 
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
     assert_ne!(new_slot0, old_panes[0], "recovery did not run");
@@ -566,7 +738,7 @@ fn recover_one_pane_failure_does_not_abort_sibling() {
         ),
     );
 
-    h.send_keys("V");
+    h.send_keys("R");
 
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
     assert_ne!(new_slot0, old_panes[0], "recovery did not run");

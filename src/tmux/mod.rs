@@ -1,5 +1,6 @@
 //! tmux integration module
 
+pub mod layout;
 pub(crate) mod notification_monitor;
 mod session;
 pub mod status_bar;
@@ -8,8 +9,9 @@ pub(crate) mod utils;
 
 pub use notification_monitor::write_ack_signal;
 pub use session::{
-    kill_pane_process_tree_target, respawn_pane_target, send_keys_to_pane_target,
-    split_window_right, split_window_right_capture_pane, Session,
+    apply_window_layout, kill_pane_process_tree_target, respawn_pane_target,
+    send_keys_to_pane_target, session_window_layout, split_window_right,
+    split_window_right_capture_pane, Session,
 };
 pub use status_bar::{get_session_info_for_current, get_status_for_current_session};
 pub use status_detection::detect_status_from_content;

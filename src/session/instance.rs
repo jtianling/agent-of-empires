@@ -1312,6 +1312,26 @@ impl Instance {
         let paired = rebuild_recovery_panes(&self.title, &session_name, &ordered)?;
         tmux::refresh_session_cache();
 
+        if let Ok(Some(snapshot)) = store.read_layout_snapshot(&self.id) {
+            let mapping: std::collections::HashMap<String, String> = paired
+                .iter()
+                .filter_map(|(slot, pane)| {
+                    pane.as_ref()
+                        .map(|new_pane| (slot.tmux_pane.clone(), new_pane.clone()))
+                })
+                .collect();
+            match tmux::layout::remap(&snapshot.window_layout, &mapping)
+                .and_then(|layout| tmux::apply_window_layout(&session_name, &layout))
+            {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "Could not restore pane layout for '{}'; using fallback layout: {}",
+                    self.title,
+                    e
+                ),
+            }
+        }
+
         let now = crate::db::now_unix();
         let mut outcomes = Vec::with_capacity(paired.len());
         for (slot, maybe_pane) in &paired {
@@ -2053,12 +2073,12 @@ fn is_recoverable_from(has_slots: bool, session_alive: bool) -> bool {
 
 /// Recreate one pane per slot and pair each slot with its new pane id in slot
 /// order. Slot 0 is the primary pane the start path already created (read back
-/// from `@aoe_agent_pane`); slots 1..N are split off, each capturing its own id
-/// at creation time. Pane ids are deliberately NOT re-listed via
-/// `session_pane_ids`: that orders by `pane_index`, which diverges from creation
-/// order for 3+ panes (every right-split inserts a pane next to pane 0). A slot
-/// whose split fails (e.g. a recorded cwd that no longer exists) is paired with
-/// `None` so its siblings still recover instead of the whole rebuild aborting.
+/// from `@aoe_agent_pane`); slots 1..N are split as a chain from the pane
+/// created immediately before them. The chain keeps tmux's pane-list order
+/// aligned with durable slot order, which is how `select-layout` assigns panes
+/// to layout leaves. A slot whose split fails (e.g. a recorded cwd that no
+/// longer exists) is paired with `None` so its siblings still recover instead
+/// of the whole rebuild aborting.
 fn rebuild_recovery_panes(
     title: &str,
     session_name: &str,
@@ -2076,13 +2096,17 @@ fn rebuild_recovery_panes(
         .ok_or_else(|| anyhow::anyhow!("recovered session '{}' has no primary pane", title))?;
 
     let mut paired = Vec::with_capacity(ordered.len());
-    paired.push((ordered[0].clone(), Some(primary_pane)));
+    paired.push((ordered[0].clone(), Some(primary_pane.clone())));
+    let mut split_target = primary_pane;
 
     for slot in ordered.iter().skip(1) {
         // Placeholder pane runs the default shell until the resume flow
         // respawns it with the slot's agent command, so no remain-on-exit yet.
-        match tmux::split_window_right_capture_pane(session_name, &slot.cwd, "", false) {
-            Ok(pane_id) => paired.push((slot.clone(), Some(pane_id))),
+        match tmux::split_window_right_capture_pane(&split_target, &slot.cwd, "", false) {
+            Ok(pane_id) => {
+                split_target = pane_id.clone();
+                paired.push((slot.clone(), Some(pane_id)));
+            }
             Err(e) => {
                 tracing::warn!(
                     "Failed to create recovery pane for slot {} of '{}' (cwd {}): {}",

@@ -488,16 +488,23 @@ impl HomeView {
             ]);
         }
 
-        if self
-            .selected_session
-            .as_ref()
-            .is_some_and(|id| self.is_recoverable(id))
-        {
+        if let Some(id) = self.selected_session.as_ref() {
+            let recoverable = self.is_recoverable(id);
             spans.extend([
                 Span::styled("│", sep_style),
-                Span::styled(" V", key_style),
-                Span::styled(" Recover ", desc_style),
+                Span::styled(" R", key_style),
+                Span::styled(
+                    if recoverable { " Recover " } else { " Resume " },
+                    desc_style,
+                ),
             ]);
+            if !recoverable {
+                spans.extend([
+                    Span::styled("│", sep_style),
+                    Span::styled(" C", key_style),
+                    Span::styled(" Clean ", desc_style),
+                ]);
+            }
         }
 
         if !self.flat_items.is_empty() {

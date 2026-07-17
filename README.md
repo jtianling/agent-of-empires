@@ -29,7 +29,7 @@ This fork builds on the original AoE with several quality-of-life improvements f
 
 - **Notification bar** -- inspired by Agent Deck, the tmux status bar shows real-time status for all sessions (Running / Waiting / Idle) with status icons. Even while attached to one agent, you can glance at the status bar to see if another session is waiting for input. Combined with quick-switch, jumping over auto-acknowledges the Waiting state.
 
-- **Agent restart** -- press `R` to restart the agent pane in-place without destroying and recreating the session. Useful for agents like Claude Code that need a restart to pick up skill config changes. For Claude Code and Codex, a graceful resume-restart persists a resume token so the conversation can continue from where it left off.
+- **Agent restart and recovery** -- press `R` to resume agent panes in-place, or to rebuild a recoverable session after tmux or the machine restarts. Press `C` for an explicit clean restart without resuming the previous conversation.
 
 - **Narrow-screen layout** -- on narrow terminals (iPhone portrait, Mac split-screen, small tmux panes), the TUI automatically hides the preview panel and shows only the session list at full width. When attaching to a session with split panes, the agent pane auto-zooms for a usable full-screen view; returning to a wide terminal auto-unzooms. Pane-switch keybindings (`Ctrl+b h/j/k/l`, `Ctrl+;`) are zoom-aware, so switching panes while zoomed re-zooms the target pane seamlessly.
 
