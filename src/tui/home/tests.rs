@@ -851,14 +851,48 @@ fn test_shift_r_recovers_recoverable_session_and_v_is_removed() {
     env.view.recoverable_ids.insert(id.clone());
     assert_eq!(
         env.view.handle_key(key(KeyCode::Char('R'))),
-        Some(Action::RecoverInstance(id))
+        Some(Action::RecoverInstance(
+            id.clone(),
+            crate::session::RestartMode::Resume
+        ))
     );
     assert_eq!(env.view.handle_key(key(KeyCode::Char('V'))), None);
     assert_eq!(
         env.view.handle_key(key(KeyCode::Char('C'))),
-        None,
-        "clean restart must be disabled while cold recovery is available"
+        Some(Action::RecoverInstance(
+            id,
+            crate::session::RestartMode::Fresh
+        )),
+        "clean restart must recover a cold session instead of doing nothing"
     );
+}
+
+#[test]
+#[serial]
+fn test_shift_c_clean_restarts_live_session() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('C'))),
+        Some(Action::RespawnAgentPane(
+            id,
+            crate::session::RestartMode::Fresh
+        )),
+        "a live session must clean restart in place, not recover"
+    );
+}
+
+#[test]
+#[serial]
+fn test_shift_c_on_deleting_session_is_noop_even_when_recoverable() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    env.view.recoverable_ids.insert(id.clone());
+    env.view
+        .set_instance_status(&id, crate::session::Status::Deleting);
+    assert_eq!(env.view.handle_key(key(KeyCode::Char('C'))), None);
 }
 
 #[test]

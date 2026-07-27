@@ -1273,22 +1273,28 @@ impl Instance {
         )
     }
 
-    /// Rebuild this instance's tmux session from its persisted slots and resume
-    /// each pane from its `native_session_id`. The session is recreated through
-    /// the normal start path so worktree/sandbox context is restored, then one
-    /// pane per slot is created in ascending slot order (slot 0 is the primary
-    /// `@aoe_agent_pane`, the rest are split off), each pane is resume-launched
-    /// via [`resume_launch_pane`], the new pane ids are written back into
-    /// `agent_slot.tmux_pane`, and `@aoe_agent_pane` is re-pinned to slot 0.
+    /// Rebuild this instance's tmux session from its persisted slots and launch
+    /// each pane. The session is recreated through the normal start path so
+    /// worktree/sandbox context is restored, then one pane per slot is created in
+    /// ascending slot order (slot 0 is the primary `@aoe_agent_pane`, the rest are
+    /// split off), each pane is launched via [`resume_launch_pane`], the new pane
+    /// ids are written back into `agent_slot.tmux_pane`, and `@aoe_agent_pane` is
+    /// re-pinned to slot 0.
+    ///
+    /// [`RestartMode::Resume`] launches each pane from its `native_session_id`;
+    /// [`RestartMode::Fresh`] forces the no-resume path for every pane, keeping
+    /// each slot's agent, cwd, and launch context but discarding its conversation.
+    /// Fresh recovery runs the same identity transaction as a live fresh restart.
     ///
     /// Per-pane failures are collected into the returned outcomes and never abort
     /// recovery of sibling panes. Returns an error only when the session/pane
-    /// rebuild itself fails (before any per-pane resume runs) or when the created
+    /// rebuild itself fails (before any per-pane launch runs) or when the created
     /// pane count does not match the slot count.
     pub fn recover_from_slots(
         &mut self,
         store: &crate::db::Store,
         slots: &[crate::db::AgentSlot],
+        mode: RestartMode,
     ) -> Result<Vec<PaneResumeOutcome>> {
         if slots.is_empty() {
             anyhow::bail!("no persisted slots to recover");
@@ -1299,9 +1305,17 @@ impl Instance {
 
         // Recreate the session shell with its slot-0 primary pane via the normal
         // start path (restores worktree/sandbox). The slot-0 command is launched
-        // fresh here and then uniformly resume-launched below, matching how
+        // fresh here and then uniformly relaunched below, matching how
         // `resume_all_tracked_panes` treats every slot the same way.
         self.start_with_size(crate::terminal::get_size())?;
+
+        // Prepare the fresh conversation identity *after* the rebuild launch, not
+        // before: the rebuild's slot-0 command is throwaway (it is killed and
+        // replaced by the uniform per-slot launch below), so allocating the new
+        // `--session-id` here means only the authoritative launch claims it.
+        // Reallocating before the rebuild would burn the new id on the throwaway
+        // process and make the real launch fail with an id that is already in use.
+        let identity = self.begin_fresh_identity(mode);
 
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
 
@@ -1334,6 +1348,7 @@ impl Instance {
 
         let now = crate::db::now_unix();
         let mut outcomes = Vec::with_capacity(paired.len());
+        let mut primary_launched = false;
         for (slot, maybe_pane) in &paired {
             let Some(new_pane) = maybe_pane else {
                 outcomes.push(PaneResumeOutcome::Error(format!(
@@ -1348,8 +1363,11 @@ impl Instance {
                 new_pane,
                 &slot.cwd,
                 slot.slot == 0,
-                RestartMode::Resume,
+                mode,
             );
+            if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
+                primary_launched = true;
+            }
             if let PaneResumeOutcome::Error(ref err) = outcome {
                 tracing::warn!(
                     "Failed to recover pane (slot {}) for '{}': {}",
@@ -1376,6 +1394,14 @@ impl Instance {
             }
             outcomes.push(outcome);
         }
+
+        // Commit the fresh identity only when the primary slot launched; a fresh
+        // recovery also abandons the stale `resume_token` so a later fork does not
+        // reuse the conversation this recovery discarded.
+        if identity.is_some() && primary_launched {
+            self.clear_resume_token();
+        }
+        self.rollback_fresh_identity_on_failure(identity, primary_launched);
 
         // Re-pin @aoe_agent_pane to slot 0's pane (always created: the primary
         // pane) so reconcile and the `R` resume-all flow keep operating on the
@@ -2893,6 +2919,64 @@ mod tests {
             Some("019d1af9-a899-7df1-8f7d-a244126e5ded"),
             "fork must not reuse the pre-fresh resume token"
         );
+    }
+
+    #[test]
+    fn test_clean_recovery_commit_clears_token_so_fork_does_not_reuse_it() {
+        // CRITICAL: clean recovery discards the conversation, so the identity
+        // transaction it runs must leave nothing a later fork could resume from.
+        // Mirrors the commit step in `recover_from_slots` (primary slot launched).
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.resume_token = Some("019d1af9-a899-7df1-8f7d-a244126e5ded".to_string());
+
+        let identity = inst.begin_fresh_identity(RestartMode::Fresh);
+        let primary_launched = true;
+        if identity.is_some() && primary_launched {
+            inst.clear_resume_token();
+        }
+        inst.rollback_fresh_identity_on_failure(identity, primary_launched);
+
+        assert!(
+            inst.fork_token().is_err(),
+            "fork must not resume the conversation clean recovery discarded"
+        );
+    }
+
+    #[test]
+    fn test_clean_recovery_rollback_restores_identity_when_primary_fails() {
+        // The primary slot never launched, so the speculative identity must not be
+        // persisted: a later launch has to keep using the previous session id.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let old_id = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string();
+        inst.agent_session_id = Some(old_id.clone());
+
+        let identity = inst.begin_fresh_identity(RestartMode::Fresh);
+        let primary_launched = false;
+        if identity.is_some() && primary_launched {
+            inst.clear_resume_token();
+        }
+        inst.rollback_fresh_identity_on_failure(identity, primary_launched);
+
+        assert_eq!(inst.agent_session_id.as_deref(), Some(old_id.as_str()));
+    }
+
+    #[test]
+    fn test_resume_recovery_leaves_identity_untouched() {
+        // Resume recovery must behave exactly as before: no reallocation, no
+        // dropped fork, no cleared token.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        let old_id = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string();
+        inst.agent_session_id = Some(old_id.clone());
+        inst.fork_pending = Some("parent-token".to_string());
+
+        let identity = inst.begin_fresh_identity(RestartMode::Resume);
+
+        assert!(identity.is_none());
+        assert_eq!(inst.agent_session_id.as_deref(), Some(old_id.as_str()));
+        assert_eq!(inst.fork_pending.as_deref(), Some("parent-token"));
     }
 
     #[test]

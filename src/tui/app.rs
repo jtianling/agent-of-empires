@@ -567,8 +567,8 @@ impl App {
                     self.attach_session(&id, terminal)?;
                 }
             }
-            Action::RecoverInstance(id) => {
-                self.recover_instance(&id, terminal)?;
+            Action::RecoverInstance(id, mode) => {
+                self.recover_instance(&id, mode, terminal)?;
             }
             Action::StopSession(id) => {
                 if let Some(inst) = self.home.get_instance(&id) {
@@ -604,12 +604,14 @@ impl App {
     }
 
     /// Cold-start recover a single focused instance: rebuild its tmux session
-    /// from persisted slots and resume each pane. Recoverability is re-checked at
-    /// action time against the store and live tmux, so a no-longer-recoverable
-    /// (or now-alive) instance is a silent no-op.
+    /// from persisted slots and launch each pane in `mode` (resume its
+    /// conversation, or start it clean). Recoverability is re-checked at action
+    /// time against the store and live tmux, so a no-longer-recoverable (or
+    /// now-alive) instance is a silent no-op.
     fn recover_instance(
         &mut self,
         id: &str,
+        mode: crate::session::RestartMode,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         let Some(inst) = self.home.get_instance(id).cloned() else {
@@ -642,7 +644,7 @@ impl App {
 
         let mut result = Ok(Vec::new());
         self.home.mutate_instance(id, |inst| {
-            result = inst.recover_from_slots(&store, &slots);
+            result = inst.recover_from_slots(&store, &slots, mode);
         });
 
         match result {
@@ -1015,7 +1017,7 @@ pub enum Action {
     Quit,
     AttachSession(String),
     RespawnAgentPane(String, crate::session::RestartMode),
-    RecoverInstance(String),
+    RecoverInstance(String, crate::session::RestartMode),
     SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),

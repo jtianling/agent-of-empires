@@ -498,13 +498,18 @@ impl HomeView {
                     desc_style,
                 ),
             ]);
-            if !recoverable {
-                spans.extend([
-                    Span::styled("│", sep_style),
-                    Span::styled(" C", key_style),
-                    Span::styled(" Clean ", desc_style),
-                ]);
-            }
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" C", key_style),
+                Span::styled(
+                    if recoverable {
+                        " Clean Rec "
+                    } else {
+                        " Clean "
+                    },
+                    desc_style,
+                ),
+            ]);
         }
 
         if !self.flat_items.is_empty() {

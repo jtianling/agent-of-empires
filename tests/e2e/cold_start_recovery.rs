@@ -761,3 +761,283 @@ fn recover_one_pane_failure_does_not_abort_sibling() {
     assert_ne!(new_panes[0], old_panes[0], "slot 0 must be written back");
     assert_ne!(new_panes[1], old_panes[1], "slot 1 must be written back");
 }
+
+// ---------------------------------------------------------------------------
+// Requirement: Fresh restart extends to recoverable sessions
+// Requirement: C keybinding restarts agent panes clean (recoverable branch)
+//   4.1: `C` on a recoverable multi-pane instance rebuilds the session and
+//        launches every pane with no resume flag.
+// ---------------------------------------------------------------------------
+
+/// Wait until `pane_id` has a start command mentioning `claude`, then return it.
+/// Used by the clean-recovery tests, which assert on the ABSENCE of a resume flag
+/// and therefore need the respawned command to have landed first.
+fn wait_for_launched_claude_command(h: &TuiTestHarness, pane_id: &str) -> String {
+    wait_for_pane_start_command_contains(h, pane_id, "claude");
+    pane_start_command(h, pane_id)
+}
+
+#[test]
+#[serial]
+fn clean_recover_rebuilds_session_and_launches_every_pane_fresh() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_clean_recover");
+    let slots = [
+        "dddddddd-dddd-4ddd-8ddd-ddddddddddd0",
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1",
+        "ffffffff-ffff-4fff-8fff-fffffffffff2",
+    ];
+    let (instance_id, session_name, _project, old_panes) =
+        seed_recoverable(&mut h, "Clean Recover", &slots);
+    let db = db_path(&h);
+
+    cold_start(&h, &session_name);
+
+    // The status bar advertises the clean-recovery branch while the recoverable
+    // instance is focused.
+    h.assert_screen_contains("Clean Rec");
+
+    h.send_keys("C");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(
+        new_slot0, old_panes[0],
+        "slot 0 tmux_pane must be rewritten to the rebuilt pane id (clean recovery did not run?)"
+    );
+
+    assert!(
+        session_exists(&h, &session_name),
+        "tmux session must be recreated by clean recovery"
+    );
+    let live_panes = session_pane_ids(&h, &session_name);
+    assert_eq!(
+        live_panes.len(),
+        slots.len(),
+        "clean recovery must rebuild one pane per slot, got {:?}",
+        live_panes
+    );
+
+    // Durable slot rows keep their recorded native session ids: clean recovery
+    // does not consult them, but blanking them would make the instance look
+    // unrecoverable before the reconcile chain refreshes them.
+    let new_natives = slot_natives(&db, &instance_id);
+    let mut got_natives: Vec<&str> = new_natives.iter().map(String::as_str).collect();
+    let mut want_natives: Vec<&str> = slots.to_vec();
+    got_natives.sort_unstable();
+    want_natives.sort_unstable();
+    assert_eq!(
+        got_natives, want_natives,
+        "clean recovery must not discard the durable native session ids"
+    );
+
+    let new_panes = slot_panes(&db, &instance_id);
+    assert_eq!(new_panes.len(), slots.len());
+    for (i, pane) in new_panes.iter().enumerate() {
+        assert_ne!(
+            *pane, old_panes[i],
+            "slot {i} tmux_pane must be updated to the new pane id"
+        );
+        assert!(
+            live_panes.contains(pane),
+            "slot {i} new pane {pane} must be live in the rebuilt session {:?}",
+            live_panes
+        );
+        let cmd = wait_for_launched_claude_command(&h, pane);
+        assert!(
+            !cmd.contains("--resume"),
+            "slot {i} must launch clean, got {:?}",
+            cmd
+        );
+        for native_id in &slots {
+            assert!(
+                !cmd.contains(native_id),
+                "slot {i} must not carry any persisted conversation id, got {:?}",
+                cmd
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn clean_recover_preserves_nested_layout_while_launching_fresh() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_clean_nested");
+    let slots = [
+        "11111111-1111-4111-8111-111111111110",
+        "22222222-2222-4222-8222-222222222221",
+        "33333333-3333-4333-8333-333333333332",
+    ];
+    let (instance_id, session_name, project, old_panes) =
+        seed_recoverable(&mut h, "Clean Nested Recover", &slots);
+    let db = db_path(&h);
+
+    // Rebuild the seeded panes as one left pane plus a vertically split right
+    // column, so the saved snapshot is a nested layout rather than flat columns.
+    let primary = old_panes[0].clone();
+    for pane in &old_panes[1..] {
+        assert!(tmux(&h, &["kill-pane", "-t", pane]).status.success());
+    }
+    let right_out = tmux(
+        &h,
+        &[
+            "split-window",
+            "-h",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &primary,
+        ],
+    );
+    assert!(right_out.status.success());
+    let right = String::from_utf8_lossy(&right_out.stdout)
+        .trim()
+        .to_string();
+    let bottom_out = tmux(
+        &h,
+        &["split-window", "-v", "-P", "-F", "#{pane_id}", "-t", &right],
+    );
+    assert!(bottom_out.status.success());
+    let bottom = String::from_utf8_lossy(&bottom_out.stdout)
+        .trim()
+        .to_string();
+    run_record_pane(&h, &right, &instance_id, slots[1], &project);
+    run_record_pane(&h, &bottom, &instance_id, slots[2], &project);
+
+    let live_layout = h.tmux_display_message(&session_name, "#{window_layout}");
+    let start = Instant::now();
+    while sqlite_query(
+        &db,
+        &format!("SELECT window_layout FROM instance_layout WHERE instance_id='{instance_id}';"),
+    ) != live_layout
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "nested layout was not persisted"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    let old_panes = slot_panes(&db, &instance_id);
+    let old_positions: Vec<(u32, u32)> = old_panes
+        .iter()
+        .map(|pane| pane_position(&h, pane))
+        .collect();
+
+    cold_start(&h, &session_name);
+    h.send_keys("C");
+    assert_ne!(
+        wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]),
+        old_panes[0],
+        "clean recovery did not run"
+    );
+
+    let geometry = tmux(
+        &h,
+        &[
+            "list-panes",
+            "-t",
+            &session_name,
+            "-F",
+            "#{pane_left},#{pane_top},#{pane_width},#{pane_height}",
+        ],
+    );
+    let panes: Vec<Vec<u32>> = String::from_utf8_lossy(&geometry.stdout)
+        .lines()
+        .map(|line| {
+            line.split(',')
+                .map(|value| value.parse().unwrap())
+                .collect()
+        })
+        .collect();
+    assert_eq!(panes.len(), 3);
+    let left = panes.iter().filter(|pane| pane[0] == 0).count();
+    let right_left = panes.iter().map(|pane| pane[0]).max().unwrap();
+    let right_column: Vec<&Vec<u32>> = panes.iter().filter(|pane| pane[0] == right_left).collect();
+    assert_eq!(left, 1, "expected one full-height left pane: {panes:?}");
+    assert_eq!(
+        right_column.len(),
+        2,
+        "expected two stacked right panes: {panes:?}"
+    );
+    assert_ne!(
+        right_column[0][1], right_column[1][1],
+        "right panes must be vertically stacked"
+    );
+
+    let new_panes = slot_panes(&db, &instance_id);
+    let new_positions: Vec<(u32, u32)> = new_panes
+        .iter()
+        .map(|pane| pane_position(&h, pane))
+        .collect();
+    assert_eq!(
+        new_positions, old_positions,
+        "each durable slot must return to its original spatial cell under clean recovery"
+    );
+
+    for (i, pane) in new_panes.iter().enumerate() {
+        let cmd = wait_for_launched_claude_command(&h, pane);
+        assert!(
+            !cmd.contains("--resume"),
+            "slot {i} must launch clean while its geometry is restored, got {:?}",
+            cmd
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn clean_recover_one_pane_failure_does_not_abort_sibling() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_clean_isolation");
+    let slots = [
+        "55555555-5555-4555-8555-555555555550", // slot 0: launches normally
+        "66666666-6666-4666-8666-666666666661", // slot 1: forced to error
+    ];
+    let (instance_id, session_name, _project, old_panes) =
+        seed_recoverable(&mut h, "Clean Recover Isolation", &slots);
+    let db = db_path(&h);
+
+    cold_start(&h, &session_name);
+
+    // An agent token with a space is rejected by is_safe_command_token, so the
+    // pane plan cannot be built and slot 1 yields an Error outcome -- a genuine
+    // per-pane failure, not a degrade.
+    sqlite_query(
+        &db,
+        &format!(
+            "UPDATE agent_slot SET agent='bad agent' WHERE instance_id='{instance_id}' AND slot=1;"
+        ),
+    );
+
+    h.send_keys("C");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "clean recovery did not run");
+
+    let live_panes = session_pane_ids(&h, &session_name);
+    assert_eq!(
+        live_panes.len(),
+        2,
+        "a per-pane failure must not abort sibling pane creation, got {:?}",
+        live_panes
+    );
+
+    let new_panes = slot_panes(&db, &instance_id);
+    let cmd = wait_for_launched_claude_command(&h, &new_panes[0]);
+    assert!(
+        !cmd.contains("--resume"),
+        "the healthy sibling must still launch clean, got {:?}",
+        cmd
+    );
+
+    assert_ne!(new_panes[0], old_panes[0], "slot 0 must be written back");
+    assert_ne!(new_panes[1], old_panes[1], "slot 1 must be written back");
+}

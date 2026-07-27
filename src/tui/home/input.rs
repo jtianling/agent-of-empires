@@ -785,7 +785,10 @@ impl HomeView {
                         }
                     }
                     if self.is_recoverable(id) {
-                        return Some(Action::RecoverInstance(id.to_string()));
+                        return Some(Action::RecoverInstance(
+                            id.to_string(),
+                            crate::session::RestartMode::Resume,
+                        ));
                     }
                     return Some(Action::RespawnAgentPane(
                         id.to_string(),
@@ -797,13 +800,16 @@ impl HomeView {
                 if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
             {
                 if let Some(id) = &self.selected_session {
-                    if self.is_recoverable(id) {
-                        return None;
-                    }
                     if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
+                    }
+                    if self.is_recoverable(id) {
+                        return Some(Action::RecoverInstance(
+                            id.to_string(),
+                            crate::session::RestartMode::Fresh,
+                        ));
                     }
                     return Some(Action::RespawnAgentPane(
                         id.to_string(),
