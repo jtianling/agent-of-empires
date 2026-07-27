@@ -14,4 +14,4 @@
 
 - [x] 3.1 Run `cargo fmt`, `cargo clippy`, `cargo test`, and `cargo test --test e2e` with all tmux-touching tests confined to the project harness's private socket.
 - [x] 3.2 Run `openspec validate fix-recovery-double-launch --strict`.
-- [ ] 3.3 Hand the fix back to the acceptance run so cases 2 and 3 can be re-tested against a real agent.
+- [x] 3.3 Hand the fix back to the acceptance run so cases 2 and 3 can be re-tested against a real agent.
