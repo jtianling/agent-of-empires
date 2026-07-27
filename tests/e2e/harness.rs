@@ -649,6 +649,21 @@ last_seen_version = "{}"
     /// immediately; the restart/recovery tests need the instance's primary pane
     /// to survive long enough to be tracked and then respawned with a resume
     /// command, so they install a sleeping stub for the tool under test.
+    /// Install a stub that exits immediately instead of running forever, so
+    /// tests can exercise the "the launched agent dies right away" path that a
+    /// real agent hits when it refuses to start (e.g. a conversation id that is
+    /// already in use). The immortal stub below can never reach it.
+    pub fn install_exiting_tool_stub(&self, name: &str, exit_code: u8) {
+        let stub = self.stub_path.join(name);
+        std::fs::write(&stub, format!("#!/bin/sh\nexit {exit_code}\n")).expect("write tool stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod tool stub");
+        }
+    }
+
     pub fn install_tool_stub(&self, name: &str) {
         let stub = self.stub_path.join(name);
         std::fs::write(&stub, "#!/bin/sh\nexec sleep 2147483647\n").expect("write tool stub");

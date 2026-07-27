@@ -1070,3 +1070,94 @@ fn clean_recover_one_pane_failure_does_not_abort_sibling() {
     assert_ne!(new_panes[0], old_panes[0], "slot 0 must be written back");
     assert_ne!(new_panes[1], old_panes[1], "slot 1 must be written back");
 }
+
+// ---------------------------------------------------------------------------
+// Requirement: Recovery launches each agent exactly once
+//   Recovery used to launch the agent twice: once while rebuilding the session
+//   and again per slot. The first launch carried the conversation id being
+//   recovered, which a real agent refuses to reopen, so it exited at once and
+//   took the single-pane session with it. Every other test here uses a stub that
+//   sleeps forever and therefore cannot reach that path.
+// ---------------------------------------------------------------------------
+
+/// Recover `h`'s instance with `key` and assert the rebuild survived an agent
+/// that refuses to run: the session still exists, and the slot's pane is a live
+/// pane of it rather than one that vanished with the session.
+fn assert_recovery_survives_exiting_agent(
+    h: &TuiTestHarness,
+    db: &Path,
+    instance_id: &str,
+    session_name: &str,
+    old_panes: &[String],
+    key: &str,
+) {
+    h.send_keys(key);
+    let new_slot0 = wait_for_slot0_rebound(db, instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    // The slot is written back before the launched process has had time to exit,
+    // so asserting immediately would pass even when the rebuild is about to take
+    // the session down with it. Let the failure mode happen first.
+    std::thread::sleep(Duration::from_secs(4));
+
+    assert!(
+        session_exists(h, session_name),
+        "the rebuilt session must survive an agent that exits immediately; \
+         screen was:\n{}",
+        h.capture_screen()
+    );
+    let live_panes = session_pane_ids(h, session_name);
+    assert!(
+        live_panes.contains(&new_slot0),
+        "slot 0 must point at a live pane of the rebuilt session, got {new_slot0} in {live_panes:?}"
+    );
+    assert!(
+        !h.capture_screen().contains("can't find pane"),
+        "recovery must reach the per-slot launch, screen was:\n{}",
+        h.capture_screen()
+    );
+}
+
+#[test]
+#[serial]
+fn resume_recovery_survives_an_agent_that_exits_immediately() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_exit_resume");
+    let slots = ["77777777-7777-4777-8777-777777777770"];
+    let (instance_id, session_name, _project, old_panes) =
+        seed_recoverable(&mut h, "Exit Resume", &slots);
+    let db = db_path(&h);
+
+    // From here the agent refuses to run, the way a real one does when asked to
+    // reopen a conversation that is already open.
+    h.install_exiting_tool_stub("claude", 1);
+    cold_start(&h, &session_name);
+
+    assert_recovery_survives_exiting_agent(&h, &db, &instance_id, &session_name, &old_panes, "R");
+}
+
+#[test]
+#[serial]
+fn clean_recovery_survives_an_agent_that_exits_immediately() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_exit_clean");
+    let slots = ["88888888-8888-4888-8888-888888888880"];
+    let (instance_id, session_name, _project, old_panes) =
+        seed_recoverable(&mut h, "Exit Clean", &slots);
+    let db = db_path(&h);
+
+    h.install_exiting_tool_stub("claude", 1);
+    cold_start(&h, &session_name);
+
+    assert_recovery_survives_exiting_agent(&h, &db, &instance_id, &session_name, &old_panes, "C");
+
+    let cmd = pane_start_command(&h, &slot_panes(&db, &instance_id)[0]);
+    assert!(
+        !cmd.contains("--resume"),
+        "clean recovery must still launch without a resume flag, got {cmd:?}"
+    );
+}

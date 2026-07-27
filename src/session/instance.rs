@@ -631,6 +631,26 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
     ) -> Result<()> {
+        self.start_with_size_inner(size, skip_on_launch, SessionLaunch::Agent)
+    }
+
+    /// Create the session without launching the agent, leaving its first pane on
+    /// the default shell. Used by recovery, which relaunches every pane from its
+    /// durable slot afterwards: launching the agent here too would start it twice,
+    /// and the first launch carries the conversation id of the session being
+    /// recovered, which a real agent refuses to reopen and exits over -- taking
+    /// the pane, and with it the single-pane session, down before the real launch
+    /// runs.
+    pub fn start_placeholder_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
+        self.start_with_size_inner(size, false, SessionLaunch::Placeholder)
+    }
+
+    fn start_with_size_inner(
+        &mut self,
+        size: Option<(u16, u16)>,
+        skip_on_launch: bool,
+        launch: SessionLaunch,
+    ) -> Result<()> {
         self.clear_resume_token();
         self.ensure_xats_identity_key();
         let session = self.tmux_session()?;
@@ -691,7 +711,10 @@ impl Instance {
             }
         }
 
-        let cmd = self.build_agent_command(None);
+        let cmd = match launch {
+            SessionLaunch::Agent => self.build_agent_command(None),
+            SessionLaunch::Placeholder => None,
+        };
         tracing::debug!("agent cmd: {}", cmd.as_ref().map_or("none", |v| v));
         session.create_with_size(
             &self.project_path,
@@ -700,7 +723,9 @@ impl Instance {
             !self.expects_shell(),
         )?;
 
-        self.run_auto_confirm();
+        if launch == SessionLaunch::Agent {
+            self.run_auto_confirm();
+        }
 
         // Apply all configured tmux options (status bar, mouse, etc.)
         self.apply_tmux_options(&Self::current_profile());
@@ -708,10 +733,14 @@ impl Instance {
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
         self.restart_in_flight = false;
-        // First launch of a forked session has been committed to tmux. The
-        // agent will now spawn its own session id, so we no longer need the
-        // parent's token and subsequent restarts follow the normal resume flow.
-        self.fork_pending = None;
+        if launch == SessionLaunch::Agent {
+            // First launch of a forked session has been committed to tmux. The
+            // agent will now spawn its own session id, so we no longer need the
+            // parent's token and subsequent restarts follow the normal resume flow.
+            // A placeholder launched no agent, so the token must survive for the
+            // per-slot launch that follows.
+            self.fork_pending = None;
+        }
 
         Ok(())
     }
@@ -1407,18 +1436,17 @@ impl Instance {
         let mut ordered: Vec<crate::db::AgentSlot> = slots.to_vec();
         ordered.sort_by_key(|s| s.slot);
 
-        // Recreate the session shell with its slot-0 primary pane via the normal
-        // start path (restores worktree/sandbox). The slot-0 command is launched
-        // fresh here and then uniformly relaunched below, matching how
-        // `resume_all_tracked_panes` treats every slot the same way.
-        self.start_with_size(crate::terminal::get_size())?;
+        // Recreate the session shell via the normal start path (restores
+        // worktree/sandbox, hooks, tmux options) but WITHOUT launching the agent:
+        // every pane, slot 0 included, is launched once by the uniform per-slot
+        // loop below. Launching here as well would run the agent against the
+        // conversation id being recovered, which it refuses to reopen, and its
+        // immediate exit would take the single-pane session down before the real
+        // launch runs.
+        self.start_placeholder_with_size(crate::terminal::get_size())?;
 
-        // Prepare the fresh conversation identity *after* the rebuild launch, not
-        // before: the rebuild's slot-0 command is throwaway (it is killed and
-        // replaced by the uniform per-slot launch below), so allocating the new
-        // `--session-id` here means only the authoritative launch claims it.
-        // Reallocating before the rebuild would burn the new id on the throwaway
-        // process and make the real launch fail with an id that is already in use.
+        // Safe to prepare the fresh identity here: the rebuild above launched no
+        // agent, so nothing has claimed the new `--session-id` yet.
         let identity = self.begin_fresh_identity(mode);
 
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
@@ -2047,6 +2075,15 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
         "{}{} -lc 'stty susp undef; exec env {}'",
         env_prefix, shell, escaped
     )
+}
+
+/// Whether creating a session also launches its agent. Recovery creates a
+/// placeholder because it launches every pane itself, from that pane's durable
+/// slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionLaunch {
+    Agent,
+    Placeholder,
 }
 
 /// Whether the multi-pane fan-out resumes each pane from its persisted
