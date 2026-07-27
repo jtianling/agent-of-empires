@@ -530,6 +530,14 @@ impl App {
                         // Fan out to every tracked pane, each resumed from its
                         // own persisted native_session_id. Per-pane failures are
                         // recorded but do not abort sibling restarts.
+                        let mut slots = slots;
+                        if let (Some(inst), Ok(store)) = (
+                            self.home.get_instance(&id),
+                            crate::db::Store::open_with_schema(&profile),
+                        ) {
+                            inst.ensure_slot_identity_keys(&store, &mut slots);
+                        }
+
                         let mut outcomes = Vec::new();
                         self.home.mutate_instance(&id, |inst| {
                             inst.restart_in_flight = true;
@@ -641,6 +649,9 @@ impl App {
         if !inst.is_recoverable(!slots.is_empty()) {
             return Ok(());
         }
+
+        let mut slots = slots;
+        inst.ensure_slot_identity_keys(&store, &mut slots);
 
         let mut result = Ok(Vec::new());
         self.home.mutate_instance(id, |inst| {

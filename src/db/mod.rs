@@ -134,6 +134,7 @@ impl Store {
         native_session_id: &str,
         cwd: &str,
         tmux_pane: &str,
+        xats_identity_key: &str,
         last_seen_at: i64,
     ) -> Result<()> {
         if !(0..=MAX_SLOT).contains(&slot) {
@@ -141,13 +142,15 @@ impl Store {
         }
         self.conn.execute(
             "INSERT INTO agent_slot \
-             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, last_seen_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(instance_id, slot) DO UPDATE SET \
              agent = excluded.agent, \
              native_session_id = excluded.native_session_id, \
              cwd = excluded.cwd, \
              tmux_pane = excluded.tmux_pane, \
+             xats_identity_key = excluded.xats_identity_key, \
              last_seen_at = excluded.last_seen_at",
             rusqlite::params![
                 instance_id,
@@ -156,6 +159,7 @@ impl Store {
                 native_session_id,
                 cwd,
                 tmux_pane,
+                xats_identity_key,
                 last_seen_at
             ],
         )?;
@@ -165,7 +169,8 @@ impl Store {
     /// Read all durable slots for an instance, ordered by slot.
     pub fn read_slots_for_instance(&self, instance_id: &str) -> Result<Vec<AgentSlot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, last_seen_at \
+            "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, \
+             xats_identity_key, last_seen_at \
              FROM agent_slot WHERE instance_id = ?1 ORDER BY slot",
         )?;
         let rows = stmt.query_map([instance_id], |r| {
@@ -176,7 +181,8 @@ impl Store {
                 native_session_id: r.get(3)?,
                 cwd: r.get(4)?,
                 tmux_pane: r.get(5)?,
-                last_seen_at: r.get(6)?,
+                xats_identity_key: r.get(6)?,
+                last_seen_at: r.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -280,6 +286,10 @@ pub struct AgentSlot {
     pub native_session_id: String,
     pub cwd: String,
     pub tmux_pane: String,
+    /// Opaque xats identity key for the agent occupying this slot, empty when it
+    /// has none. Only adopted (non-primary) slots use it: the primary pane's key
+    /// lives on the instance record next to its session id and resume token.
+    pub xats_identity_key: String,
     pub last_seen_at: i64,
 }
 
@@ -318,6 +328,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             native_session_id  TEXT NOT NULL,
             cwd                TEXT NOT NULL,
             tmux_pane          TEXT NOT NULL DEFAULT '',
+            xats_identity_key  TEXT NOT NULL DEFAULT '',
             last_seen_at       INTEGER NOT NULL,
             PRIMARY KEY (instance_id, slot)
         );
@@ -337,28 +348,30 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             captured_at        INTEGER NOT NULL
         );",
     )?;
-    backfill_agent_slot_tmux_pane(conn)?;
+    backfill_agent_slot_columns(conn)?;
     Ok(())
 }
 
-/// Backfill the `agent_slot.tmux_pane` column on legacy databases.
+/// Backfill `agent_slot` columns added after the table first shipped.
 ///
-/// `agent_slot` shipped before `tmux_pane` was added to its DDL. Because the
-/// table is created with `CREATE TABLE IF NOT EXISTS`, those legacy databases
-/// keep a 6-column table and `upsert_agent_slot` (which writes `tmux_pane`)
-/// fails. This adds the column when it is absent. Idempotent: a no-op once the
-/// column exists, so it leaves fresh and already-healed databases untouched.
-fn backfill_agent_slot_tmux_pane(conn: &Connection) -> Result<()> {
-    let has_column: bool = conn.query_row(
-        "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = 'tmux_pane'",
-        [],
-        |r| r.get::<_, i64>(0).map(|n| n > 0),
-    )?;
-    if !has_column {
-        conn.execute(
-            "ALTER TABLE agent_slot ADD COLUMN tmux_pane TEXT NOT NULL DEFAULT ''",
-            [],
+/// Because the table is created with `CREATE TABLE IF NOT EXISTS`, a database
+/// created before a column was added keeps the older table shape, and
+/// `upsert_agent_slot` (which writes every column) fails against it. Each column
+/// is added when absent. Idempotent: a no-op once the column exists, so fresh and
+/// already-healed databases are left untouched.
+fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
+    for column in ["tmux_pane", "xats_identity_key"] {
+        let has_column: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = ?1",
+            [column],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
         )?;
+        if !has_column {
+            conn.execute(
+                &format!("ALTER TABLE agent_slot ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -437,10 +450,10 @@ mod tests {
     fn agent_slot_upserts_by_instance_and_slot() {
         let (_tmp, store) = temp_store();
         store
-            .upsert_agent_slot("inst", 1, "claude", "old", "/tmp", "%1", 1)
+            .upsert_agent_slot("inst", 1, "claude", "old", "/tmp", "%1", "", 1)
             .unwrap();
         store
-            .upsert_agent_slot("inst", 1, "claude", "new", "/tmp", "%1", 2)
+            .upsert_agent_slot("inst", 1, "claude", "new", "/tmp", "%1", "", 2)
             .unwrap();
 
         let slots = store.read_slots_for_instance("inst").unwrap();
@@ -453,10 +466,10 @@ mod tests {
     fn agent_slot_range_rejected_by_api() {
         let (_tmp, store) = temp_store();
         assert!(store
-            .upsert_agent_slot("inst", 4, "claude", "s", "/tmp", "%1", 1)
+            .upsert_agent_slot("inst", 4, "claude", "s", "/tmp", "%1", "", 1)
             .is_err());
         assert!(store
-            .upsert_agent_slot("inst", -1, "claude", "s", "/tmp", "%1", 1)
+            .upsert_agent_slot("inst", -1, "claude", "s", "/tmp", "%1", "", 1)
             .is_err());
     }
 
@@ -505,10 +518,10 @@ mod tests {
     fn delete_slots_for_instance_removes_rows() {
         let (_tmp, store) = temp_store();
         store
-            .upsert_agent_slot("inst", 0, "claude", "s", "/tmp", "%1", 1)
+            .upsert_agent_slot("inst", 0, "claude", "s", "/tmp", "%1", "", 1)
             .unwrap();
         store
-            .upsert_agent_slot("other", 0, "claude", "s", "/tmp", "%2", 1)
+            .upsert_agent_slot("other", 0, "claude", "s", "/tmp", "%2", "", 1)
             .unwrap();
         store
             .upsert_layout_snapshot("inst", "0000,1x1,0,0,1", 1)
@@ -546,7 +559,7 @@ mod tests {
     fn ensure_schema_is_idempotent() {
         let (_tmp, store) = temp_store();
         store
-            .upsert_agent_slot("keep", 0, "claude", "s", "/tmp", "%1", 1)
+            .upsert_agent_slot("keep", 0, "claude", "s", "/tmp", "%1", "", 1)
             .unwrap();
         // Re-applying the schema must not drop rows.
         ensure_schema(&store.conn).unwrap();
@@ -617,7 +630,7 @@ mod tests {
 
         // Before the fix this failed with "no such column: tmux_pane".
         store
-            .upsert_agent_slot("legacy", 1, "claude", "new", "/tmp", "%9", 2)
+            .upsert_agent_slot("legacy", 1, "claude", "new", "/tmp", "%9", "", 2)
             .unwrap();
 
         let slots = store.read_slots_for_instance("legacy").unwrap();
@@ -639,5 +652,47 @@ mod tests {
         let (_fresh_tmp, fresh) = temp_store();
         ensure_schema(&fresh.conn).unwrap();
         assert!(column_exists(&fresh.conn, "agent_slot", "tmux_pane"));
+    }
+
+    #[test]
+    fn backfill_heals_xats_identity_key_column() {
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        assert!(!column_exists(
+            &store.conn,
+            "agent_slot",
+            "xats_identity_key"
+        ));
+
+        ensure_schema(&store.conn).unwrap();
+        assert!(column_exists(
+            &store.conn,
+            "agent_slot",
+            "xats_identity_key"
+        ));
+
+        // Writing every column now succeeds against the healed legacy table.
+        store
+            .upsert_agent_slot("legacy", 2, "claude", "s", "/tmp", "%3", "key-2", 3)
+            .unwrap();
+        let slots = store.read_slots_for_instance("legacy").unwrap();
+        let added = slots.iter().find(|s| s.slot == 2).unwrap();
+        assert_eq!(added.xats_identity_key, "key-2");
+    }
+
+    #[test]
+    fn identity_key_round_trips_and_defaults_to_empty() {
+        let (_tmp, store) = temp_store();
+        ensure_schema(&store.conn).unwrap();
+
+        store
+            .upsert_agent_slot("inst", 0, "claude", "s", "/tmp", "%1", "", 1)
+            .unwrap();
+        store
+            .upsert_agent_slot("inst", 1, "claude", "s", "/tmp", "%2", "key-1", 1)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].xats_identity_key, "");
+        assert_eq!(slots[1].xats_identity_key, "key-1");
     }
 }

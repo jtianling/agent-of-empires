@@ -860,6 +860,56 @@ fn clean_recover_rebuilds_session_and_launches_every_pane_fresh() {
     }
 }
 
+/// Poll a session's pane geometry until `expected` panes exist, then return their
+/// `(left, top, width, height)` rows. Recovery creates the panes and applies the
+/// saved layout in separate steps, so reading geometry once can catch the window
+/// mid-rebuild under load.
+fn wait_for_pane_geometry(h: &TuiTestHarness, session: &str, expected: usize) -> Vec<Vec<u32>> {
+    let start = Instant::now();
+    loop {
+        let out = tmux(
+            h,
+            &[
+                "list-panes",
+                "-t",
+                session,
+                "-F",
+                "#{pane_left},#{pane_top},#{pane_width},#{pane_height}",
+            ],
+        );
+        let panes: Vec<Vec<u32>> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.split(',').map(|v| v.parse().ok()).collect())
+            .collect();
+        if panes.len() == expected {
+            return panes;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "expected {expected} panes, got {panes:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Poll each slot's pane position until it matches `expected`, so the assertion
+/// runs against settled geometry rather than a half-applied layout. Returns the
+/// last observed positions either way, so a genuine mismatch still fails loudly.
+fn wait_for_slot_positions(
+    h: &TuiTestHarness,
+    panes: &[String],
+    expected: &[(u32, u32)],
+) -> Vec<(u32, u32)> {
+    let start = Instant::now();
+    loop {
+        let positions: Vec<(u32, u32)> = panes.iter().map(|p| pane_position(h, p)).collect();
+        if positions == expected || start.elapsed() > Duration::from_secs(20) {
+            return positions;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[test]
 #[serial]
 fn clean_recover_preserves_nested_layout_while_launching_fresh() {
@@ -937,25 +987,7 @@ fn clean_recover_preserves_nested_layout_while_launching_fresh() {
         "clean recovery did not run"
     );
 
-    let geometry = tmux(
-        &h,
-        &[
-            "list-panes",
-            "-t",
-            &session_name,
-            "-F",
-            "#{pane_left},#{pane_top},#{pane_width},#{pane_height}",
-        ],
-    );
-    let panes: Vec<Vec<u32>> = String::from_utf8_lossy(&geometry.stdout)
-        .lines()
-        .map(|line| {
-            line.split(',')
-                .map(|value| value.parse().unwrap())
-                .collect()
-        })
-        .collect();
-    assert_eq!(panes.len(), 3);
+    let panes = wait_for_pane_geometry(&h, &session_name, 3);
     let left = panes.iter().filter(|pane| pane[0] == 0).count();
     let right_left = panes.iter().map(|pane| pane[0]).max().unwrap();
     let right_column: Vec<&Vec<u32>> = panes.iter().filter(|pane| pane[0] == right_left).collect();
@@ -971,10 +1003,7 @@ fn clean_recover_preserves_nested_layout_while_launching_fresh() {
     );
 
     let new_panes = slot_panes(&db, &instance_id);
-    let new_positions: Vec<(u32, u32)> = new_panes
-        .iter()
-        .map(|pane| pane_position(&h, pane))
-        .collect();
+    let new_positions = wait_for_slot_positions(&h, &new_panes, &old_positions);
     assert_eq!(
         new_positions, old_positions,
         "each durable slot must return to its original spatial cell under clean recovery"

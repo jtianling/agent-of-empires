@@ -62,6 +62,11 @@ const CODEX_XATS_APP_SERVER_HOST: &str = "127.0.0.1";
 const CODEX_XATS_APP_SERVER_PORT: &str = "8799";
 const CODEX_XATS_APP_SERVER_URL: &str = "ws://127.0.0.1:8799";
 const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp";
+/// Environment variable carrying a pane's opaque xats identity key. Deliberately
+/// not named `*_TOKEN`: the xats project already uses `XATS_TOKEN` for the
+/// daemon's bearer credential, and both appear in the same launcher shell.
+const XATS_IDENTITY_KEY_ENV: &str = "XATS_IDENTITY_KEY";
+
 const CODEX_XATS_MISSING_PANE: &str = "[xats] Missing TMUX_PANE for Codex pre-registration.";
 const CODEX_XATS_MISSING_UUIDGEN: &str =
     "[xats] Missing uuidgen required for Codex pre-registration.";
@@ -245,6 +250,13 @@ pub struct Instance {
     /// belongs to this instance. Used as the primary source for `fork_token()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
+    /// Opaque xats identity key for the primary pane, minted on its first Cross
+    /// Agent Team launch and reused on every later one. The agent presents it to
+    /// the xats daemon to recover the team and name it registered under, so a
+    /// launch that discards the conversation does not also discard the identity.
+    /// Never interpreted by AoE. Not inherited by forks (see `create_fork`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xats_identity_key: Option<String>,
     /// Runtime-only flag: set while a multi-pane `R` restart is in flight so a
     /// second `R` press on the same instance is ignored. Cleared once every
     /// tracked pane has been respawned. Never persisted.
@@ -297,6 +309,7 @@ impl Instance {
             resume_token: None,
             fork_pending: None,
             agent_session_id: None,
+            xats_identity_key: None,
             restart_in_flight: false,
             last_spinner_seen: None,
             spike_start: None,
@@ -346,6 +359,76 @@ impl Instance {
 
     fn is_codex_cross_agent_team(&self) -> bool {
         self.is_cross_agent_team() && self.tool == "codex"
+    }
+
+    /// Mint this instance's primary-pane xats identity key if Cross Agent Team is
+    /// enabled and it has none yet. Write-once: every later launch reuses it, which
+    /// is what lets a launch that discards the conversation keep the identity.
+    fn ensure_xats_identity_key(&mut self) {
+        if self.is_cross_agent_team() && self.xats_identity_key.is_none() {
+            self.xats_identity_key = Some(Uuid::new_v4().to_string());
+        }
+    }
+
+    /// Whether AoE should mint an identity key for this slot before launching it.
+    /// Slot 0 is the primary pane, whose key lives on the instance record, and a
+    /// slot that already has one keeps it.
+    fn slot_needs_identity_key(&self, slot: &crate::db::AgentSlot) -> bool {
+        self.is_cross_agent_team() && slot.slot != 0 && slot.xats_identity_key.is_empty()
+    }
+
+    /// Mint and persist an identity key for every adopted slot that has none, so
+    /// panes AoE is about to launch carry one. Slot 0 is the primary pane, whose
+    /// key lives on the instance record instead.
+    ///
+    /// This is where a hand-started pane first gets a key: adoption is
+    /// observe-first, so AoE never built that pane's original command and could
+    /// not have injected one earlier.
+    pub fn ensure_slot_identity_keys(
+        &self,
+        store: &crate::db::Store,
+        slots: &mut [crate::db::AgentSlot],
+    ) {
+        for slot in slots.iter_mut().filter(|s| self.slot_needs_identity_key(s)) {
+            let key = Uuid::new_v4().to_string();
+            match store.upsert_agent_slot(
+                &slot.instance_id,
+                slot.slot,
+                &slot.agent,
+                &slot.native_session_id,
+                &slot.cwd,
+                &slot.tmux_pane,
+                &key,
+                slot.last_seen_at,
+            ) {
+                Ok(()) => slot.xats_identity_key = key,
+                Err(e) => tracing::warn!(
+                    "Could not persist xats identity key for slot {} of '{}': {}",
+                    slot.slot,
+                    self.title,
+                    e
+                ),
+            }
+        }
+    }
+
+    /// The identity key to inject into a pane being launched: the instance's own
+    /// for the primary pane, the slot's for an adopted one. `None` when Cross
+    /// Agent Team is off, so no variable is injected at all.
+    fn xats_identity_key_for_pane<'a>(
+        &'a self,
+        is_primary: bool,
+        slot_identity_key: Option<&'a str>,
+    ) -> Option<&'a str> {
+        if !self.is_cross_agent_team() {
+            return None;
+        }
+        let key = if is_primary {
+            self.xats_identity_key.as_deref()
+        } else {
+            slot_identity_key
+        };
+        key.filter(|k| !k.is_empty())
     }
 
     /// Auto-confirm Claude's startup screens (dev-channels warning and the
@@ -549,6 +632,7 @@ impl Instance {
         skip_on_launch: bool,
     ) -> Result<()> {
         self.clear_resume_token();
+        self.ensure_xats_identity_key();
         let session = self.tmux_session()?;
 
         if session.exists() {
@@ -641,7 +725,7 @@ impl Instance {
     /// launch-context decoration pipeline.
     pub fn build_agent_command(&self, resume_token: Option<&str>) -> Option<String> {
         let tool = self.tool.clone();
-        self.build_pane_command(&tool, resume_token, true)
+        self.build_pane_command(&tool, resume_token, true, None)
     }
 
     /// Build the launch command for a single pane, applying the full launch
@@ -656,11 +740,15 @@ impl Instance {
     /// command override (`self.command`), pre-allocated session id, fork token,
     /// and `extra_args` are instance-primary concepts and apply to that pane only.
     /// Secondary panes build from their own agent binary.
+    ///
+    /// `slot_identity_key` supplies an adopted pane's xats identity key. It is
+    /// ignored for the primary pane, which uses the instance's own key.
     pub fn build_pane_command(
         &self,
         target_agent: &str,
         resume_token: Option<&str>,
         is_primary: bool,
+        slot_identity_key: Option<&str>,
     ) -> Option<String> {
         let agent = crate::agents::get_agent(target_agent);
 
@@ -732,6 +820,11 @@ impl Instance {
                     if is_primary && self.is_codex_cross_agent_team() {
                         cmd = self.codex_xats_bootstrap_command(&cmd);
                     }
+                    if let Some(key) =
+                        self.xats_identity_key_for_pane(is_primary, slot_identity_key)
+                    {
+                        env_vars.push((XATS_IDENTITY_KEY_ENV, key));
+                    }
                     wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
                 })
             } else {
@@ -758,6 +851,9 @@ impl Instance {
                 }
                 if is_primary && self.is_codex_cross_agent_team() {
                     cmd = self.codex_xats_bootstrap_command(&cmd);
+                }
+                if let Some(key) = self.xats_identity_key_for_pane(is_primary, slot_identity_key) {
+                    env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                 }
                 if self.expects_shell() && env_vars.is_empty() {
                     let escaped_dir = shell_escape(&self.project_path);
@@ -871,6 +967,11 @@ impl Instance {
         fork.last_accessed_at = None;
         fork.resume_token = None;
         fork.restart_in_flight = false;
+        // A fork is a distinct collaborator. Inheriting the parent's identity key
+        // would let both panes recover into one xats identity, and the daemon
+        // cannot tell that apart from the parent legitimately restarting: the
+        // later caller silently takes the identity and the earlier one goes quiet.
+        fork.xats_identity_key = None;
         // Pre-allocate a new session UUID for the fork if the tool supports it.
         // This is passed via `--session-id <uuid>` alongside the fork template.
         fork.agent_session_id = crate::agents::get_agent(&self.tool)
@@ -1158,6 +1259,7 @@ impl Instance {
     }
 
     fn respawn_single_pane_inner(&mut self, mode: RestartMode) -> Result<()> {
+        self.ensure_xats_identity_key();
         // `Fresh` bypasses `resolved_resume_token` entirely so the command never
         // carries the stored `resume_token`; `Resume` keeps the existing fallback.
         let effective_resume_token = match mode {
@@ -1207,6 +1309,7 @@ impl Instance {
     ) -> Vec<PaneResumeOutcome> {
         self.status = Status::Restarting;
         self.last_error = None;
+        self.ensure_xats_identity_key();
 
         // A fresh restart must not reuse the pre-allocated `--session-id` for the
         // primary pane (slot 0 builds with the instance's `agent_session_id`) nor
@@ -1229,6 +1332,7 @@ impl Instance {
                 &slot.cwd,
                 slot.slot == 0,
                 mode,
+                Some(slot.xats_identity_key.as_str()),
             );
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
                 primary_respawned = true;
@@ -1364,6 +1468,7 @@ impl Instance {
                 &slot.cwd,
                 slot.slot == 0,
                 mode,
+                Some(slot.xats_identity_key.as_str()),
             );
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
                 primary_launched = true;
@@ -1383,6 +1488,7 @@ impl Instance {
                 &slot.native_session_id,
                 &slot.cwd,
                 new_pane,
+                &slot.xats_identity_key,
                 now,
             ) {
                 tracing::error!(
@@ -2006,6 +2112,7 @@ impl Instance {
         native_session_id: &str,
         is_primary: bool,
         mode: RestartMode,
+        slot_identity_key: Option<&str>,
     ) -> Option<(String, bool)> {
         let Some(def) = crate::agents::get_agent(agent) else {
             // Unknown agent: only the recorded name can act as the binary, and
@@ -2020,7 +2127,8 @@ impl Instance {
             && def.resume.is_some()
             && is_valid_resume_token(native_session_id);
         let resume_token = resumed.then_some(native_session_id);
-        let command = self.build_pane_command(def.name, resume_token, is_primary)?;
+        let command =
+            self.build_pane_command(def.name, resume_token, is_primary, slot_identity_key)?;
         Some((command, resumed))
     }
 
@@ -2036,6 +2144,7 @@ impl Instance {
     /// context. A pane whose agent name is unknown and not a safe command token,
     /// or whose tmux respawn fails, is returned as [`PaneResumeOutcome::Error`] so
     /// the caller can isolate per-pane failures.
+    #[allow(clippy::too_many_arguments)]
     fn resume_launch_pane(
         &self,
         agent: &str,
@@ -2044,12 +2153,17 @@ impl Instance {
         cwd: &str,
         is_primary: bool,
         mode: RestartMode,
+        slot_identity_key: Option<&str>,
     ) -> PaneResumeOutcome {
         // Build (and validate) the command before killing the pane, so a pane we
         // cannot safely respawn is left running rather than killed and abandoned.
-        let Some((command, resumed)) =
-            self.build_pane_resume_plan(agent, native_session_id, is_primary, mode)
-        else {
+        let Some((command, resumed)) = self.build_pane_resume_plan(
+            agent,
+            native_session_id,
+            is_primary,
+            mode,
+            slot_identity_key,
+        ) else {
             return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
         };
 
@@ -2548,6 +2662,199 @@ mod tests {
         inst
     }
 
+    fn claude_xats_instance() -> Instance {
+        let mut inst = Instance::new("test", "/tmp/project path");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+        inst
+    }
+
+    #[test]
+    fn test_new_instance_starts_without_an_identity_key() {
+        // New-from-selection builds a fresh instance through the builder rather
+        // than cloning the source, so a copied key cannot reach it. This pins the
+        // property the builder relies on.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+        assert!(inst.xats_identity_key.is_none());
+
+        inst.ensure_xats_identity_key();
+        let fresh = Instance::new("other", "/tmp/test");
+        assert!(
+            fresh.xats_identity_key.is_none(),
+            "a newly built session must not carry another session's identity"
+        );
+    }
+
+    fn slot(index: i64, key: &str) -> crate::db::AgentSlot {
+        crate::db::AgentSlot {
+            instance_id: "inst".to_string(),
+            slot: index,
+            agent: "claude".to_string(),
+            native_session_id: "sess".to_string(),
+            cwd: "/tmp".to_string(),
+            tmux_pane: "%1".to_string(),
+            xats_identity_key: key.to_string(),
+            last_seen_at: 1,
+        }
+    }
+
+    #[test]
+    fn test_adopted_slot_without_key_needs_one_minted() {
+        // A hand-started pane is adopted with no key, because AoE never built its
+        // command. The first launch AoE performs for that slot mints one.
+        let inst = claude_xats_instance();
+        assert!(inst.slot_needs_identity_key(&slot(1, "")));
+    }
+
+    #[test]
+    fn test_slot_with_key_is_left_alone() {
+        let inst = claude_xats_instance();
+        assert!(!inst.slot_needs_identity_key(&slot(1, "existing-key")));
+    }
+
+    #[test]
+    fn test_primary_slot_never_mints_into_the_slot_record() {
+        // Slot 0's key lives on the instance record; minting into the slot row too
+        // would give the primary pane two homes for one value.
+        let inst = claude_xats_instance();
+        assert!(!inst.slot_needs_identity_key(&slot(0, "")));
+    }
+
+    #[test]
+    fn test_no_slot_needs_a_key_without_cross_agent_team() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        assert!(!inst.slot_needs_identity_key(&slot(1, "")));
+    }
+
+    #[test]
+    fn test_identity_key_minted_once_and_reused() {
+        let mut inst = claude_xats_instance();
+        assert!(inst.xats_identity_key.is_none());
+
+        inst.ensure_xats_identity_key();
+        let first = inst.xats_identity_key.clone().unwrap();
+        assert!(!first.is_empty());
+
+        inst.ensure_xats_identity_key();
+        assert_eq!(
+            inst.xats_identity_key.as_deref(),
+            Some(first.as_str()),
+            "the key is write-once: a later launch must reuse it"
+        );
+    }
+
+    #[test]
+    fn test_identity_key_not_minted_without_cross_agent_team() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.ensure_xats_identity_key();
+        assert!(inst.xats_identity_key.is_none());
+    }
+
+    #[test]
+    fn test_identity_key_injected_as_env_not_argv() {
+        // CRITICAL: argv is world-readable through the process table, the
+        // environment is not. The key must never reach the command arguments.
+        let mut inst = claude_xats_instance();
+        inst.ensure_xats_identity_key();
+        let key = inst.xats_identity_key.clone().unwrap();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            cmd.contains(&format!("XATS_IDENTITY_KEY='{key}'")),
+            "identity key must be injected as an environment variable, got: {cmd}"
+        );
+        let argv = cmd
+            .split_once(&format!("XATS_IDENTITY_KEY='{key}'"))
+            .map(|(_, rest)| rest)
+            .unwrap();
+        assert!(
+            !argv.contains(&key),
+            "identity key must not also appear in the command arguments, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_no_identity_key_env_when_cross_agent_team_disabled() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.xats_identity_key = Some("leftover-key".to_string());
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            !cmd.contains("XATS_IDENTITY_KEY"),
+            "a disabled session must not inject the variable, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_secondary_pane_uses_slot_key_not_instance_key() {
+        let mut inst = claude_xats_instance();
+        inst.xats_identity_key = Some("primary-key".to_string());
+
+        let (cmd, _) = inst
+            .build_pane_resume_plan("claude", "", false, RestartMode::Fresh, Some("slot-key"))
+            .unwrap();
+        assert!(cmd.contains("XATS_IDENTITY_KEY='slot-key'"), "got: {cmd}");
+        assert!(
+            !cmd.contains("primary-key"),
+            "an adopted pane must not inherit the primary pane's identity, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_adopted_pane_without_key_injects_nothing() {
+        // A hand-started pane AoE never launched has no key until AoE relaunches
+        // its slot; until then there is nothing to inject.
+        let inst = claude_xats_instance();
+        let (cmd, _) = inst
+            .build_pane_resume_plan("claude", "", false, RestartMode::Fresh, Some(""))
+            .unwrap();
+        assert!(!cmd.contains("XATS_IDENTITY_KEY"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_codex_identity_key_is_distinct_from_pane_nonce() {
+        // The bootstrap nonce is one-shot evidence; the identity key is a durable
+        // alias. A codex pane carries both and they must not be the same value.
+        let mut inst = codex_xats_instance();
+        inst.ensure_xats_identity_key();
+        let key = inst.xats_identity_key.clone().unwrap();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(
+            cmd.contains(&format!("XATS_IDENTITY_KEY='{key}'")),
+            "got: {cmd}"
+        );
+        assert!(
+            cmd.contains("xats_agent_id=\"$(uuidgen)\""),
+            "the one-shot pane nonce must still be generated per launch, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_fork_does_not_inherit_identity_key() {
+        // CRITICAL: this is the only point at which two panes claiming one xats
+        // identity can be prevented; the daemon cannot tell a copied key apart
+        // from the original pane restarting.
+        let mut inst = claude_xats_instance();
+        inst.ensure_xats_identity_key();
+        inst.resume_token = Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string());
+
+        let fork = inst.create_fork("forked".to_string(), None).unwrap();
+        assert!(fork.xats_identity_key.is_none());
+
+        let mut fork = fork;
+        fork.ensure_xats_identity_key();
+        assert_ne!(
+            fork.xats_identity_key, inst.xats_identity_key,
+            "a fork must mint its own identity key"
+        );
+    }
+
     #[test]
     fn test_cross_agent_team_supported_tool_helpers() {
         assert!(Instance::supports_cross_agent_team_tool("claude"));
@@ -2612,14 +2919,14 @@ mod tests {
         let inst = codex_xats_instance();
 
         let (resume_cmd, resumed) = inst
-            .build_pane_resume_plan("codex", token, true, RestartMode::Resume)
+            .build_pane_resume_plan("codex", token, true, RestartMode::Resume, None)
             .expect("Codex resume plan");
         assert!(resumed);
         assert!(resume_cmd.contains("pre-register-codex-pane"));
         assert!(resume_cmd.contains(&format!("resume {token}")));
 
         let (fresh_cmd, resumed) = inst
-            .build_pane_resume_plan("codex", token, true, RestartMode::Fresh)
+            .build_pane_resume_plan("codex", token, true, RestartMode::Fresh, None)
             .expect("Codex fresh plan");
         assert!(!resumed);
         assert!(fresh_cmd.contains("pre-register-codex-pane"));
@@ -2728,6 +3035,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(resumed);
@@ -2749,6 +3057,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Fresh,
+                None,
             )
             .unwrap();
         assert!(!resumed, "Fresh mode must not resume");
@@ -2989,6 +3298,7 @@ mod tests {
                 "019d1af9-a899-7df1-8f7d-a244126e5ded",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(resumed);
@@ -3003,7 +3313,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "", true, RestartMode::Resume)
+            .build_pane_resume_plan("claude", "", true, RestartMode::Resume, None)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -3019,7 +3329,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "abc; rm -rf ~", true, RestartMode::Resume)
+            .build_pane_resume_plan("claude", "abc; rm -rf ~", true, RestartMode::Resume, None)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -3038,7 +3348,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "gemini".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("gemini", "gemini-sess-0", true, RestartMode::Resume)
+            .build_pane_resume_plan("gemini", "gemini-sess-0", true, RestartMode::Resume, None)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -3057,7 +3367,7 @@ mod tests {
         // bare-binary fresh launch.
         let inst = Instance::new("test", "/tmp/test");
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("mystery", "some-id", false, RestartMode::Resume)
+            .build_pane_resume_plan("mystery", "some-id", false, RestartMode::Resume, None)
             .unwrap();
         assert!(!resumed);
         assert_eq!(cmd, "mystery");
@@ -3068,7 +3378,13 @@ mod tests {
         // An unknown agent name with shell metacharacters must not be executed.
         let inst = Instance::new("test", "/tmp/test");
         assert!(inst
-            .build_pane_resume_plan("evil; rm -rf ~", "some-id", false, RestartMode::Resume)
+            .build_pane_resume_plan(
+                "evil; rm -rf ~",
+                "some-id",
+                false,
+                RestartMode::Resume,
+                None
+            )
             .is_none());
     }
 
@@ -3103,6 +3419,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(resumed, "expected a resume plan, got fresh");
@@ -3128,7 +3445,7 @@ mod tests {
         inst.yolo_mode = true;
 
         let cmd = inst
-            .build_pane_command("opencode", None, true)
+            .build_pane_command("opencode", None, true, None)
             .expect("opencode command override should build");
         assert!(
             cmd.contains("OPENCODE_PERMISSION="),
@@ -3150,6 +3467,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(
@@ -3171,6 +3489,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(resumed);
@@ -3198,6 +3517,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(
@@ -3221,7 +3541,13 @@ mod tests {
         let id = inst.id.clone();
 
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "not a valid; token", true, RestartMode::Resume)
+            .build_pane_resume_plan(
+                "claude",
+                "not a valid; token",
+                true,
+                RestartMode::Resume,
+                None,
+            )
             .unwrap();
         assert!(!resumed, "invalid token must degrade to fresh");
         assert!(
@@ -3252,13 +3578,19 @@ mod tests {
         inst.tool = "claude".to_string();
 
         assert!(
-            inst.build_pane_resume_plan("evil; rm -rf ~", "some-id", true, RestartMode::Resume)
-                .is_none(),
+            inst.build_pane_resume_plan(
+                "evil; rm -rf ~",
+                "some-id",
+                true,
+                RestartMode::Resume,
+                None
+            )
+            .is_none(),
             "unsafe agent name must be refused"
         );
 
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("claude", "abc; rm -rf ~", true, RestartMode::Resume)
+            .build_pane_resume_plan("claude", "abc; rm -rf ~", true, RestartMode::Resume, None)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -3282,6 +3614,7 @@ mod tests {
                 "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
                 true,
                 RestartMode::Resume,
+                None,
             )
             .unwrap();
         assert!(
@@ -3290,7 +3623,7 @@ mod tests {
         );
 
         let (secondary, _) = inst
-            .build_pane_resume_plan("pi", "ignored", false, RestartMode::Resume)
+            .build_pane_resume_plan("pi", "ignored", false, RestartMode::Resume, None)
             .unwrap();
         assert!(
             !secondary.contains("--dangerously-skip-permissions"),

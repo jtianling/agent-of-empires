@@ -233,6 +233,12 @@ fn reconcile_session(
         .iter()
         .map(|s| (s.slot, s.tmux_pane.clone()))
         .collect();
+    // A pane capture carries no identity key, so the upsert below would blank it.
+    // Carry the slot's current key forward instead.
+    let existing_keys: HashMap<i64, String> = existing_rows
+        .iter()
+        .map(|s| (s.slot, s.xats_identity_key.clone()))
+        .collect();
     // Slots already tracked for this instance: used to detect first-time
     // adoption (a slot that did not exist before) for event logging.
     let existing: HashSet<i64> = existing_rows.iter().map(|s| s.slot).collect();
@@ -254,6 +260,7 @@ fn reconcile_session(
             &capture.native_session_id,
             &capture.cwd,
             &pane.pane_id,
+            existing_keys.get(&pane.slot).map_or("", String::as_str),
             now,
         )?;
         if !existing.contains(&pane.slot) {
@@ -477,5 +484,58 @@ mod tests {
             .collect();
         by_pane.sort();
         assert_eq!(by_pane, vec![("%10", 0), ("%11", 1), ("%99", 2)]);
+    }
+}
+
+#[cfg(test)]
+mod identity_key_tests {
+    use super::*;
+    use crate::db::ensure_schema;
+    use tempfile::TempDir;
+
+    fn store() -> (TempDir, Store) {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open_at(&tmp.path().join("aoe.db")).unwrap();
+        ensure_schema(&store.conn).unwrap();
+        (tmp, store)
+    }
+
+    /// A pane capture carries no identity key, so the reconcile upsert would
+    /// blank it. Losing it silently stops the identity from surviving restarts.
+    #[test]
+    fn reconcile_preserves_an_existing_slot_identity_key() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+
+        store
+            .upsert_agent_slot(&inst.id, 0, "claude", "sess-0", "/tmp", "%1", "key-0", 1)
+            .unwrap();
+        store
+            .upsert_pane_live("%1", "claude", "sess-0-new", "/tmp", 2)
+            .unwrap();
+
+        reconcile_session(&store, &inst, &[(0, "%1".to_string())], Some("%1")).unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        assert_eq!(slots[0].native_session_id, "sess-0-new");
+        assert_eq!(
+            slots[0].xats_identity_key, "key-0",
+            "the capture must not blank the slot's identity key"
+        );
+    }
+
+    #[test]
+    fn reconcile_leaves_a_keyless_slot_empty() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+
+        store
+            .upsert_pane_live("%1", "claude", "sess-0", "/tmp", 1)
+            .unwrap();
+
+        reconcile_session(&store, &inst, &[(0, "%1".to_string())], Some("%1")).unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        assert_eq!(slots[0].xats_identity_key, "");
     }
 }
