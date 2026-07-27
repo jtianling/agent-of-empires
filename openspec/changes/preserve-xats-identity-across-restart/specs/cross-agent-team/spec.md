@@ -52,7 +52,7 @@ The primary pane's identity key SHALL be stored on the instance record, alongsid
 
 Agent panes are adopted observe-first: a user may split a pane and start an agent in it by hand, and AoE never builds that pane's launch command. AoE SHALL NOT attempt to inject a key into such a pane while it is running. It SHALL mint and inject one the first time it launches that pane's slot itself, after which the key is stable like any other.
 
-The consequence is that identity continuity for a hand-started pane begins one relaunch later than for a pane AoE launched.
+The consequence is bounded rather than permanent: the key is bound to the identity during the registration that follows its first injection, so such a pane costs one extra manual registration and recovers normally from then on.
 
 #### Scenario: Hand-started pane has no key until AoE relaunches it
 
@@ -66,6 +66,12 @@ The consequence is that identity continuity for a hand-started pane begins one r
 - **WHEN** AoE launches an adopted slot that has no identity key
 - **THEN** AoE SHALL mint one, persist it on the slot, and inject it into the launched pane
 - **AND** subsequent launches of that slot SHALL reuse it
+
+#### Scenario: Key that is not yet bound does not fail the launch
+
+- **WHEN** a pane is launched with a freshly minted identity key that no identity has been registered against yet
+- **THEN** AoE SHALL treat the launch as successful
+- **AND** SHALL retain the key so the registration that follows can bind it
 
 ### Requirement: Identity key is stable across relaunch, restart, and recovery
 

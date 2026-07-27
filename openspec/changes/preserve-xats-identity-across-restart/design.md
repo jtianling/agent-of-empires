@@ -63,9 +63,15 @@ What reconcile must still do is narrower: a pane capture carries no identity key
 
 Agent panes are adopted observe-first. A user can split a pane, start an agent in it by hand, and the reconciler will adopt it into a slot; AoE never builds that pane's command. There is no way to give a running process an environment variable it did not start with, and tmux's environment is session-scoped rather than pane-scoped, so a session-level variable would hand every pane the same key and produce exactly the collision Decision 8 exists to prevent.
 
-So AoE mints and injects only where it builds the command. For a hand-started pane that is the first restart or recovery of its slot. Identity continuity for such a pane therefore begins one relaunch later than for the primary pane, which has a key from its very first launch.
+So AoE mints and injects only where it builds the command. For a hand-started pane that is the first restart or recovery of its slot.
 
-This is a real limitation rather than a temporary one, and it is worth stating plainly because the symptom is confusing otherwise: the first clean restart of a hand-started agent still asks the user to register, and every one after it does not.
+The gap this leaves converges rather than persisting, because the daemon binds the key during whatever registration follows:
+
+1. Hand-started launch: no key exists, and the user registers manually as they do today.
+2. First AoE relaunch: the key is injected. Recovery finds it unbound and falls through to normal registration, which attaches the key to the identity the user registers, taking over the existing record.
+3. Every later launch: recovery works.
+
+So the cost of a hand-started pane is one extra manual registration, not permanent exclusion. The convergence step depends on the agent following the startup hint, which is the same natural-language link the Risks section already calls the most fragile in the chain; a hand-started pane simply passes through it once more.
 
 ### Decision 5: Injection is unconditional, not restart-specific
 
@@ -133,6 +139,8 @@ The xats side must accept the identity key at registration, resolve it during re
 The startup hint must try the identity key *before* its existing branches. After a fresh restart both "does not remember its identity" and "has an identity key" are true at once, and the existing order would take the process-id branch and fail.
 
 Until that half ships, AoE-side behavior is verifiable on its own (the variable is present, stable across restarts, fresh on clone, absent when the feature is off) but end-to-end identity continuity is not.
+
+When it does ship, the first continuity run needs one setup step or it will read as a failure. Identities registered against the older daemon have no key recorded, so a pane must register once under the new daemon to bind its key before restart continuity can be observed at all. A first attempt that reports "register normally" is that state, not a defect.
 
 ## Risks / Trade-offs
 
