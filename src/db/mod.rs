@@ -23,6 +23,15 @@ use rusqlite::Connection;
 /// (at most four panes tracked per session).
 pub const MAX_SLOT: i64 = 3;
 
+/// How long an event row is kept. The stream is diagnostic only; nothing in the
+/// codebase reads it back, so the window just has to cover a plausible debugging
+/// session.
+const EVENT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Most recent event rows kept per instance. Bounds a single busy instance so it
+/// cannot crowd out the history of the others inside the retention window.
+const EVENT_MAX_ROWS_PER_INSTANCE: i64 = 500;
+
 /// Resolve the path to `aoe.db` for the given profile (next to `sessions.json`).
 pub fn db_path(profile: &str) -> Result<PathBuf> {
     let dir = crate::session::ensure_profile_dir(profile)?;
@@ -47,10 +56,61 @@ impl Store {
     /// Like [`Store::open`], but also applies the schema idempotently. Used by
     /// paths that may run before the migration has executed (e.g. the
     /// `__record-pane` capture subcommand).
+    ///
+    /// A database that cannot be read at all is quarantined and recreated rather
+    /// than failing: see [`open_with_schema_at`].
     pub fn open_with_schema(profile: &str) -> Result<Self> {
-        let store = Self::open(profile)?;
-        ensure_schema(&store.conn)?;
+        let path = db_path(profile)?;
+        let (store, _) = Self::open_with_schema_at(&path)?;
         Ok(store)
+    }
+
+    /// Open a store at `path`, applying the schema and pruning the event stream.
+    ///
+    /// When the file is corrupt or is not a database, it is moved aside under a
+    /// timestamped name and an empty database is created in its place; the
+    /// quarantined path is returned so the caller can surface it. The contents
+    /// are derived state (captures re-appear within a tick, slots are re-assigned
+    /// from live panes), so keeping the profile usable is worth more than the
+    /// rows. The file is preserved rather than deleted: discarding gigabytes of a
+    /// user's data is not a decision this code should make silently.
+    ///
+    /// Failures that are not corruption (permissions, locking, a missing
+    /// directory) are returned to the caller unchanged.
+    pub fn open_with_schema_at(path: &Path) -> Result<(Self, Option<PathBuf>)> {
+        match Self::open_at(path).and_then(|store| {
+            ensure_schema(&store.conn)?;
+            Ok(store)
+        }) {
+            Ok(store) => Ok((store, None)),
+            Err(e) if is_corruption(&e) => {
+                let quarantined = quarantine_path(path);
+                std::fs::rename(path, &quarantined).with_context(|| {
+                    format!(
+                        "moving unreadable store {} aside to {}",
+                        path.display(),
+                        quarantined.display()
+                    )
+                })?;
+                // SQLite's sidecars belong to the file we just moved; leaving them
+                // would make the fresh database inherit a stale journal.
+                for suffix in ["-wal", "-shm"] {
+                    let mut sidecar = path.as_os_str().to_os_string();
+                    sidecar.push(suffix);
+                    let _ = std::fs::remove_file(PathBuf::from(sidecar));
+                }
+                tracing::warn!(
+                    "Unreadable session store at {} was moved to {} and recreated: {}",
+                    path.display(),
+                    quarantined.display(),
+                    e
+                );
+                let store = Self::open_at(path)?;
+                ensure_schema(&store.conn)?;
+                Ok((store, Some(quarantined)))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn open_at(path: &Path) -> Result<Self> {
@@ -192,12 +252,17 @@ impl Store {
         Ok(out)
     }
 
-    /// Remove all durable slots for an instance (used on session deletion).
+    /// Remove all durable records for an instance (used on session deletion):
+    /// its slots, its layout snapshot, and its events. Event rows outlive the
+    /// session that produced them otherwise, and can never be read in context
+    /// again once the instance is gone.
     pub fn delete_slots_for_instance(&self, instance_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM agent_slot WHERE instance_id = ?1",
             [instance_id],
         )?;
+        self.conn
+            .execute("DELETE FROM events WHERE instance_id = ?1", [instance_id])?;
         self.delete_layout_snapshot(instance_id)?;
         Ok(())
     }
@@ -349,6 +414,63 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         );",
     )?;
     backfill_agent_slot_columns(conn)?;
+    prune_events(conn)?;
+    Ok(())
+}
+
+/// Whether an error is SQLite reporting that the file cannot be read as a
+/// database. Identified by SQLite's own result codes rather than by inspecting
+/// the file, so the check cannot drift from what actually fails to open.
+fn is_corruption(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase,
+                    ..
+                },
+                _
+            ))
+        )
+    })
+}
+
+/// Where an unreadable database is preserved. The timestamp keeps repeated
+/// quarantines from overwriting each other.
+fn quarantine_path(path: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".corrupt-{stamp}"));
+    PathBuf::from(name)
+}
+
+/// Bound the event stream: drop rows outside the retention window, then keep only
+/// the most recent rows per instance. Both bounds are needed -- age alone lets a
+/// burst fill the window, and count alone lets an old, quiet database keep rows
+/// forever.
+///
+/// This is a backstop. Events are appended on change rather than per poll tick,
+/// so the table should stay small on its own; retention exists so a future caller
+/// that appends carelessly cannot grow the file without limit.
+fn prune_events(conn: &Connection) -> Result<()> {
+    let cutoff = now_unix() - EVENT_RETENTION_SECS;
+    let mut removed = conn.execute("DELETE FROM events WHERE created_at < ?1", [cutoff])?;
+
+    removed += conn.execute(
+        "DELETE FROM events WHERE id NOT IN (            SELECT id FROM events e2            WHERE e2.instance_id = events.instance_id            ORDER BY e2.id DESC LIMIT ?1          )",
+        [EVENT_MAX_ROWS_PER_INSTANCE],
+    )?;
+
+    // Deleting rows frees pages inside the file without returning them to the
+    // filesystem, so an already-oversized database would stay large. Only run it
+    // when a prune actually removed rows, so a normal open does no extra work.
+    if removed > 0 {
+        conn.execute_batch("VACUUM")?;
+    }
     Ok(())
 }
 
@@ -381,6 +503,20 @@ pub fn create_schema_for_profile(profile: &str) -> Result<()> {
     let store = Store::open(profile)?;
     ensure_schema(&store.conn)?;
     Ok(())
+}
+
+/// Make a profile's store readable before anything depends on it, quarantining
+/// and recreating it when it cannot be opened at all. Returns the path the
+/// unreadable file was preserved at, so the caller can tell the user.
+///
+/// Called at startup ahead of the migrations, which apply the schema and abort on
+/// error: without this, one profile's corrupt database makes AoE refuse to launch
+/// in that profile. The routine callers of the store stay tolerant of an
+/// unopenable store on their own.
+pub fn ensure_store_readable(profile: &str) -> Result<Option<PathBuf>> {
+    let path = db_path(profile)?;
+    let (_, quarantined) = Store::open_with_schema_at(&path)?;
+    Ok(quarantined)
 }
 
 /// Purge a deleted session's durable and volatile records from the store.
@@ -677,6 +813,172 @@ mod tests {
         let slots = store.read_slots_for_instance("legacy").unwrap();
         let added = slots.iter().find(|s| s.slot == 2).unwrap();
         assert_eq!(added.xats_identity_key, "key-2");
+    }
+
+    #[test]
+    fn prune_drops_events_outside_the_retention_window() {
+        let (_tmp, store) = temp_store();
+        ensure_schema(&store.conn).unwrap();
+        let now = now_unix();
+
+        store
+            .append_event(
+                "inst",
+                Some(0),
+                "capture",
+                None,
+                now - EVENT_RETENTION_SECS - 1,
+            )
+            .unwrap();
+        store
+            .append_event("inst", Some(0), "capture", None, now)
+            .unwrap();
+
+        prune_events(&store.conn).unwrap();
+
+        let kept: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "only the row inside the window survives");
+    }
+
+    #[test]
+    fn prune_caps_rows_per_instance_without_touching_others() {
+        let (_tmp, store) = temp_store();
+        ensure_schema(&store.conn).unwrap();
+        let now = now_unix();
+
+        for _ in 0..(EVENT_MAX_ROWS_PER_INSTANCE + 25) {
+            store
+                .append_event("busy", Some(0), "capture", None, now)
+                .unwrap();
+        }
+        store
+            .append_event("quiet", Some(0), "adopt", None, now)
+            .unwrap();
+
+        prune_events(&store.conn).unwrap();
+
+        let busy: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE instance_id = 'busy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let quiet: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE instance_id = 'quiet'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(busy, EVENT_MAX_ROWS_PER_INSTANCE);
+        assert_eq!(quiet, 1, "a busy instance must not evict another's history");
+    }
+
+    #[test]
+    fn prune_leaves_a_store_within_its_bounds_alone() {
+        let (_tmp, store) = temp_store();
+        ensure_schema(&store.conn).unwrap();
+        let now = now_unix();
+        store
+            .append_event("inst", Some(0), "adopt", None, now)
+            .unwrap();
+
+        prune_events(&store.conn).unwrap();
+
+        let kept: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn deleting_a_session_purges_its_events_only() {
+        let (_tmp, store) = temp_store();
+        ensure_schema(&store.conn).unwrap();
+        let now = now_unix();
+        store
+            .append_event("gone", Some(0), "adopt", None, now)
+            .unwrap();
+        store
+            .append_event("kept", Some(0), "adopt", None, now)
+            .unwrap();
+        store
+            .upsert_agent_slot("gone", 0, "claude", "s", "/tmp", "%1", "", now)
+            .unwrap();
+
+        store.delete_slots_for_instance("gone").unwrap();
+
+        let gone: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE instance_id = 'gone'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let kept: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE instance_id = 'kept'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0, "a deleted session must not leave events behind");
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn corrupt_database_is_quarantined_and_recreated() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("aoe.db");
+        // A valid SQLite header followed by garbage: opens, then fails to read.
+        let mut bytes = b"SQLite format 3\0".to_vec();
+        bytes.extend(std::iter::repeat(0xAB).take(8192));
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (store, quarantined) = Store::open_with_schema_at(&path).unwrap();
+        let quarantined = quarantined.expect("corrupt file should be quarantined");
+
+        assert!(
+            quarantined.exists(),
+            "the unreadable file must be preserved"
+        );
+        assert!(path.exists(), "a fresh database must take its place");
+        store
+            .upsert_agent_slot("inst", 0, "claude", "s", "/tmp", "%1", "", 1)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_database_is_quarantined() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("aoe.db");
+        std::fs::write(&path, b"this is not a database at all").unwrap();
+
+        let (_store, quarantined) = Store::open_with_schema_at(&path).unwrap();
+        assert!(quarantined.expect("should be quarantined").exists());
+    }
+
+    #[test]
+    fn a_healthy_database_is_not_quarantined() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("aoe.db");
+
+        let (_store, first) = Store::open_with_schema_at(&path).unwrap();
+        assert!(first.is_none());
+        let (_store, second) = Store::open_with_schema_at(&path).unwrap();
+        assert!(
+            second.is_none(),
+            "reopening a healthy store changes nothing"
+        );
     }
 
     #[test]

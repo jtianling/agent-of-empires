@@ -88,6 +88,20 @@ async fn main() -> Result<()> {
     ));
     session::check_migration_hint(&profile);
 
+    // Ahead of the migrations, which apply the store schema and abort on error:
+    // a database that cannot be read at all is moved aside and recreated so a
+    // corrupt store cannot make AoE refuse to launch in this profile.
+    match agent_of_empires::db::ensure_store_readable(&profile) {
+        Ok(Some(quarantined)) => {
+            debug_log_warning = Some(format!(
+                "This profile's session store was unreadable and has been recreated.                  The previous file is preserved at {}. Sessions that are already                  stopped can no longer be recovered from it.",
+                quarantined.display()
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Could not prepare the session store: {}", e),
+    }
+
     // TUI mode handles migrations with a spinner; CLI runs them silently
     if cli.command.is_some() {
         migrations::run_migrations()?;

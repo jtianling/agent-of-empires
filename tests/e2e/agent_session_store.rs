@@ -415,7 +415,7 @@ fn events_are_append_only_with_monotonic_ids() {
     sqlite_query(
         &db,
         "INSERT INTO events (instance_id, slot, kind, detail, created_at) \
-         VALUES ('inst-e', 0, 'status', 'running', 1);",
+         VALUES ('inst-e', 0, 'status', 'running', strftime('%s','now'));",
     );
     let first_id = sqlite_query(
         &db,
@@ -425,7 +425,7 @@ fn events_are_append_only_with_monotonic_ids() {
     sqlite_query(
         &db,
         "INSERT INTO events (instance_id, slot, kind, detail, created_at) \
-         VALUES ('inst-e', 0, 'capture', 'sess', 2);",
+         VALUES ('inst-e', 0, 'capture', 'sess', strftime('%s','now'));",
     );
     let second_id = sqlite_query(
         &db,

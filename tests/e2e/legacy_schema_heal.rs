@@ -309,3 +309,74 @@ fn legacy_db_capture_reconcile_produces_agent_slot() {
          the tmux_pane backfill did not heal the schema"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Requirement: An unreadable store is quarantined, not fatal
+//   4.1/4.2: a corrupt aoe.db must not stop AoE from starting, and the
+//            unreadable file must still be on disk afterwards.
+// ---------------------------------------------------------------------------
+
+/// Write a file that opens as SQLite but cannot be read as one, the shape the
+/// incident this guards against produced (a valid header over a damaged body).
+fn write_corrupt_db(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = b"SQLite format 3\0".to_vec();
+    bytes.extend(std::iter::repeat(0xABu8).take(16384));
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn quarantined_siblings(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("aoe.db.corrupt-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+#[serial]
+fn corrupt_store_does_not_prevent_startup_and_is_preserved() {
+    crate::harness::require_tmux!();
+
+    let h = TuiTestHarness::new("corrupt_store_startup");
+    let profile_dir = config_dir(&h).join("profiles/default");
+    let db = profile_dir.join("aoe.db");
+    write_corrupt_db(&db);
+
+    // Any command that goes through the startup path is enough; `add` also
+    // proves the recreated store is usable.
+    let out = h.run_cli(&[
+        "add",
+        h.project_path().to_str().unwrap(),
+        "-t",
+        "After Corrupt",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a corrupt store must not stop AoE from starting, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("malformed"),
+        "the SQLite error must not reach the user, stderr: {stderr}"
+    );
+
+    let preserved = quarantined_siblings(&profile_dir);
+    assert_eq!(
+        preserved.len(),
+        1,
+        "the unreadable file must be preserved, found {preserved:?}"
+    );
+    assert!(
+        db.exists(),
+        "a fresh database must take the quarantined file's place"
+    );
+}

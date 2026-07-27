@@ -242,6 +242,13 @@ fn reconcile_session(
     // Slots already tracked for this instance: used to detect first-time
     // adoption (a slot that did not exist before) for event logging.
     let existing: HashSet<i64> = existing_rows.iter().map(|s| s.slot).collect();
+    // What each slot last captured, so a `capture` event is appended on change
+    // rather than on every poll tick. Reconcile runs on the poller cadence, so a
+    // per-tick append records that polling happened, not that anything occurred.
+    let existing_natives: HashMap<i64, String> = existing_rows
+        .iter()
+        .map(|s| (s.slot, s.native_session_id.clone()))
+        .collect();
 
     let assigned = assign_slots(panes, primary_pane, &existing_map);
 
@@ -272,7 +279,9 @@ fn reconcile_session(
                 Some(&capture.native_session_id),
                 now,
             )?;
-        } else {
+        } else if existing_natives.get(&pane.slot).map(String::as_str)
+            != Some(capture.native_session_id.as_str())
+        {
             store.append_event(
                 &inst.id,
                 Some(pane.slot),
@@ -522,6 +531,68 @@ mod identity_key_tests {
             slots[0].xats_identity_key, "key-0",
             "the capture must not blank the slot's identity key"
         );
+    }
+
+    fn event_kinds(store: &Store, instance_id: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT kind FROM events WHERE instance_id = ?1 ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([instance_id], |r| r.get::<_, String>(0))
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    /// Reconcile runs on the poll cadence. Appending a `capture` event per tick
+    /// records that polling happened rather than that anything occurred, and with
+    /// no retention it grew one profile's database to several gigabytes.
+    #[test]
+    fn unchanged_capture_appends_no_event_but_still_refreshes_the_row() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+        let panes = [(0, "%1".to_string())];
+
+        store
+            .upsert_pane_live("%1", "claude", "sess-0", "/tmp", 1)
+            .unwrap();
+        reconcile_session(&store, &inst, &panes, Some("%1")).unwrap();
+        assert_eq!(event_kinds(&store, &inst.id), vec!["adopt"]);
+
+        // Three more ticks with nothing changed.
+        for tick in 2..5 {
+            store
+                .upsert_pane_live("%1", "claude", "sess-0", "/tmp", tick)
+                .unwrap();
+            reconcile_session(&store, &inst, &panes, Some("%1")).unwrap();
+        }
+
+        assert_eq!(
+            event_kinds(&store, &inst.id),
+            vec!["adopt"],
+            "an unchanged capture must not append an event on every tick"
+        );
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        assert_eq!(slots[0].native_session_id, "sess-0");
+    }
+
+    #[test]
+    fn changed_capture_appends_one_event() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+        let panes = [(0, "%1".to_string())];
+
+        store
+            .upsert_pane_live("%1", "claude", "sess-0", "/tmp", 1)
+            .unwrap();
+        reconcile_session(&store, &inst, &panes, Some("%1")).unwrap();
+
+        store
+            .upsert_pane_live("%1", "claude", "sess-1", "/tmp", 2)
+            .unwrap();
+        reconcile_session(&store, &inst, &panes, Some("%1")).unwrap();
+
+        assert_eq!(event_kinds(&store, &inst.id), vec!["adopt", "capture"]);
     }
 
     #[test]
