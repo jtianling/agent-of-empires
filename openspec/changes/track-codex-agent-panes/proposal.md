@@ -12,7 +12,7 @@ Codex 0.145 has a hooks system that is close to structurally identical to Claude
 
 - Give `codex` a hook configuration so its panes report themselves, the way every other tracked agent's panes do.
 - Read a capture's native session id from the agent's own source rather than assuming one shape. Claude supplies it as `session_id` in the hook's stdin JSON; Codex exports `$CODEX_THREAD_ID` into the pane's environment. The requirement becomes "the agent's session id", with the source named per agent.
-- Install Codex hooks by merging into the user's existing `~/.codex/config.toml` rather than writing it: unlike `~/.claude/settings.json`, that file is TOML and already holds unrelated user configuration that must survive untouched.
+- Install those hooks into `~/.codex/hooks.json`, the dedicated hooks file Codex reads beside `config.toml`, in the same JSON shape the existing installer already writes. The user's `config.toml` is not written at all.
 - Surface Codex's hook trust gate rather than working around it. A newly installed hook does not run until the user trusts it once, and `--dangerously-bypass-hook-trust` is not an acceptable way to avoid that.
 
 ## Capabilities
@@ -20,12 +20,12 @@ Codex 0.145 has a hooks system that is close to structurally identical to Claude
 ### Modified Capabilities
 
 - `pane-session-capture`: a capture's native session id comes from the source its agent provides, not from hook stdin alone; Codex panes are captured.
-- `agent-registry`: `codex` carries a hook configuration, and a hook configuration names the settings format it is written in.
+- `agent-registry`: `codex` carries a hook configuration.
 
 ## Impact
 
-- `src/agents.rs` for the Codex hook configuration and the settings format it declares.
-- `src/hooks/mod.rs` for TOML installation alongside the existing JSON path, merging into a user-owned file.
+- `src/agents.rs` for the Codex hook configuration and its event set.
 - `src/cli/record_pane.rs` for the per-agent session-id source.
-- `~/.codex/config.toml` on the user's machine, which this change writes into for the first time.
-- Once Codex panes can occupy slots, an adopted slot whose agent is not the instance's tool becomes reachable in practice, which makes Cross Agent Team decoration and identity-key ownership keyed on the instance's tool rather than the pane's agent a live defect rather than a latent one. That is called out in Decision 5 and left to its own change.
+- `~/.codex/hooks.json` on the user's machine, a file AoE creates and owns. `~/.codex/config.toml` is not touched.
+- `src/hooks/mod.rs` is expected to need no format work: Codex reads the same `{"hooks": {"<Event>": [{"hooks": [{"type": "command", ...}]}]}}` shape the installer already produces.
+- Once Codex panes can occupy slots, an adopted slot whose agent is not the instance's tool becomes reachable in practice. Cross Agent Team decoration and adopted-slot identity keys were fixed ahead of this change (`c29ed8be`); Decision 5 records what is left.

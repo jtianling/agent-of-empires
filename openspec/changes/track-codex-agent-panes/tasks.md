@@ -4,32 +4,27 @@
 - [ ] 1.2 Read the id through that declaration in `__record-pane`, so an agent with no declared source writes no row rather than falling back to another agent's source.
 - [ ] 1.3 Keep the working-directory chain (stdin `cwd`, then `$PWD`) working for both.
 
-## 2. Declare the Settings Format
+## 2. Give Codex a Hook Configuration
 
-- [ ] 2.1 Add the settings format to `AgentHookConfig` and set it on every existing entry.
-- [ ] 2.2 Dispatch the installer on the declared format rather than on the path.
+- [ ] 2.1 Add a `hook_config` to the `codex` registry entry targeting `.codex/hooks.json`.
+- [ ] 2.2 Map Codex's events to AoE statuses: `PreToolUse` and `UserPromptSubmit` to running, `Stop` to idle, `PermissionRequest` to waiting. Codex has no `Notification` or `ElicitationResult` event.
+- [ ] 2.3 Confirm the existing JSON installer needs no change: same `{"hooks": {...}}` shape, same merge-and-preserve behavior, only a different path.
 
-## 3. Install Into TOML Without Rewriting It
+## 3. Report the Trust Step
 
-- [ ] 3.1 Install AoE's Codex hook entries by merging into `~/.codex/config.toml`, preserving every unrelated key, section, and value.
-- [ ] 3.2 Replace AoE's own entries on reinstall instead of appending, so repeated installs converge.
-- [ ] 3.3 Uninstall only AoE's entries, and leave the file in place when anything else remains.
-- [ ] 3.4 Write nothing when Codex is not a detected agent.
+- [ ] 3.1 Tell the user at install time that Codex will ask them to trust the hook once before it runs.
+- [ ] 3.2 Confirm no code path passes `--dangerously-bypass-hook-trust`.
 
-## 4. Report the Trust Step
+## 4. Coverage
 
-- [ ] 4.1 Tell the user at install time that Codex will ask them to trust the hook once before it runs.
-- [ ] 4.2 Confirm no code path passes `--dangerously-bypass-hook-trust`.
+- [ ] 4.1 Cover a Codex capture end to end: a Codex pane firing a hook event produces a `pane_live` row whose `native_session_id` is `$CODEX_THREAD_ID` and whose agent is `codex`.
+- [ ] 4.2 Cover that an agent whose declared source yields nothing writes no row and does not borrow another agent's source.
+- [ ] 4.3 Cover that a user's own entries in `~/.codex/hooks.json` survive install, reinstall, and uninstall.
+- [ ] 4.4 Cover that a Codex pane reaches a durable slot recording `codex`, which is the behavior the whole change exists for.
 
-## 5. Coverage
+## 5. Verification
 
-- [ ] 5.1 Cover a Codex capture end to end: a Codex pane firing a hook event produces a `pane_live` row whose `native_session_id` is `$CODEX_THREAD_ID` and whose agent is `codex`.
-- [ ] 5.2 Cover that an agent whose declared source yields nothing writes no row and does not borrow another agent's source.
-- [ ] 5.3 Cover TOML merge fidelity against a file holding unrelated configuration: install, reinstall, uninstall, each asserting the unrelated content byte for byte.
-- [ ] 5.4 Cover that a Codex pane reaches a durable slot recording `codex`, which is the behavior the whole change exists for.
-
-## 6. Verification
-
-- [ ] 6.1 Run `cargo fmt`, `cargo clippy`, `cargo test --lib`, and `cargo test --test e2e` with all tmux-touching tests confined to the project harness's private socket.
-- [ ] 6.2 Run `openspec validate track-codex-agent-panes --strict`.
-- [ ] 6.3 Verify on the real machine that installing does not disturb the existing `notify` entry or any `[projects."..."]` section in `~/.codex/config.toml`, with a backup taken first.
+- [ ] 5.1 Run `cargo fmt`, `cargo clippy`, `cargo test --lib`, and `cargo test --test e2e` with all tmux-touching tests confined to the project harness's private socket.
+- [ ] 5.2 Run `openspec validate track-codex-agent-panes --strict`.
+- [ ] 5.3 On the real machine, install and then run a Codex session with the hook trusted, and verify a `pane_live` row appears carrying the thread id. This is the only step that can answer whether a hook command Codex spawns inherits `$CODEX_THREAD_ID` (see Open Questions); reading the binary cannot.
+- [ ] 5.4 Verify `~/.codex/config.toml` is byte-identical before and after install, since this change claims not to write it.

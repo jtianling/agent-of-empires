@@ -37,25 +37,29 @@ The installed agent status hook SHALL, in addition to its existing status-file w
 
 ## ADDED Requirements
 
-### Requirement: Codex hooks are installed by merging into the user's configuration
+### Requirement: Codex hooks are installed into the hooks file, not the user's configuration
 
-AoE SHALL install Codex's status hooks into `~/.codex/config.toml` by merging: it SHALL add or replace only the hook entries it recognizes as its own, and SHALL preserve every other key, section, and value in the file exactly as written. Uninstall SHALL remove only AoE's own entries and SHALL leave the file in place when anything else remains in it.
+AoE SHALL install Codex's status hooks into `~/.codex/hooks.json`. It SHALL add or replace only the hook entries it recognizes as its own and SHALL preserve any entries the user put there. Uninstall SHALL remove only AoE's own entries and SHALL leave the file in place when anything else remains in it.
 
-The hook configuration SHALL declare the settings format it is written in, and the installer SHALL dispatch on that declaration rather than inferring the format from the file's path.
+AoE SHALL NOT write `~/.codex/config.toml`. Codex reads hooks from both that file and `hooks.json`, and only the latter is AoE's to own.
 
-Nothing SHALL be written to `~/.codex/config.toml` unless Codex is a detected agent on the machine.
+Nothing SHALL be written unless Codex is a detected agent on the machine.
 
-#### Scenario: Unrelated configuration survives installation
-- **WHEN** `~/.codex/config.toml` holds user configuration AoE did not write
+#### Scenario: The user's Codex configuration is left alone
+- **WHEN** Codex hooks are installed
+- **THEN** `~/.codex/config.toml` SHALL be byte-identical to what it was before
+
+#### Scenario: A user's own hooks survive installation
+- **WHEN** `~/.codex/hooks.json` holds hook entries AoE did not write
 - **AND** Codex hooks are installed
-- **THEN** every unrelated key, section, and value SHALL be unchanged
+- **THEN** those entries SHALL be unchanged
 - **AND** the AoE hook entries SHALL be present
 
 #### Scenario: Uninstall removes only AoE's entries
-- **WHEN** `~/.codex/config.toml` holds both AoE hook entries and unrelated configuration
+- **WHEN** `~/.codex/hooks.json` holds both AoE hook entries and the user's own
 - **AND** hooks are uninstalled
 - **THEN** the AoE hook entries SHALL be gone
-- **AND** the unrelated configuration SHALL remain
+- **AND** the user's entries SHALL remain
 - **AND** the file SHALL NOT be deleted
 
 #### Scenario: Reinstalling does not duplicate entries

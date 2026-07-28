@@ -4,10 +4,12 @@
 
 Nothing in that chain is Claude-specific except its first link. `__record-pane` is invoked by the agent's own status hook, and only agents with a `hook_config` get one installed: today `claude`, `gemini`, and `cursor`. `codex` has none, so no Codex pane has ever produced a capture.
 
-Two things make Codex different from the agents already covered, and both are why this is a change rather than a one-line registry edit:
+Two things make Codex different from the agents already covered:
 
-1. Its settings file is TOML (`~/.codex/config.toml`), not JSON, and it is a file the user already owns and edits. The existing installer parses `serde_json::Value`, rewrites the whole document, and assumes AoE is the only meaningful author.
+1. Its session id comes from its environment (`$CODEX_THREAD_ID`), not from hook stdin.
 2. It gates hooks behind trust. A newly written hook is `Untrusted` until the user reviews it, and does not run before then.
+
+An earlier draft of this design carried a third: that Codex keeps its hooks in `~/.codex/config.toml`, a TOML file the user owns and edits, so installation would have to merge into it. That turned out to be avoidable -- see Decision 2.
 
 ## Goals / Non-Goals
 
@@ -35,13 +37,17 @@ So the source becomes a property of the agent: Claude reads stdin `session_id`, 
 
 The working directory keeps its existing fallback chain (stdin `cwd`, then `$PWD`), which already works for both.
 
-### Decision 2: Merge into the user's TOML, never rewrite it
+### Decision 2: Write the hooks file Codex already offers, and leave `config.toml` alone
 
-`~/.claude/settings.json` is effectively AoE's to manage. `~/.codex/config.toml` is not: on the machine that prompted this change it holds a `notify` entry pointing at another tool and more than twenty `[projects."..."]` sections.
+Codex discovers hooks from two places per configuration layer: a `[hooks]` table inside `config.toml`, and a dedicated `hooks.json` in the same folder. Both are loaded; a layer that populates both only earns a warning ("loading hooks from both ..."), not a conflict.
 
-Installation therefore reads the document, adds or replaces only the AoE hook entries, and writes the rest back unchanged. Uninstall removes only entries AoE recognizes as its own, by the same `is_aoe_hook_command` test the JSON path already uses, and leaves the file otherwise untouched -- including leaving the file itself in place when it holds anything else.
+That second source removes the reason this change looked dangerous. `~/.codex/config.toml` is the user's: on the machine that prompted this change it holds a `notify` entry pointing at another tool and more than twenty `[projects."..."]` sections, and AoE merging into it would put a hand-edited file at risk on every install. `~/.codex/hooks.json` is a file AoE creates and owns, exactly as `~/.claude/settings.json` is today. So `config.toml` is not written at all.
 
-The format is declared on the hook configuration rather than sniffed from the file extension, so the installer dispatches on what the agent says it uses.
+The shape is the one the installer already produces. Codex's `HooksFile` is `{"hooks": {"<Event>": [{"matcher": ..., "hooks": [{"type": "command", "command": "..."}]}]}}` -- the same structure `build_aoe_hooks` writes for Claude. No TOML support, no per-agent settings format, no new installer path: the registry entry names a different path and a different event set, and the existing JSON installer does the rest, including preserving hooks the user put there themselves.
+
+Verified against the installed binary rather than the source checkout, which was six weeks stale: `codex-cli 0.145.0` contains the `hooks.json` discovery path, the both-sources warning string, and the full event list `PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop`. Note `SessionEnd`, which the checkout did not have -- reading the source alone would have described a different version than the one on the machine.
+
+The one asymmetry with Claude's event set is that Codex has no `Notification` event. `PermissionRequest` is its analogue for the waiting status, and `ElicitationResult` has no counterpart.
 
 ### Decision 3: The trust gate is reported, not bypassed
 
@@ -55,24 +61,26 @@ A slot recorded as `claude` for a pane now running Codex is wrong, and after thi
 
 The stale rows therefore correct themselves on first report and are otherwise left alone. This is stated so the first run after upgrading is not mistaken for a defect: a Codex pane that has not yet fired an event still shows its old record.
 
-### Decision 5: What this change deliberately leaves broken
+### Decision 5: The defect this change would have made reachable, and where it now stands
 
-Making Codex panes trackable makes a latent defect reachable. Cross Agent Team decoration (`--dangerously-load-development-channels`) and identity-key ownership are decided by the instance's tool: `is_cross_agent_team()` tests `self.tool`, and `slot_needs_identity_key` skips slot 0 unconditionally because slot 0's key is supposed to live on the instance record. An adopted slot whose agent differs from the instance tool therefore gets the wrong decoration, and an adopted slot 0 gets no key at all.
+Making Codex panes trackable makes a latent defect reachable. Cross Agent Team decoration (`--dangerously-load-development-channels`) and identity-key ownership were decided by the instance's tool rather than the pane's agent, so an adopted slot whose agent differed from the instance tool got the wrong decoration, and an adopted slot 0 got no identity key at all. That was unreachable only because an adopted slot could only ever be Claude.
 
-Today that is unreachable, because an adopted slot can only ever be Claude and the shapes that would collide do not occur. After this change a Claude Cross Agent Team instance can hold an adopted Codex slot, and both defects become live.
+It has since been fixed on its own, ahead of this change (`c29ed8be`): decoration follows the slot's recorded agent in both directions, and an adopted slot 0 is recognized as needing its own key. This section is kept rather than deleted because it names the dependency: if that fix is ever reverted, this change is what makes the defect live.
 
-It is left out of this change because it is a separate decision about what "the instance's agent" means once a pane's agent and its instance's tool are routinely different, and because folding it in would put an unreviewed second concern inside a change whose first concern is already testable on its own. It must not be left unowned: it is the reason this change's own review flagged it, and it needs to land before or alongside the first Cross Agent Team instance with an adopted Codex pane.
+What remains genuinely out of scope is the restart path for a pane no slot describes, which reads the pane's own process to avoid relaunching it as the instance's tool. That is a guess where this change supplies a fact, and it stops being load-bearing for Codex once Codex panes hold slots.
 
 ## Risks / Trade-offs
 
-- [Writing a user-owned config file] -> Merge-and-preserve is the requirement, with coverage that unrelated keys and sections survive install and uninstall. The blast radius is a file the user edits by hand, so "we only touch our own entries" has to be verified, not asserted.
+- [A user's own `hooks.json`] -> AoE creates the file, but it may not be the only author. The existing installer already merges rather than overwrites and keeps non-AoE entries; that behavior is what makes this safe, so it is covered rather than assumed.
+- [`config.toml` is still where Codex records hook trust] -> AoE does not write that file; Codex does, under `[hooks.state]`, when the user trusts a hook. Nothing here should be read as AoE never causing a write to it -- only as AoE never performing one.
 - [The trust gate makes the first run look broken] -> Stated at install time and in this design, the same way the xats identity-key convergence step is.
-- [Codex changes its hook schema] -> The schema is read from Codex 0.145. AoE writes a `[[SessionStart]]`-style array-of-tables entry and does not attempt to validate Codex's own semantics; a schema change breaks the capture rather than the agent, and shows up as a Codex pane that stops reporting.
+- [Codex changes its hook schema] -> The shape is read from the installed `codex-cli 0.145.0` binary. A schema change breaks the capture rather than the agent, and shows up as a Codex pane that stops reporting. The version-drift trap is real and was hit while designing this: the local source checkout was six weeks behind the installed binary and described a smaller event set.
 
 ## Migration Plan
 
-No data migration. Existing rows keep their values and correct themselves on the pane's next report (Decision 4). Users who never run Codex are unaffected: nothing is written to `~/.codex/config.toml` unless Codex is a detected agent.
+No data migration. Existing rows keep their values and correct themselves on the pane's next report (Decision 4). Users who never run Codex are unaffected: nothing is written to `~/.codex/` unless Codex is a detected agent.
 
 ## Open Questions
 
-- Whether Codex hooks should be installed globally (`~/.codex/config.toml`) or per project. Global matches what AoE does for Claude and is what this change implements; per-project would scope the blast radius but would have to be written once per managed directory.
+- Whether Codex hooks should be installed globally (`~/.codex/hooks.json`) or per project. Global matches what AoE does for Claude and is what this change implements; per-project would scope the blast radius but would have to be written once per managed directory.
+- Whether a hook command Codex spawns inherits `$CODEX_THREAD_ID`. Decision 1 depends on it, and it is the one link that cannot be settled by reading the binary's strings -- it needs a real Codex session with the hook trusted. Task 6.3 is where that gets answered; if it turns out the variable is not in the hook's environment, the source for Codex has to be re-derived from its hook stdin instead, and Decision 1 is what changes.
