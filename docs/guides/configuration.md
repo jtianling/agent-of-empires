@@ -200,3 +200,27 @@ Per-repo settings go in `.aoe/config.toml` at your project root. Run `aoe init` 
 Repo config supports: `[hooks]`, `[session]`, `[sandbox]`, and `[worktree]` sections. It does not support `[tmux]`, `[updates]`, `[claude]`, or `[diff]` -- those are personal settings.
 
 See [Repo Config & Hooks](repo-config.md) for details.
+
+## Agent Status Hooks
+
+To know whether a session is running, waiting, or idle, AoE installs a small
+status hook into the agent's own settings file. This happens the first time you
+start a session with that agent, and the hook is a no-op outside AoE sessions.
+
+| Agent  | File                    |
+| ------ | ----------------------- |
+| Claude | `~/.claude/settings.json` |
+| Codex  | `~/.codex/hooks.json`     |
+| Gemini | `~/.gemini/settings.json` |
+| Cursor | `~/.cursor/settings.json` |
+
+Entries you wrote yourself are preserved; AoE adds, replaces, and removes only
+its own. For Codex, AoE writes `hooks.json` and never `~/.codex/config.toml` --
+that file is yours, and it is also where Codex records which hooks you have
+trusted.
+
+**Codex asks you to trust the hook once.** Codex does not run a newly installed
+hook until you have reviewed it, so the first Codex session after installation
+reports no status and its pane is not tracked for recovery. Trust the hook when
+Codex prompts you and both start working. AoE will not pass
+`--dangerously-bypass-hook-trust` on your behalf.

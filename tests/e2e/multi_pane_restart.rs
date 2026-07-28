@@ -97,6 +97,16 @@ fn run_record_pane(
     cmd.arg("__record-pane");
     if let Some(agent) = agent {
         cmd.arg("--agent").arg(agent);
+        // A hook fires with its own agent's environment around it: Codex's
+        // session id is `$CODEX_THREAD_ID`, not a stdin field, so a stdin-only
+        // capture would simulate an invocation that does not occur. Read from
+        // the registry so a new agent's source cannot go missing here.
+        let source = agent_of_empires::agents::get_agent(agent)
+            .and_then(|a| a.hook_config.as_ref())
+            .map(|hooks| hooks.session_id_source);
+        if let Some(agent_of_empires::agents::SessionIdSource::EnvVar(name)) = source {
+            cmd.env(name, session_id);
+        }
     }
     let mut child = cmd
         .env("HOME", h.home_path())

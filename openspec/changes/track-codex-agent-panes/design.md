@@ -33,7 +33,9 @@ The current requirement says the native session id is read from hook stdin JSON,
 
 Codex inverts it. It exports `$CODEX_THREAD_ID` into the pane's environment (0.124 and later), and this is the same value that identifies the conversation for resume and for xats reconnect. Its hook stdin shape is not something AoE needs to depend on to get the id it already has a stable name for.
 
-So the source becomes a property of the agent: Claude reads stdin `session_id`, Codex reads `$CODEX_THREAD_ID`. This is narrower than reverting to "read an environment variable", which is what the earlier design got wrong: the variable is named per agent, not guessed from a pattern, and an agent with no declared source has no capture rather than a guessed one.
+So the source becomes a property of the agent: Claude reads stdin `session_id`, Codex reads `$CODEX_THREAD_ID`. This is narrower than reverting to "read an environment variable", which is what the earlier design got wrong: the variable is named per agent, not guessed from a pattern.
+
+An earlier draft of this decision went one step further and said an agent with no declared source is not captured at all. That was wrong, and the suite is what showed it: a pane recorded as `shell` -- an adopted pane next to an agent -- stopped being capturable, and two recovery tests that depend on that shape went red. The property worth having is narrower than the rule that broke them. What must never happen is a Codex pane recorded under the id on its stdin, because that id is real and identifies something else. An agent AoE installs no hook for cannot reach this path from a hook at all, and a caller that names one is stating the id outright rather than having it guessed. So a declared source is exclusive, and no declaration keeps the stdin id.
 
 The working directory keeps its existing fallback chain (stdin `cwd`, then `$PWD`), which already works for both.
 

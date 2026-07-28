@@ -10,6 +10,10 @@ use crate::tui::styles::Theme;
 pub struct HooksInstallDialog {
     settings_paths: Vec<String>,
     hook_commands: Vec<(String, String)>,
+    /// Set for an agent that will not run a newly installed hook until the user
+    /// has trusted it once. Without saying so, that agent's first session looks
+    /// like the install silently failed.
+    pending_trust_step: bool,
     selected: bool, // true = Accept, false = Cancel
     scroll_offset: u16,
 }
@@ -35,6 +39,7 @@ impl HooksInstallDialog {
         Self {
             settings_paths,
             hook_commands,
+            pending_trust_step: tool_name == "codex",
             selected: true,
             scroll_offset: 0,
         }
@@ -111,6 +116,17 @@ impl HooksInstallDialog {
             "Hooks are guarded by $AOE_INSTANCE_ID and are a",
         ));
         lines.push(Line::from("no-op outside of AoE sessions."));
+
+        if self.pending_trust_step {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "One more step:",
+                Style::default().bold(),
+            )));
+            lines.push(Line::from("Codex will ask you to trust this hook once"));
+            lines.push(Line::from("before it runs. Until you do, Codex panes"));
+            lines.push(Line::from("are not tracked. AoE will not bypass that."));
+        }
 
         lines
     }

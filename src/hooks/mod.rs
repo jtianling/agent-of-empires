@@ -81,9 +81,11 @@ const AOE_HOOK_MARKER: &str = "aoe-hooks";
 /// Two independent side effects:
 /// 1. Status-file write (gated on `$AOE_INSTANCE_ID`) feeds `status-detection`.
 /// 2. Pane capture (gated on `$TMUX_PANE`) pipes the hook's stdin JSON to
-///    `<aoe_bin> __record-pane`, which reads `.session_id`/`.cwd` and upserts a
-///    `pane_live` row keyed by the pane id. This works for hand-launched agents
-///    too (no `$AOE_INSTANCE_ID` required) and always exits 0.
+///    `<aoe_bin> __record-pane`, which reads the session id from the source its
+///    agent declares (stdin `.session_id` or a named environment variable),
+///    takes `.cwd`, and upserts a `pane_live` row keyed by the pane id. This
+///    works for hand-launched agents too (no `$AOE_INSTANCE_ID` required) and
+///    always exits 0.
 ///
 /// `aoe_bin` is the absolute path to the running `aoe` binary, baked in at
 /// install time so the hook works regardless of `$PATH`. `agent` is the agent
@@ -346,6 +348,79 @@ mod tests {
             .as_ref()
             .unwrap()
             .events
+    }
+
+    fn codex_events() -> &'static [crate::agents::HookEvent] {
+        crate::agents::get_agent("codex")
+            .unwrap()
+            .hook_config
+            .as_ref()
+            .unwrap()
+            .events
+    }
+
+    /// Codex's hooks file is one AoE creates, but not necessarily one it is the
+    /// only author of. The same merge that protects a user's Claude settings has
+    /// to hold here, and it is worth pinning at the new path rather than assumed
+    /// from the old one.
+    #[test]
+    fn test_codex_hooks_install_beside_a_users_own() {
+        let tmp = TempDir::new().unwrap();
+        let hooks_path = tmp.path().join(".codex").join("hooks.json");
+        let user_hook = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "echo my own hook"}]}
+                ]
+            }
+        });
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&user_hook).unwrap(),
+        )
+        .unwrap();
+
+        install_hooks(&hooks_path, codex_events(), "codex").unwrap();
+        // Twice: a reinstall must converge rather than accumulate.
+        install_hooks(&hooks_path, codex_events(), "codex").unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        let hooks = content.get("hooks").unwrap().as_object().unwrap();
+        for event in [
+            "PreToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "PermissionRequest",
+        ] {
+            let groups = hooks.get(event).unwrap().as_array().unwrap();
+            let aoe: Vec<_> = groups
+                .iter()
+                .filter(|g| {
+                    g["hooks"].as_array().unwrap().iter().any(|hook| {
+                        is_aoe_hook_command(hook["command"].as_str().unwrap_or_default())
+                    })
+                })
+                .collect();
+            assert_eq!(aoe.len(), 1, "{event} must hold exactly one AoE entry");
+        }
+        assert_eq!(
+            hooks["SessionStart"][0]["hooks"][0]["command"], "echo my own hook",
+            "the user's own hook must survive install and reinstall"
+        );
+
+        uninstall_hooks(&hooks_path).unwrap();
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        assert_eq!(
+            content["hooks"]["SessionStart"][0]["hooks"][0]["command"], "echo my own hook",
+            "uninstall must leave what AoE did not write"
+        );
+        assert!(
+            content["hooks"].get("PreToolUse").is_none(),
+            "uninstall must remove AoE's own entries"
+        );
     }
 
     #[test]

@@ -101,6 +101,22 @@ fn run_record_pane(
 /// [`run_record_pane`] for a pane running `agent`, the way the hook reports a
 /// non-Claude agent. A slot's recorded agent is what recovery relaunches it as,
 /// so it is the interesting variable for an instance whose own tool differs.
+/// Put the session id where the simulated agent's hook would actually find it.
+///
+/// A hook fires with its own agent's environment around it. Claude's id arrives
+/// on stdin, Codex's as `$CODEX_THREAD_ID`, so handing a Codex capture only a
+/// stdin id simulates a hook invocation that does not occur. Read from the
+/// registry rather than restated here, so a new agent's source cannot silently
+/// go missing from the simulation.
+fn put_session_id_in_env(cmd: &mut Command, agent: &str, session_id: &str) {
+    let source = agent_of_empires::agents::get_agent(agent)
+        .and_then(|a| a.hook_config.as_ref())
+        .map(|hooks| hooks.session_id_source);
+    if let Some(agent_of_empires::agents::SessionIdSource::EnvVar(name)) = source {
+        cmd.env(name, session_id);
+    }
+}
+
 fn run_record_pane_as(
     h: &TuiTestHarness,
     tmux_pane: &str,
@@ -112,10 +128,10 @@ fn run_record_pane_as(
     let stdin_json = format!(
         "{{\"session_id\":\"{session_id}\",\"cwd\":\"{cwd}\",\"hook_event_name\":\"SessionStart\"}}"
     );
-    let mut child = Command::new(h.binary_path())
-        .arg("__record-pane")
-        .arg("--agent")
-        .arg(agent)
+    let mut cmd = Command::new(h.binary_path());
+    cmd.arg("__record-pane").arg("--agent").arg(agent);
+    put_session_id_in_env(&mut cmd, agent, session_id);
+    let mut child = cmd
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")

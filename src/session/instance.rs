@@ -3067,9 +3067,20 @@ mod tests {
             .unwrap();
 
         let shell = crate::session::environment::user_posix_shell();
-        assert_eq!(
-            cmd,
-            format!("{shell} -lc 'stty susp undef; exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'")
+        // Codex now carries `AOE_INSTANCE_ID` because it has a hook
+        // configuration: the status-file half of the hook is gated on that
+        // variable, so a Codex launch without it would capture panes and never
+        // report status. Asserted by suffix so the test speaks about the resume
+        // flag's position, which is what it is named for.
+        assert!(
+            cmd.ends_with(
+                &format!("{shell} -lc 'stty susp undef; exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'")
+            ),
+            "unexpected codex resume command: {cmd}"
+        );
+        assert!(
+            cmd.starts_with("AOE_INSTANCE_ID="),
+            "a hook-config agent's launch must carry AOE_INSTANCE_ID: {cmd}"
         );
     }
 

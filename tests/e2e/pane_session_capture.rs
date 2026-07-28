@@ -75,9 +75,36 @@ fn run_record_pane(
     aoe_instance_id: Option<&str>,
     stdin_json: &str,
 ) -> bool {
+    run_record_pane_as(h, tmux_pane, aoe_instance_id, stdin_json, None, &[])
+}
+
+/// The same, for an agent that is named and whose session id may come from its
+/// environment rather than from the hook's stdin.
+///
+/// `env` entries with an empty value are removed rather than set, so a test can
+/// state that a variable is absent instead of relying on the runner's
+/// environment not to have it.
+fn run_record_pane_as(
+    h: &TuiTestHarness,
+    tmux_pane: Option<&str>,
+    aoe_instance_id: Option<&str>,
+    stdin_json: &str,
+    agent: Option<&str>,
+    env: &[(&str, &str)],
+) -> bool {
     let mut cmd = Command::new(h.binary_path());
-    cmd.arg("__record-pane")
-        .env("HOME", h.home_path())
+    cmd.arg("__record-pane");
+    if let Some(agent) = agent {
+        cmd.args(["--agent", agent]);
+    }
+    for (key, value) in env {
+        if value.is_empty() {
+            cmd.env_remove(key);
+        } else {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")
         .stdin(Stdio::piped())
@@ -168,6 +195,73 @@ fn capture_reads_session_id_from_stdin() {
     assert_eq!(
         row, "claude-sess-123|/work/dir",
         "pane_live row must carry the stdin session_id and cwd keyed by $TMUX_PANE"
+    );
+}
+
+/// Codex's session id is in its environment, not on the hook's stdin. Its
+/// stdin is deliberately given a `session_id` that must NOT be used: reading it
+/// would mean a Codex pane recorded under an id that does not identify its
+/// conversation, which is worse than not recording it at all.
+#[test]
+#[serial]
+fn codex_capture_reads_the_thread_id_from_its_environment() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let h = TuiTestHarness::new("capture_codex_thread_id");
+    add_and_start(&h, "Capture Codex");
+    let db = db_path(&h);
+
+    let stdin_json = r#"{"session_id":"not-the-codex-id","cwd":"/work/codex"}"#;
+    let ok = run_record_pane_as(
+        &h,
+        Some("%51"),
+        Some("inst-codex"),
+        stdin_json,
+        Some("codex"),
+        &[("CODEX_THREAD_ID", "codex-thread-abc")],
+    );
+    assert!(ok, "aoe __record-pane should exit 0 on a valid capture");
+
+    let row = sqlite_query(
+        &db,
+        "SELECT agent || '|' || native_session_id || '|' || cwd FROM pane_live WHERE tmux_pane='%51';",
+    );
+    assert_eq!(
+        row, "codex|codex-thread-abc|/work/codex",
+        "a Codex capture takes its id from $CODEX_THREAD_ID and its cwd from stdin"
+    );
+}
+
+/// An agent whose declared source yields nothing is not captured. The stdin
+/// here carries a perfectly good `session_id`, and borrowing it is exactly the
+/// failure this guards: it belongs to another agent's source.
+#[test]
+#[serial]
+fn a_capture_does_not_borrow_another_agents_session_id_source() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let h = TuiTestHarness::new("capture_no_borrow");
+    add_and_start(&h, "Capture No Borrow");
+    let db = db_path(&h);
+
+    let stdin_json = r#"{"session_id":"stdin-id-that-is-not-codexs","cwd":"/work"}"#;
+    let ok = run_record_pane_as(
+        &h,
+        Some("%52"),
+        Some("inst-noborrow"),
+        stdin_json,
+        Some("codex"),
+        &[("CODEX_THREAD_ID", "")],
+    );
+    assert!(ok, "a skipped capture must still exit 0");
+
+    let count = sqlite_query(&db, "SELECT count(*) FROM pane_live WHERE tmux_pane='%52';");
+    assert_eq!(
+        count, "0",
+        "with its own source empty, the capture must be skipped rather than fall \
+         back to the stdin id"
     );
 }
 
@@ -306,6 +400,72 @@ fn reconciler_snapshots_pane_capture_into_slot() {
     assert_eq!(
         value, "reconcile-sess",
         "reconciler must snapshot the pane capture into an agent_slot row"
+    );
+}
+
+/// The behavior the whole Codex change exists for: a Codex pane reaching a
+/// durable slot that records `codex`. Every slot AoE had ever written before
+/// said `claude`, including for panes running Codex, and recovery relaunched
+/// them accordingly.
+#[test]
+#[serial]
+fn a_codex_pane_reaches_a_durable_slot_recording_codex() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("reconcile_codex_slot");
+    add_and_start(&h, "Reconcile Codex");
+    let db = db_path(&h);
+
+    let instance_id = {
+        let sessions_path = if cfg!(target_os = "linux") {
+            h.home_path()
+                .join(".config/agent-of-empires/profiles/default/sessions.json")
+        } else {
+            h.home_path()
+                .join(".agent-of-empires/profiles/default/sessions.json")
+        };
+        let content = std::fs::read_to_string(&sessions_path).expect("read sessions.json");
+        let sessions: serde_json::Value = serde_json::from_str(&content).unwrap();
+        sessions.as_array().unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Reconcile Codex");
+    let pane_id = h.tmux_display_message(&session_name, "#{pane_id}");
+
+    let ok = run_record_pane_as(
+        &h,
+        Some(&pane_id),
+        Some(&instance_id),
+        r#"{"cwd":"/work"}"#,
+        Some("codex"),
+        &[("CODEX_THREAD_ID", "codex-slot-thread")],
+    );
+    assert!(ok, "capture should succeed for the managed Codex pane");
+
+    h.spawn_tui();
+    h.wait_for("Agent of Empires");
+
+    wait_for_count(
+        &h,
+        &db,
+        &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
+        "1",
+    );
+
+    let value = sqlite_query(
+        &db,
+        &format!(
+            "SELECT agent || '|' || native_session_id FROM agent_slot WHERE instance_id='{instance_id}';"
+        ),
+    );
+    assert_eq!(
+        value, "codex|codex-slot-thread",
+        "the durable slot must record the pane's own agent and its thread id"
     );
 }
 

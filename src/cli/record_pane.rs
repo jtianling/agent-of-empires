@@ -1,10 +1,14 @@
 //! Hidden `aoe __record-pane` capture subcommand.
 //!
 //! The installed agent status hook shells out to this subcommand on hook
-//! events. It reads the hook's stdin JSON (`{"session_id": ..., "cwd": ...}`),
-//! reads `$TMUX_PANE` from the environment, and upserts a `pane_live` row keyed
-//! by the pane id. It works for both AoE-launched and hand-launched agents, so
-//! it does NOT depend on `$AOE_INSTANCE_ID`.
+//! events. It reads `$TMUX_PANE` from the environment and upserts a `pane_live`
+//! row keyed by the pane id. It works for both AoE-launched and hand-launched
+//! agents, so it does NOT depend on `$AOE_INSTANCE_ID`.
+//!
+//! The native session id comes from the source the agent declares in the
+//! registry: Claude's arrives as `session_id` in the hook's stdin JSON, Codex's
+//! as `$CODEX_THREAD_ID` in the pane's environment. The working directory keeps
+//! its own chain (stdin `cwd`, then `$PWD`) for both.
 //!
 //! It MUST never block or fail the agent: any error (no tmux pane, bad JSON,
 //! locked db) results in a clean exit 0 with no row written.
@@ -21,7 +25,7 @@ pub struct RecordPaneArgs {
     agent: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct HookStdin {
     #[serde(default)]
     session_id: Option<String>,
@@ -46,21 +50,43 @@ fn try_capture(profile: &str, args: &RecordPaneArgs) -> anyhow::Result<()> {
         _ => return Ok(()),
     };
 
+    // Read stdin whatever the agent is: the hook pipes it, and an unread pipe
+    // is the agent's problem. An agent whose id does not come from here still
+    // has a `cwd` on it, and one whose stdin is not JSON at all is not a reason
+    // to skip a capture whose id came from elsewhere.
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
-    let parsed: HookStdin = serde_json::from_str(&buf)?;
+    let parsed: HookStdin = serde_json::from_str(&buf).unwrap_or_default();
 
-    let session_id = match parsed.session_id {
+    let agent = args.agent.clone().unwrap_or_else(|| "claude".to_string());
+
+    // The id comes from the source this agent declares. That is what stops a
+    // Codex pane being recorded under the id on its stdin, which is a real
+    // value that identifies something other than its conversation.
+    //
+    // An agent AoE has no hook configuration for keeps the stdin id. Nothing
+    // AoE installs invokes this for such an agent -- captures come from hooks,
+    // and a hookless agent has none -- so the caller here is stating the id
+    // outright rather than having one guessed for it.
+    let source = crate::agents::get_agent(&agent)
+        .and_then(|a| a.hook_config.as_ref())
+        .map(|hooks| hooks.session_id_source)
+        .unwrap_or(crate::agents::SessionIdSource::HookStdin);
+
+    let session_id = match source {
+        crate::agents::SessionIdSource::HookStdin => parsed.session_id,
+        crate::agents::SessionIdSource::EnvVar(name) => std::env::var(name).ok(),
+    };
+    let session_id = match session_id {
         Some(s) if !s.is_empty() => s,
         _ => return Ok(()),
     };
+
     let cwd = parsed
         .cwd
         .filter(|c| !c.is_empty())
         .or_else(|| std::env::var("PWD").ok())
         .unwrap_or_default();
-
-    let agent = args.agent.clone().unwrap_or_else(|| "claude".to_string());
 
     let store = crate::db::Store::open_with_schema(profile)?;
     store.upsert_pane_live(&tmux_pane, &agent, &session_id, &cwd, crate::db::now_unix())?;

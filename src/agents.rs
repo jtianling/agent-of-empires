@@ -34,6 +34,21 @@ pub struct HookEvent {
     pub status: Option<&'static str>,
 }
 
+/// Where a capture reads an agent's native session id from.
+///
+/// Named per agent rather than assumed. Claude puts it on the hook's stdin;
+/// Codex exports it into the pane's environment and its stdin shape is not
+/// something AoE needs to depend on for a value it already has a stable name
+/// for. An agent that declares no source is not captured, rather than having
+/// another agent's source guessed for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIdSource {
+    /// The `session_id` field of the hook's stdin JSON.
+    HookStdin,
+    /// A named environment variable set in the agent's pane.
+    EnvVar(&'static str),
+}
+
 /// Configuration for installing status-detection hooks into an agent's settings file.
 pub struct AgentHookConfig {
     /// Path relative to the home dir where the agent's settings live
@@ -41,6 +56,8 @@ pub struct AgentHookConfig {
     pub settings_rel_path: &'static str,
     /// Hook events to register (status transitions).
     pub events: &'static [HookEvent],
+    /// Where this agent's native session id comes from.
+    pub session_id_source: SessionIdSource,
 }
 
 /// Agent-specific configuration for graceful exit and resume-aware restarts.
@@ -137,6 +154,35 @@ const CLAUDE_CURSOR_HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 
+/// Hook events for Codex, whose event names are its own.
+///
+/// Read from the installed `codex-cli 0.145.0` binary rather than from a source
+/// checkout. Codex has no `Notification` event; `PermissionRequest` is what
+/// stands for a pane waiting on the user, and `ElicitationResult` has no
+/// counterpart.
+const CODEX_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent {
+        name: "PreToolUse",
+        matcher: None,
+        status: Some("running"),
+    },
+    HookEvent {
+        name: "UserPromptSubmit",
+        matcher: None,
+        status: Some("running"),
+    },
+    HookEvent {
+        name: "Stop",
+        matcher: None,
+        status: Some("idle"),
+    },
+    HookEvent {
+        name: "PermissionRequest",
+        matcher: None,
+        status: Some("waiting"),
+    },
+];
+
 pub const AGENTS: &[AgentDef] = &[
     AgentDef {
         name: "claude",
@@ -151,6 +197,7 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("CLAUDE_CONFIG_DIR", "/root/.claude")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".claude/settings.json",
+            session_id_source: SessionIdSource::HookStdin,
             events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
         resume: Some(ResumeConfig {
@@ -210,7 +257,15 @@ pub const AGENTS: &[AgentDef] = &[
         supports_host_launch: true,
         detect_status: status_detection::detect_codex_status,
         container_env: &[],
-        hook_config: None,
+        hook_config: Some(AgentHookConfig {
+            // The hooks file Codex reads beside `config.toml`. Codex loads both,
+            // and only this one is AoE's to own: `config.toml` is where the user
+            // keeps their own configuration, and where Codex itself records
+            // which hooks have been trusted.
+            settings_rel_path: ".codex/hooks.json",
+            session_id_source: SessionIdSource::EnvVar("CODEX_THREAD_ID"),
+            events: CODEX_HOOK_EVENTS,
+        }),
         resume: Some(ResumeConfig {
             exit_sequence: &[&["C-c"], &["C-c"]],
             resume_pattern: r"codex resume\s+([0-9a-f-]+)",
@@ -234,6 +289,7 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".gemini/settings.json",
+            session_id_source: SessionIdSource::HookStdin,
             events: &[
                 HookEvent {
                     name: "BeforeTool",
@@ -292,6 +348,7 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("CURSOR_CONFIG_DIR", "/root/.cursor")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".cursor/settings.json",
+            session_id_source: SessionIdSource::HookStdin,
             events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
         resume: None,

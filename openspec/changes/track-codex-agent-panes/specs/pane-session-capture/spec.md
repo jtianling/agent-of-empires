@@ -2,7 +2,7 @@
 
 ### Requirement: Hook captures native session id keyed by tmux pane
 
-The installed agent status hook SHALL, in addition to its existing status-file write, capture the agent's native session id into the SQLite store keyed by `$TMUX_PANE`. The native session id SHALL be read from the source that agent provides, named per agent rather than assumed: Claude supplies it as `.session_id` in the hook's **stdin JSON**, and Codex exports it as the `$CODEX_THREAD_ID` **environment variable** in the pane. An agent that declares no source SHALL NOT be captured, rather than have one guessed for it. The capture SHALL also record the working directory (`.cwd` from stdin or `$PWD`).
+The installed agent status hook SHALL, in addition to its existing status-file write, capture the agent's native session id into the SQLite store keyed by `$TMUX_PANE`. The native session id SHALL be read from the source that agent declares, named per agent rather than assumed: Claude supplies it as `.session_id` in the hook's **stdin JSON**, and Codex exports it as the `$CODEX_THREAD_ID` **environment variable** in the pane. An agent that declares a source SHALL NOT be captured from any other; an agent AoE has no hook configuration for SHALL keep the stdin id, which the caller stated outright. The capture SHALL also record the working directory (`.cwd` from stdin or `$PWD`).
 
 #### Scenario: Claude session id captured from stdin
 - **WHEN** a Claude agent fires a hook event inside a tmux pane
@@ -18,11 +18,11 @@ The installed agent status hook SHALL, in addition to its existing status-file w
 - **AND** the row's `native_session_id` SHALL equal `$CODEX_THREAD_ID`
 - **AND** the row's `agent` SHALL be `codex`
 
-#### Scenario: A capture with no session id from its agent's source is not written
-- **WHEN** an agent fires a hook event inside a tmux pane
-- **AND** its declared source yields no session id
+#### Scenario: A capture with no session id from its agent's declared source is not written
+- **WHEN** an agent that declares a source fires a hook event inside a tmux pane
+- **AND** that source yields no session id
 - **THEN** the hook SHALL NOT write a capture row
-- **AND** the hook SHALL NOT fall back to another agent's source
+- **AND** the hook SHALL NOT fall back to another agent's source, even when one is present
 
 #### Scenario: Hand-launched agent without AOE_INSTANCE_ID is still captured
 - **WHEN** a user manually runs an agent inside a shell pane (no `$AOE_INSTANCE_ID` in the environment)
