@@ -689,6 +689,33 @@ last_seen_version = "{}"
         }
     }
 
+    /// Install a stub that is a real executable rather than a shell script, so
+    /// tmux reports it under its own name in `#{pane_current_command}`.
+    ///
+    /// A script cannot stand in here. tmux reads the pane's process name from
+    /// the kernel, which for a script is the interpreter -- a stub named `codex`
+    /// reports `bash`. Copying a system binary does not work either: macOS kills
+    /// a copy whose signature no longer matches. Compiling one is what is left.
+    ///
+    /// Returns `None` when there is no C compiler, so a test can skip rather
+    /// than fail on a machine that cannot build one.
+    pub fn install_native_stub(&self, name: &str) -> Option<PathBuf> {
+        let src = self.stub_path.join(format!("{name}_stub.c"));
+        std::fs::write(
+            &src,
+            "#include <unistd.h>\nint main(void){for(;;)sleep(60);}\n",
+        )
+        .ok()?;
+        let bin = self.stub_path.join(name);
+        let built = std::process::Command::new("cc")
+            .arg("-o")
+            .arg(&bin)
+            .arg(&src)
+            .output()
+            .ok()?;
+        built.status.success().then_some(bin)
+    }
+
     pub fn install_tool_stub(&self, name: &str) {
         let stub = self.stub_path.join(name);
         std::fs::write(&stub, "#!/bin/sh\nexec sleep 2147483647\n").expect("write tool stub");

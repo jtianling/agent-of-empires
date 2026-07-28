@@ -920,7 +920,7 @@ pub fn is_pane_dead(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn pane_current_command(session_name: &str) -> Option<String> {
+pub fn pane_current_command(session_name: &str) -> Option<String> {
     let target = resolve_pane_target(session_name);
     crate::tmux::tmux_command()
         .args([

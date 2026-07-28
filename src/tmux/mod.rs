@@ -15,7 +15,7 @@ pub use session::{
 };
 pub use status_bar::{get_session_info_for_current, get_status_for_current_session};
 pub use status_detection::detect_status_from_content;
-pub use utils::{get_agent_pane_id, set_agent_pane_id};
+pub use utils::{get_agent_pane_id, pane_current_command, set_agent_pane_id};
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

@@ -450,6 +450,86 @@ fn no_tracked_panes_restarts_primary_pane_fresh() {
     );
 }
 
+/// The pane a user handed to a different agent must come back as that agent.
+///
+/// The fallback above rebuilds from the instance's tool, which is right only
+/// while the pane still runs it. A user who exits Claude in the pane and runs
+/// Codex there leaves no `agent_slot` row to say so -- Codex installs no hook,
+/// so nothing records the pane -- and the restart then does not restart the
+/// pane, it replaces the agent in it.
+#[test]
+#[serial]
+fn no_tracked_panes_restarts_the_agent_the_pane_actually_runs() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("multi_pane_hijacked");
+    let instance_id = add_and_start(&h, "Hijacked Pane", "claude");
+    let db = db_path(&h);
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Hijacked Pane");
+
+    // tmux names a pane's process from the kernel, so this stub has to be a
+    // real binary: a shell script called `codex` reports as `bash` and the pane
+    // would look like it runs nothing in particular.
+    let Some(codex_bin) = h.install_native_stub("codex") else {
+        eprintln!("Skipping test: no C compiler to build a native stub");
+        return;
+    };
+
+    h.spawn_tui();
+    h.wait_for("Agent of Empires");
+    let slot_count = sqlite_query(
+        &db,
+        &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
+    assert_eq!(
+        slot_count, "0",
+        "precondition: the pane must be untracked, which is what makes the \
+         instance's tool the only thing the restart has to go on"
+    );
+
+    // The hand-off: the pane now runs Codex, and nothing recorded it.
+    let primary = h.tmux_display_message(&session_name, "#{pane_id}");
+    let respawn = Command::new("tmux")
+        .arg("-S")
+        .arg(h.tmux_socket_path())
+        .args(["respawn-pane", "-k", "-t", &primary])
+        .arg(codex_bin.to_str().unwrap())
+        .output()
+        .expect("failed to run tmux respawn-pane");
+    assert!(
+        respawn.status.success(),
+        "respawn-pane failed: {}",
+        String::from_utf8_lossy(&respawn.stderr)
+    );
+
+    // And it must actually be running under that name, or this test proves
+    // nothing: the guard reads the pane's process, and a stub that died or was
+    // never built leaves the pane looking like a plain shell.
+    let start = Instant::now();
+    loop {
+        if h.tmux_display_message(&primary, "#{pane_current_command}") == "codex" {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the pane never came up running codex; nothing here is observable"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    press_restart(&h);
+
+    wait_for_pane_start_command_contains(&h, &primary, "codex");
+    let cmd = pane_start_command(&h, &primary);
+    assert!(
+        !cmd.contains("claude"),
+        "the restart must not replace the pane's agent with the instance's tool, \
+         got start command: {cmd:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Requirement: Per-pane failure isolation
 //   Scenario: Pane without resume support restarts fresh

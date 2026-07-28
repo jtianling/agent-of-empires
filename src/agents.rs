@@ -346,6 +346,27 @@ pub fn agent_names() -> Vec<&'static str> {
     AGENTS.iter().map(|a| a.name).collect()
 }
 
+/// Given the name of a process running in a pane (tmux's
+/// `#{pane_current_command}`), return the agent it identifies.
+///
+/// Narrower than [`resolve_tool_name`], which matches a launch command loosely
+/// and defaults to Claude. A process name is a single token, so a substring
+/// match there would read a wrapper script or a path component as an agent, and
+/// no agent at all must stay `None` rather than becoming a default: the caller
+/// acts on positive identification only.
+///
+/// Most agents do not name their process after themselves -- Claude reports its
+/// version string -- so `None` means "no evidence", never "not an agent".
+pub fn agent_from_process_name(process: &str) -> Option<&'static str> {
+    let name = process.trim();
+    let name = name.strip_prefix('-').unwrap_or(name);
+    let base = name.rsplit('/').next().unwrap_or(name);
+    AGENTS
+        .iter()
+        .find(|a| a.name == base || a.binary == base)
+        .map(|a| a.name)
+}
+
 /// Given a command string (e.g. `"claude --resume xyz"` or `"open-code"`),
 /// return the canonical agent name if one is recognised.
 pub fn resolve_tool_name(cmd: &str) -> Option<&'static str> {
@@ -390,6 +411,31 @@ pub fn name_from_settings_index(index: usize) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process name is the only thing a restart has to go on for a pane no
+    /// slot describes, so what it must NOT claim matters as much as what it
+    /// recognizes: a wrong answer relaunches the pane as the wrong agent.
+    #[test]
+    fn test_agent_from_process_name_identifies_only_exact_binaries() {
+        assert_eq!(agent_from_process_name("codex"), Some("codex"));
+        assert_eq!(
+            agent_from_process_name("/usr/local/bin/codex"),
+            Some("codex")
+        );
+        assert_eq!(agent_from_process_name("  codex\n"), Some("codex"));
+
+        // A login shell, and the shells a pane sits in between agents.
+        assert_eq!(agent_from_process_name("-zsh"), None);
+        assert_eq!(agent_from_process_name("bash"), None);
+        // What a real Claude reports for itself: its version, not its name.
+        assert_eq!(agent_from_process_name("2.1.220"), None);
+        // An interpreter is not the agent it happens to be running.
+        assert_eq!(agent_from_process_name("node"), None);
+        // Substring matches are what `resolve_tool_name` does; here they would
+        // read a neighboring binary as an agent.
+        assert_eq!(agent_from_process_name("codexify"), None);
+        assert_eq!(agent_from_process_name(""), None);
+    }
 
     #[test]
     fn test_get_agent_known() {

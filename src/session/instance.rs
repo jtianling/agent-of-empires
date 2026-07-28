@@ -648,22 +648,24 @@ impl Instance {
     /// Whether this instance's own agent pane has Claude startup screens to
     /// answer.
     ///
-    /// The agent pane runs the instance's tool, so a Codex instance's agent pane
-    /// never raises a Claude question. Sending it into the Claude flow does not
-    /// merely do nothing: with no question to answer and no Claude input prompt
-    /// to read as ready, it waits out the whole deadline synchronously, before
-    /// every launch of that session.
+    /// Only a Claude pane raises a Claude question. Sending any other into the
+    /// Claude flow does not merely do nothing: with no question to answer and no
+    /// Claude input prompt to read as ready, it waits out the whole deadline
+    /// synchronously, before every launch of that session.
+    ///
+    /// `pane_agent` is what the pane runs, which is the instance's tool only
+    /// where the caller has just launched that tool into it. A restart reads the
+    /// pane instead -- see
+    /// [`pane_agent_overriding_instance_tool`](Self::pane_agent_overriding_instance_tool).
     ///
     /// Separate from [`cross_agent_team_pane`](Self::cross_agent_team_pane),
-    /// which asks what integration a pane's agent needs. This asks what the
-    /// instance's *own* pane is running, which is the only thing this entry
-    /// point can speak for.
-    fn agent_pane_has_claude_prompts(&self) -> bool {
-        self.tool == "claude" && self.is_cross_agent_team()
+    /// which asks what integration a pane's agent needs.
+    fn agent_pane_has_claude_prompts(&self, pane_agent: &str) -> bool {
+        pane_agent == "claude" && self.is_cross_agent_team()
     }
 
-    fn run_auto_confirm(&self) {
-        if !self.agent_pane_has_claude_prompts() {
+    fn run_auto_confirm(&self, pane_agent: &str) {
+        if !self.agent_pane_has_claude_prompts(pane_agent) {
             return;
         }
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
@@ -1058,7 +1060,9 @@ impl Instance {
         )?;
 
         if launch == SessionLaunch::Agent {
-            self.run_auto_confirm();
+            // The pane was just created running this instance's tool, so there
+            // is nothing to read back off it.
+            self.run_auto_confirm(&self.tool.clone());
         }
 
         // Apply all configured tmux options (status bar, mouse, etc.)
@@ -1097,6 +1101,31 @@ impl Instance {
     /// identity and launch overrides belong to `self.tool` alone.
     fn pane_runs_instance_tool(&self, target_agent: &str) -> bool {
         target_agent == self.tool
+    }
+
+    /// The agent running in this instance's own pane, when it is not the agent
+    /// the instance's tool describes.
+    ///
+    /// A restart with no tracked slots rebuilds the pane from the instance's
+    /// tool. That is right for a pane still running that tool, and for one a
+    /// user handed to a different agent it does not restart the pane -- it
+    /// replaces the agent in it. Slot-based recovery already treats the pane's
+    /// own agent as authoritative; this is the same rule where there is no slot
+    /// to read it from.
+    ///
+    /// Positive identification only, from two directions. The process must name
+    /// a registered agent exactly, and an instance carrying a command override
+    /// is skipped entirely: there the pane is *meant* to run something other
+    /// than the tool's binary, and the override is what AoE must relaunch. So a
+    /// pane whose process says nothing recognizable is restarted exactly as it
+    /// was before.
+    fn pane_agent_overriding_instance_tool(&self) -> Option<&'static str> {
+        if !self.command.is_empty() {
+            return None;
+        }
+        let session_name = tmux::Session::generate_name(&self.id, &self.title);
+        let running = tmux::pane_current_command(&session_name)?;
+        crate::agents::agent_from_process_name(&running).filter(|agent| *agent != self.tool)
     }
 
     /// Build the launch command for a single pane, applying the full launch
@@ -1668,14 +1697,22 @@ impl Instance {
             self.execute_on_launch_hooks(hook_cmds);
         }
 
-        let cmd = self
-            .build_agent_command(effective_resume_token.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
+        // Nothing here belongs to an agent the instance's tool does not
+        // describe: no resume token was ever recorded for it, and the
+        // instance's own session id and fork token name a different agent's
+        // conversation. A fresh launch of the agent that is actually in the pane
+        // beats a resumed launch of one that is not.
+        let pane_agent = self.pane_agent_overriding_instance_tool();
+        let cmd = match pane_agent {
+            Some(agent) => self.build_pane_command(agent, None, false, None),
+            None => self.build_agent_command(effective_resume_token.as_deref()),
+        }
+        .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
 
         session.kill_agent_pane_process_tree();
         session.respawn_agent_pane(&cmd, &self.project_path, !self.expects_shell())?;
 
-        self.run_auto_confirm();
+        self.run_auto_confirm(pane_agent.unwrap_or(&self.tool));
 
         self.apply_tmux_options(&Self::current_profile());
 
@@ -3267,12 +3304,28 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         inst.cross_agent_team = false;
-        inst.run_auto_confirm();
+        inst.run_auto_confirm("claude");
 
         // Also a no-op for non-claude even if the flag is set.
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
-        inst.run_auto_confirm();
+        inst.run_auto_confirm("codex");
+    }
+
+    /// A command override says the pane is meant to run something other than
+    /// the tool's binary, and that override is what a restart must relaunch.
+    /// Reading the agent out of the pane there would discard it.
+    #[test]
+    fn test_command_override_is_never_second_guessed_from_the_pane() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.command = "codex --some-flag".to_string();
+        assert_eq!(
+            inst.pane_agent_overriding_instance_tool(),
+            None,
+            "an instance with a command override restarts that command, whatever \
+             the pane's process happens to be named"
+        );
     }
 
     #[test]
@@ -4256,18 +4309,30 @@ mod tests {
     /// Sending it into the Claude flow costs the full deadline synchronously on
     /// every launch, so the entry point has to know whose pane it speaks for.
     #[test]
-    fn test_agent_pane_claude_prompts_follow_the_instance_tool() {
+    fn test_agent_pane_claude_prompts_follow_the_panes_agent() {
         let mut claude_inst = Instance::new("test", "/tmp/test");
         claude_inst.tool = "claude".to_string();
         claude_inst.cross_agent_team = true;
-        assert!(claude_inst.agent_pane_has_claude_prompts());
+        assert!(claude_inst.agent_pane_has_claude_prompts("claude"));
 
         let mut codex_inst = Instance::new("test", "/tmp/test");
         codex_inst.tool = "codex".to_string();
         codex_inst.cross_agent_team = true;
         assert!(
-            !codex_inst.agent_pane_has_claude_prompts(),
-            "a Codex instance's agent pane raises no Claude question"
+            !codex_inst.agent_pane_has_claude_prompts("codex"),
+            "a Codex pane raises no Claude question"
+        );
+        // The instance's tool does not decide this: a Codex instance whose pane
+        // was handed to Claude has Claude's questions to answer, and a Claude
+        // instance whose pane runs something else has none.
+        assert!(
+            codex_inst.agent_pane_has_claude_prompts("claude"),
+            "an adopted Claude pane raises Claude's questions whatever the \
+             instance's own tool is"
+        );
+        assert!(
+            !claude_inst.agent_pane_has_claude_prompts("codex"),
+            "a Claude instance whose pane runs Codex has no Claude question in it"
         );
         // It still takes Claude's integration for an adopted Claude pane: the
         // two questions are different and must not collapse into one predicate.
@@ -4276,7 +4341,7 @@ mod tests {
         let mut off = Instance::new("test", "/tmp/test");
         off.tool = "claude".to_string();
         assert!(
-            !off.agent_pane_has_claude_prompts(),
+            !off.agent_pane_has_claude_prompts("claude"),
             "Cross Agent Team off means no development-channel question at all"
         );
     }
