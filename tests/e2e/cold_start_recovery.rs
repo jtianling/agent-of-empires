@@ -339,6 +339,27 @@ fn wait_for_slot0_rebound(db: &Path, instance_id: &str, old: &str) -> String {
     }
 }
 
+/// Wait until a pane's screen shows `needle`.
+///
+/// Used to establish that a pane is displaying what a test is about to assert
+/// against. Without it, an assertion that nothing acted on the pane's content
+/// can pass simply because the content never appeared.
+fn wait_for_pane_screen_contains(h: &TuiTestHarness, pane: &str, needle: &str) {
+    let start = Instant::now();
+    loop {
+        let out = tmux(h, &["capture-pane", "-t", pane, "-p", "-J"]);
+        let screen = String::from_utf8_lossy(&out.stdout).to_string();
+        if screen.contains(needle) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "pane {pane} never showed {needle:?}; screen was {screen:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Wait until no persisted slot still holds a pre-recovery pane id, then return
 /// the slots' panes in slot order.
 ///
@@ -1787,4 +1808,183 @@ fn at_clean_recovery_of_a_multi_slot_shell_command_instance() {
 
     std::thread::sleep(AT_SETTLE * 5);
     assert_eq!(lost_events(&db, &instance_id), "", "no slot went missing");
+}
+
+// ===========================================================================
+// INDEPENDENT ACCEPTANCE (tester), batch 2: auto-confirm / CAT.
+// The author's own coverage here is unit-level only; nothing exercised the
+// keystroke path end to end, and sending a keystroke is not a read-only act.
+// ===========================================================================
+
+const CAT_FLAG: &str = "--dangerously-load-development-channels";
+
+/// Turn Cross Agent Team on for an already-created session, the way
+/// `xats_identity.rs` does: there is no CLI flag, so it is written into the
+/// store before the TUI loads it.
+fn enable_cross_agent_team(h: &TuiTestHarness, title: &str) {
+    let path = if cfg!(target_os = "linux") {
+        h.home_path()
+            .join(".config/agent-of-empires/profiles/default/sessions.json")
+    } else {
+        h.home_path()
+            .join(".agent-of-empires/profiles/default/sessions.json")
+    };
+    let content = std::fs::read_to_string(&path).expect("read sessions.json");
+    let mut sessions: serde_json::Value = serde_json::from_str(&content).expect("parse sessions");
+    let session = sessions
+        .as_array_mut()
+        .expect("sessions array")
+        .iter_mut()
+        .find(|s| s["title"] == title)
+        .expect("created session");
+    session["cross_agent_team"] = serde_json::Value::Bool(true);
+    std::fs::write(&path, serde_json::to_string_pretty(&sessions).unwrap())
+        .expect("enable Cross Agent Team");
+}
+
+/// A Cross Agent Team Claude instance recovered with a second slot that records
+/// a different agent.
+///
+/// Two things are being watched at once, and they are the two the author had
+/// only unit coverage for. The adopted pane must be decorated for the agent it
+/// actually runs, and -- because that pane shows text auto-confirm's marker
+/// table matches -- it must receive no keystroke at all. The second is what the
+/// original defect was: a pane that was not launched by this flow was sent
+/// Enter, and the shell in it ran what the user had typed.
+#[test]
+#[serial]
+fn at_cat_recovery_decorates_each_pane_and_types_into_no_other() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_cat_multi_pane");
+    let title = "AT CAT Multi";
+    let instance_id = add_and_start(&h, title, "claude");
+    enable_cross_agent_team(&h, title);
+
+    // The adopted pane: it prints a line auto-confirm's marker table matches,
+    // then records every line its stdin receives. An Enter that reaches it
+    // shows up as a recorded line -- the original defect, made observable.
+    //
+    // Gemini rather than Codex, because Codex's Cross Agent Team bootstrap
+    // checks a live app-server port and pre-registers the pane before it execs
+    // the agent. Neither exists here, so the stub would never run and the
+    // "nothing was typed" assertion would hold vacuously -- the pane it speaks
+    // for would not exist. Gemini is decorated by neither integration, so it
+    // reaches the stub, which is what makes the assertion mean anything.
+    let typed = h.home_path().join("adopted-received-input.txt");
+    h.install_stub_script(
+        "gemini",
+        &format!(
+            "#!/bin/sh\n\
+             : > '{0}'\n\
+             printf '  WARNING: Loading development channels\\n'\n\
+             printf '  \\342\\235\\257 1. I am using this for local development\\n'\n\
+             while IFS= read -r line; do echo \"GOT[$line]\" >> '{0}'; done\n\
+             sleep 2147483647\n",
+            typed.display()
+        ),
+    );
+
+    let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, title);
+    let db = db_path(&h);
+    let project = h.project_path().to_str().unwrap().to_string();
+
+    let old_panes = seed_tracked_panes(
+        &mut h,
+        &instance_id,
+        &session_name,
+        &[
+            SlotSeed {
+                agent: "claude",
+                native: "aaaa1111-1111-4111-8111-111111111111",
+                cwd: &project,
+            },
+            SlotSeed {
+                agent: "gemini",
+                native: "bbbb2222-2222-4222-8222-222222222222",
+                cwd: &project,
+            },
+        ],
+    );
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    let new_panes = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
+    assert_eq!(new_panes.len(), 2);
+    wait_for_pane_geometry(&h, &session_name, 2);
+
+    // Slot order follows pane index, so read back which slot recorded which
+    // agent instead of assuming.
+    let agents = slot_agents(&db, &instance_id);
+    for (i, agent) in agents.iter().enumerate() {
+        let pane = &new_panes[i];
+        wait_for_pane_start_command_contains(&h, pane, agent);
+        let cmd = pane_start_command(&h, pane);
+        match agent.as_str() {
+            "claude" => assert!(
+                cmd.contains(CAT_FLAG),
+                "the instance's own Claude pane must keep its Cross Agent Team \
+                 flag, got {cmd:?}"
+            ),
+            other => {
+                assert!(
+                    !cmd.contains(CAT_FLAG),
+                    "an adopted {other} pane must not be handed Claude's flag, \
+                     got {cmd:?}"
+                );
+                assert!(
+                    cmd.contains(other),
+                    "the adopted pane must run its own binary, got {cmd:?}"
+                );
+            }
+        }
+    }
+
+    // "Received nothing" is only evidence if the thing that would have recorded
+    // it ran at all. The Codex bootstrap checks a port and pre-registers before
+    // it execs this stub, so any of those failing would leave no file -- and an
+    // absent file read as an empty one would pass this test without the pane
+    // ever having existed to be typed into.
+    let stub_started = {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if typed.exists() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    assert!(
+        stub_started,
+        "the adopted pane's agent never started, so this test could prove nothing \
+         about what was typed into it"
+    );
+
+    // And it must be showing the text that makes it a tempting target: without
+    // this, "nothing was typed" could just mean nothing matched.
+    let adopted_pane = new_panes
+        .iter()
+        .zip(agents.iter())
+        .find(|(_, agent)| agent.as_str() != "claude")
+        .map(|(pane, _)| pane.clone())
+        .expect("an adopted non-Claude pane");
+    wait_for_pane_screen_contains(&h, &adopted_pane, "I am using this for local development");
+
+    // Auto-confirm runs synchronously inside recovery and is bounded by its own
+    // 12s deadline; wait past it so "nothing was typed" is a settled fact.
+    std::thread::sleep(Duration::from_secs(14));
+    let received = std::fs::read_to_string(&typed).expect("the stub's record file");
+    assert_eq!(
+        received, "",
+        "the adopted pane shows text the marker table matches, but it is not a \
+         Claude pane this flow launched -- it must receive no keystroke. got {received:?}"
+    );
 }

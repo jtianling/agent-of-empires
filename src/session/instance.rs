@@ -40,12 +40,145 @@ pub enum Status {
 
 /// Screen markers that identify Claude's startup confirmation prompts. Each
 /// default-highlights the safe-to-proceed option, so a single Enter confirms.
-const AUTO_CONFIRM_MARKERS: &[&str] = &[
-    "Loading development channels",
-    "I am using this for local development",
-    "Quick safety check",
-    "trust this folder",
+/// A startup question Claude asks, identified by what it is rather than by how
+/// its screen happens to be drawn.
+///
+/// The distinction is what makes answering it exactly once possible. A prompt's
+/// rendered screen is not stable while the prompt is up -- a spinner, a status
+/// line, or a partial redraw all change the bytes without the question having
+/// been answered -- so screen content cannot stand in for the question's
+/// identity. Enter is queued input: a second one sent at the same question is
+/// not absorbed by it, it waits and is consumed by whatever comes next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoConfirmPrompt {
+    DevelopmentChannels,
+    WorkspaceTrust,
+}
+
+const AUTO_CONFIRM_MARKERS: &[(&str, AutoConfirmPrompt)] = &[
+    (
+        "Loading development channels",
+        AutoConfirmPrompt::DevelopmentChannels,
+    ),
+    (
+        "I am using this for local development",
+        AutoConfirmPrompt::DevelopmentChannels,
+    ),
+    ("Quick safety check", AutoConfirmPrompt::WorkspaceTrust),
+    ("trust this folder", AutoConfirmPrompt::WorkspaceTrust),
 ];
+
+/// Every startup question auto-confirm knows how to answer. A pane that has
+/// answered all of them cannot be asked anything else, which is one of the two
+/// signals that finish a pane without a timer; the other is Claude's own input
+/// prompt appearing (see `shows_claude_input_prompt`), which is what finishes a
+/// launch that raises fewer questions than this list holds.
+const AUTO_CONFIRM_PROMPTS: &[AutoConfirmPrompt] = &[
+    AutoConfirmPrompt::DevelopmentChannels,
+    AutoConfirmPrompt::WorkspaceTrust,
+];
+
+/// What to do with one pane, given what it shows and what has already been
+/// answered for it. Pure, so the "same question redrawn many times is answered
+/// once" rule is testable without a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoConfirmStep {
+    /// This pane is showing a question that has not been answered yet.
+    Answer(AutoConfirmPrompt),
+    /// A question is up, but it is one this pane was already answered for.
+    /// Sending again would queue an Enter for whatever screen comes next.
+    AlreadyAnswered,
+    /// No recognized question on screen.
+    NoPrompt,
+}
+
+/// Whether a pane's screen shows Claude past its startup screens and waiting for
+/// input.
+///
+/// This is positive evidence, which is what distinguishes it from a timer. The
+/// alternative -- deciding a pane is done because nothing has appeared for a
+/// while -- cannot tell a question that will never be asked from one that has
+/// not been asked yet, so it either abandons slow panes or waits out the whole
+/// deadline on every launch. Claude's own input prompt says the startup screens
+/// are behind it.
+///
+/// Callers must establish that no confirmation question is on screen before
+/// consulting this: the questions themselves are drawn with the same prompt
+/// glyph, so on their own screens it means the opposite of ready.
+fn shows_claude_input_prompt(screen: &str) -> bool {
+    strip_ansi(screen)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(6)
+        .any(|line| is_claude_input_prompt_line(line.trim()))
+}
+
+/// Whether one line is Claude's input prompt rather than a selected menu entry.
+///
+/// The glyph alone does not distinguish them: Claude draws every menu selection
+/// with it too -- the theme picker, the login chooser, and the startup
+/// confirmations this code answers. Reading any `❯` as "ready" therefore reports
+/// a pane that is waiting on a question as a pane that is done with them.
+///
+/// A menu entry is numbered (`❯ 1. ...`); the input prompt is the glyph alone,
+/// or the glyph followed by what the user has typed. Text that merely starts
+/// like a numbered entry is treated as a menu entry: erring that way costs a
+/// wait that the overall deadline bounds, while erring the other way abandons a
+/// pane on an unanswered question.
+fn is_claude_input_prompt_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('\u{276f}') else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(rest) = rest.strip_prefix(' ') else {
+        return false;
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    !(digits > 0 && rest[digits..].starts_with('.'))
+}
+
+/// Collapse every run of whitespace, newlines included, into single spaces.
+///
+/// A pane's screen is not the text that was written to it. Claude re-flows its
+/// own output to the pane width, so a phrase can arrive split across lines with
+/// fresh indentation on the continuation -- and tmux soft-wraps on top of that.
+/// Matching against the screen as captured therefore fails on exactly the panes
+/// this code exists for: the narrow ones a multi-pane session produces.
+///
+/// Measured against a real Claude confirmation screen: at 36 and 40 columns
+/// neither marker matches the captured text, and both match after collapsing.
+/// `capture-pane -J` does not help, because the wrapping that breaks these
+/// phrases is Claude's own, not tmux's.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn auto_confirm_step(screen: &str, answered: &[AutoConfirmPrompt]) -> AutoConfirmStep {
+    let plain = collapse_whitespace(&strip_ansi(screen));
+
+    // Every question the screen shows, not the first one the marker table
+    // happens to list. A screen can carry more than one: the text of a question
+    // already answered can still be on screen above the one now being asked, and
+    // picking the first match would report the visible history as the current
+    // state and leave the real question unanswered until the deadline.
+    let mut present = AUTO_CONFIRM_MARKERS
+        .iter()
+        .filter(|(marker, _)| plain.contains(marker))
+        .map(|(_, prompt)| *prompt)
+        .peekable();
+
+    if present.peek().is_none() {
+        return AutoConfirmStep::NoPrompt;
+    }
+
+    match present.find(|prompt| !answered.contains(prompt)) {
+        Some(prompt) => AutoConfirmStep::Answer(prompt),
+        None => AutoConfirmStep::AlreadyAnswered,
+    }
+}
 
 /// Max time to wait for Claude's confirmation screens before giving up and
 /// attaching anyway (claude shows the dev-channels gate within ~1-2s).
@@ -54,9 +187,6 @@ const AUTO_CONFIRM_TIMEOUT: Duration = Duration::from_secs(12);
 const AUTO_CONFIRM_SEND_INTERVAL: Duration = Duration::from_millis(600);
 /// Poll cadence while waiting for a confirmation screen to appear.
 const AUTO_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(200);
-/// Once at least one Enter has been sent, stop after this long with no marker
-/// on screen (Claude has moved past the confirmation prompts).
-const AUTO_CONFIRM_DONE_GRACE: Duration = Duration::from_millis(1200);
 
 /// How long a rebuilt session is left to settle before recovery decides which
 /// slots came back. A relaunched pane can survive its own respawn and disappear
@@ -72,11 +202,34 @@ const RECOVERY_SETTLE: Duration = Duration::from_millis(500);
 /// window instead of racing it.
 const RECOVERY_SETTLE_ENV: &str = "AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS";
 
+/// Ceiling for [`RECOVERY_SETTLE_ENV`]. The settle is waited out synchronously
+/// on a user's recovery, before the session is handed back, so an over-large
+/// value does not read as "a long setting" -- it reads as recovery having hung.
+/// The knob exists to widen a window measured in hundreds of milliseconds, and
+/// this is far above any value a test has needed while staying inside what a
+/// user would sit through.
+const RECOVERY_SETTLE_MAX: Duration = Duration::from_secs(5);
+
 fn recovery_settle() -> Duration {
-    std::env::var(RECOVERY_SETTLE_ENV)
+    let Some(requested) = std::env::var(RECOVERY_SETTLE_ENV)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map_or(RECOVERY_SETTLE, Duration::from_millis)
+        .map(Duration::from_millis)
+    else {
+        return RECOVERY_SETTLE;
+    };
+
+    if requested > RECOVERY_SETTLE_MAX {
+        tracing::warn!(
+            "{} is {:?}, above the {:?} ceiling; using the ceiling",
+            RECOVERY_SETTLE_ENV,
+            requested,
+            RECOVERY_SETTLE_MAX
+        );
+        return RECOVERY_SETTLE_MAX;
+    }
+
+    requested
 }
 
 const CODEX_XATS_APP_SERVER_HOST: &str = "127.0.0.1";
@@ -122,13 +275,6 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
-}
-
-/// Whether the captured pane content shows one of Claude's confirmation screens.
-/// Strips ANSI escapes first so per-word coloring does not break matching.
-fn is_auto_confirm_screen(output: &str) -> bool {
-    let plain = strip_ansi(output);
-    AUTO_CONFIRM_MARKERS.iter().any(|m| plain.contains(m))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -374,12 +520,18 @@ impl Instance {
             && Self::supports_cross_agent_team_tool(&self.tool)
     }
 
-    fn is_claude_cross_agent_team(&self) -> bool {
-        self.is_cross_agent_team() && self.tool == "claude"
-    }
-
-    fn is_codex_cross_agent_team(&self) -> bool {
-        self.is_cross_agent_team() && self.tool == "codex"
+    /// Whether a pane running `target_agent` takes this instance's Cross Agent
+    /// Team integration.
+    ///
+    /// Which integration a pane needs is decided by the agent running in it, not
+    /// by the instance's tool: a Claude pane adopted into a Codex instance needs
+    /// Claude's development-channel flag, and a Codex pane adopted into a Claude
+    /// instance needs Codex's bootstrap. Keying either on `self.tool` gives an
+    /// adopted pane the wrong integration in one direction and none in the other.
+    ///
+    /// What stays instance-level is whether Cross Agent Team is on at all.
+    fn cross_agent_team_pane(&self, target_agent: &str) -> bool {
+        self.is_cross_agent_team() && Self::supports_cross_agent_team_tool(target_agent)
     }
 
     /// Mint this instance's primary-pane xats identity key if Cross Agent Team is
@@ -395,7 +547,13 @@ impl Instance {
     /// Slot 0 is the primary pane, whose key lives on the instance record, and a
     /// slot that already has one keeps it.
     fn slot_needs_identity_key(&self, slot: &crate::db::AgentSlot) -> bool {
-        self.is_cross_agent_team() && slot.slot != 0 && slot.xats_identity_key.is_empty()
+        // Slot 0 is skipped because the instance record already holds the key for
+        // the instance's own agent -- which is only true when slot 0 is running
+        // that agent. An adopted slot 0 running something else is described by
+        // neither: the instance's key belongs to a different agent, and skipping
+        // it here would leave that pane the only tracked pane with no key at all.
+        let instance_record_holds_it = slot.slot == 0 && self.pane_runs_instance_tool(&slot.agent);
+        self.is_cross_agent_team() && !instance_record_holds_it && slot.xats_identity_key.is_empty()
     }
 
     /// Mint and persist an identity key for every adopted slot that has none, so
@@ -452,40 +610,150 @@ impl Instance {
         key.filter(|k| !k.is_empty())
     }
 
-    /// Auto-confirm Claude's startup screens (dev-channels warning and the
-    /// workspace-trust prompt) by polling the agent pane and sending Enter while
-    /// a recognized confirmation marker is shown. Runs SYNCHRONOUSLY before the
-    /// caller attaches: at this point the pane exists and Claude renders into the
-    /// tmux virtual terminal even with no client attached, and there is no
-    /// concurrent `tmux attach` to contend with the capture/send subprocesses
-    /// (a background thread would stall once attach starts). No-ops when the
-    /// session is not in Cross Agent Team mode.
+    /// Auto-confirm Claude's startup screens for this instance's own agent pane.
+    ///
+    /// Callers that launched more than one Claude pane use
+    /// [`auto_confirm_panes`](Self::auto_confirm_panes) with the panes they
+    /// launched: this entry point answers for the agent pane and nothing else,
+    /// which is the whole set only on the single-pane start and respawn paths.
+    /// Whether this instance's own agent pane has Claude startup screens to
+    /// answer.
+    ///
+    /// The agent pane runs the instance's tool, so a Codex instance's agent pane
+    /// never raises a Claude question. Sending it into the Claude flow does not
+    /// merely do nothing: with no question to answer and no Claude input prompt
+    /// to read as ready, it waits out the whole deadline synchronously, before
+    /// every launch of that session.
+    ///
+    /// Separate from [`cross_agent_team_pane`](Self::cross_agent_team_pane),
+    /// which asks what integration a pane's agent needs. This asks what the
+    /// instance's *own* pane is running, which is the only thing this entry
+    /// point can speak for.
+    fn agent_pane_has_claude_prompts(&self) -> bool {
+        self.tool == "claude" && self.is_cross_agent_team()
+    }
+
     fn run_auto_confirm(&self) {
-        if !self.is_claude_cross_agent_team() {
+        if !self.agent_pane_has_claude_prompts() {
             return;
         }
-        let Ok(session) = self.tmux_session() else {
+        let session_name = tmux::Session::generate_name(&self.id, &self.title);
+        let Some(agent_pane) = tmux::get_agent_pane_id(&session_name) else {
             return;
         };
+        self.auto_confirm_panes(&[agent_pane]);
+    }
+
+    /// Answer the confirmation screens of the panes named, and of no others.
+    ///
+    /// The caller passes the panes it just launched Claude into. Sending Enter is
+    /// not a read-only act: a pane that is not asking a Claude startup question
+    /// is doing something else, and a keystroke sent into it is executed by
+    /// whatever that is. So the set is what the caller launched -- never "every
+    /// pane in the session", which reaches hand-split shells and panes belonging
+    /// to other agents.
+    ///
+    /// Runs SYNCHRONOUSLY before the caller attaches: at this point the panes
+    /// exist and Claude renders into the tmux virtual terminal even with no
+    /// client attached, and there is no concurrent `tmux attach` to contend with
+    /// the capture/send subprocesses (a background thread would stall once attach
+    /// starts). No-ops when the session is not in Cross Agent Team mode.
+    ///
+    /// Each pane carries its own progress. A shared "everything went quiet"
+    /// signal finishes as soon as the fastest pane settles, which abandons any
+    /// pane whose prompt has not appeared yet.
+    ///
+    /// A pane is answered at most once per question, keyed by which question it
+    /// is rather than by the screen showing it -- see [`AutoConfirmPrompt`] for
+    /// why the screen cannot stand in for the question's identity.
+    ///
+    /// A pane finishes early on evidence, never on silence. Either every known
+    /// question has been answered, so nothing further can be asked, or Claude's
+    /// own input prompt is on screen with no question beside it, which says the
+    /// startup screens are behind it -- the common case, since a launch usually
+    /// raises fewer questions than this code knows about. Absent either, the
+    /// pane is watched until the overall deadline, including after a quiet gap,
+    /// because a question that has not been asked yet is indistinguishable from
+    /// one that will never come. Per-question answering is what makes that wait
+    /// safe: watching longer cannot produce a second Enter for a question
+    /// already answered.
+    fn auto_confirm_panes(&self, panes: &[String]) {
+        if !self.cross_agent_team_pane("claude") || panes.is_empty() {
+            return;
+        }
+
+        struct PaneConfirm<'a> {
+            pane: &'a str,
+            answered: Vec<AutoConfirmPrompt>,
+            settled: bool,
+        }
+
+        let mut tracked: Vec<PaneConfirm> = panes
+            .iter()
+            .map(|pane| PaneConfirm {
+                pane: pane.as_str(),
+                answered: Vec::new(),
+                settled: false,
+            })
+            .collect();
+
         let start = Instant::now();
-        let mut sent = 0u32;
-        let mut last_marker_seen = Instant::now();
         while start.elapsed() < AUTO_CONFIRM_TIMEOUT {
-            let output = session.capture_pane(80).unwrap_or_default();
-            if is_auto_confirm_screen(&output) {
-                last_marker_seen = Instant::now();
-                if let Err(err) = session.send_keys_to_agent_pane(&["Enter"]) {
-                    tracing::warn!("auto-confirm send failed: {}", err);
-                    return;
+            let mut answered_this_round = false;
+
+            for entry in tracked.iter_mut().filter(|e| !e.settled) {
+                let screen = match tmux::capture_pane_screen(entry.pane) {
+                    Ok(screen) => screen,
+                    Err(err) => {
+                        // The pane is gone or unreadable. Nothing can be
+                        // confirmed in it, and retrying costs the deadline that
+                        // its siblings still need.
+                        tracing::warn!("auto-confirm cannot read pane {}: {}", entry.pane, err);
+                        entry.settled = true;
+                        continue;
+                    }
+                };
+
+                let step = auto_confirm_step(&screen, &entry.answered);
+                if matches!(step, AutoConfirmStep::NoPrompt) && shows_claude_input_prompt(&screen) {
+                    // Claude is up and waiting for input, so its startup screens
+                    // are behind it. This is the completion signal; waiting out
+                    // the deadline here would make every launch pay for it.
+                    entry.settled = true;
+                    continue;
                 }
-                sent += 1;
-                std::thread::sleep(AUTO_CONFIRM_SEND_INTERVAL);
-            } else {
-                if sent >= 1 && last_marker_seen.elapsed() >= AUTO_CONFIRM_DONE_GRACE {
-                    return;
+                let AutoConfirmStep::Answer(prompt) = step else {
+                    // Either nothing is being asked, or what is being asked was
+                    // already answered and is waiting to be processed.
+                    continue;
+                };
+
+                match tmux::send_keys_to_pane_target(entry.pane, &["Enter"]) {
+                    Ok(()) => {
+                        entry.answered.push(prompt);
+                        answered_this_round = true;
+                        entry.settled = AUTO_CONFIRM_PROMPTS
+                            .iter()
+                            .all(|known| entry.answered.contains(known));
+                    }
+                    Err(err) => {
+                        // One unreachable pane must not strand its siblings on
+                        // their own prompts.
+                        tracing::warn!("auto-confirm send to pane {} failed: {}", entry.pane, err);
+                        entry.settled = true;
+                    }
                 }
-                std::thread::sleep(AUTO_CONFIRM_POLL_INTERVAL);
             }
+
+            if tracked.iter().all(|entry| entry.settled) {
+                return;
+            }
+
+            std::thread::sleep(if answered_this_round {
+                AUTO_CONFIRM_SEND_INTERVAL
+            } else {
+                AUTO_CONFIRM_POLL_INTERVAL
+            });
         }
     }
 
@@ -493,7 +761,7 @@ impl Instance {
     /// Agent Team launches, or `None` when the mode is off. Falls back to the
     /// default channel when the stored channel is empty.
     fn claude_cross_agent_team_flag(&self) -> Option<String> {
-        if !self.is_claude_cross_agent_team() {
+        if !self.is_cross_agent_team() {
             return None;
         }
         let channel = if self.cross_agent_team_channel.is_empty() {
@@ -507,8 +775,24 @@ impl Instance {
         ))
     }
 
-    fn codex_xats_bootstrap_command(&self, cmd: &str) -> String {
-        let base = self.get_tool_command();
+    /// The binary a pane's command starts with.
+    ///
+    /// The instance's command override describes `self.tool` and nothing else,
+    /// so a pane running a different agent starts from that agent's own binary.
+    /// Reading the override for such a pane produces a command that launches the
+    /// instance's agent under another agent's integration.
+    fn pane_base_command(&self, target_agent: &str) -> String {
+        if self.pane_runs_instance_tool(target_agent) {
+            self.get_tool_command().to_string()
+        } else {
+            crate::agents::get_agent(target_agent)
+                .map(|a| a.binary)
+                .unwrap_or(target_agent)
+                .to_string()
+        }
+    }
+
+    fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
         let project_path = shell_escape(&self.project_path);
         let app_server_url = shell_escape(CODEX_XATS_APP_SERVER_URL);
@@ -876,11 +1160,19 @@ impl Instance {
                             }
                         }
                     }
-                    if let Some(flag) = self.claude_cross_agent_team_flag() {
-                        cmd = format!("{} {}", cmd, flag);
-                    }
-                    if is_primary && self.is_codex_cross_agent_team() {
-                        cmd = self.codex_xats_bootstrap_command(&cmd);
+                    if self.cross_agent_team_pane(target_agent) {
+                        match target_agent {
+                            "claude" => {
+                                if let Some(flag) = self.claude_cross_agent_team_flag() {
+                                    cmd = format!("{} {}", cmd, flag);
+                                }
+                            }
+                            "codex" => {
+                                let base = self.pane_base_command(target_agent);
+                                cmd = self.codex_xats_bootstrap_command(&cmd, &base);
+                            }
+                            _ => {}
+                        }
                     }
                     if let Some(key) =
                         self.xats_identity_key_for_pane(is_primary, slot_identity_key)
@@ -908,11 +1200,19 @@ impl Instance {
                         }
                     }
                 }
-                if let Some(flag) = self.claude_cross_agent_team_flag() {
-                    cmd = format!("{} {}", cmd, flag);
-                }
-                if is_primary && self.is_codex_cross_agent_team() {
-                    cmd = self.codex_xats_bootstrap_command(&cmd);
+                if self.cross_agent_team_pane(target_agent) {
+                    match target_agent {
+                        "claude" => {
+                            if let Some(flag) = self.claude_cross_agent_team_flag() {
+                                cmd = format!("{} {}", cmd, flag);
+                            }
+                        }
+                        "codex" => {
+                            let base = self.pane_base_command(target_agent);
+                            cmd = self.codex_xats_bootstrap_command(&cmd, &base);
+                        }
+                        _ => {}
+                    }
                 }
                 if let Some(key) = self.xats_identity_key_for_pane(is_primary, slot_identity_key) {
                     env_vars.push((XATS_IDENTITY_KEY_ENV, key));
@@ -1388,6 +1688,7 @@ impl Instance {
 
         let mut outcomes = Vec::with_capacity(slots.len());
         let mut primary_respawned = false;
+        let mut confirmable_panes: Vec<String> = Vec::new();
         for slot in slots {
             let outcome = self.resume_launch_pane(
                 &slot.agent,
@@ -1398,6 +1699,11 @@ impl Instance {
                 mode,
                 Some(slot.xats_identity_key.as_str()),
             );
+            // Every Claude pane this fan-out actually relaunched raises its own
+            // startup screens, not just the primary one.
+            if slot.agent == "claude" && !matches!(outcome, PaneResumeOutcome::Error(_)) {
+                confirmable_panes.push(slot.tmux_pane.clone());
+            }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
                 primary_respawned = true;
             }
@@ -1421,7 +1727,7 @@ impl Instance {
         }
         self.rollback_fresh_identity_on_failure(snapshot, primary_respawned);
 
-        self.run_auto_confirm();
+        self.auto_confirm_panes(&confirmable_panes);
         self.apply_tmux_options(&Self::current_profile());
 
         self.status = Status::Starting;
@@ -1521,6 +1827,12 @@ impl Instance {
         let now = crate::db::now_unix();
         let mut outcomes = Vec::with_capacity(paired.len());
         let mut primary_launched = false;
+        // Panes this rebuild actually launched Claude into. Collected here rather
+        // than derived from `paired` afterwards, because only this loop knows
+        // which launches succeeded, and a pane whose launch failed has no Claude
+        // in it to raise a startup screen -- handing it to auto-confirm would
+        // spend the full timeout waiting for a prompt that cannot come.
+        let mut confirmable_panes: Vec<String> = Vec::new();
         for (slot, maybe_pane) in &paired {
             let Some(new_pane) = maybe_pane else {
                 outcomes.push(PaneResumeOutcome::Error(format!(
@@ -1538,6 +1850,9 @@ impl Instance {
                 mode,
                 Some(slot.xats_identity_key.as_str()),
             );
+            if slot.agent == "claude" && !matches!(outcome, PaneResumeOutcome::Error(_)) {
+                confirmable_panes.push(new_pane.clone());
+            }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
                 primary_launched = true;
             }
@@ -1592,7 +1907,7 @@ impl Instance {
 
         self.report_slots_that_did_not_come_back(store, &session_name, &paired, &mut outcomes, now);
 
-        self.run_auto_confirm();
+        self.auto_confirm_panes(&confirmable_panes);
         self.apply_tmux_options(&Self::current_profile());
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
@@ -2770,19 +3085,25 @@ mod tests {
     #[test]
     fn test_is_auto_confirm_screen_dev_channels() {
         let screen = "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n    2. Exit";
-        assert!(is_auto_confirm_screen(screen));
+        assert_eq!(
+            auto_confirm_step(screen, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::DevelopmentChannels)
+        );
     }
 
     #[test]
     fn test_is_auto_confirm_screen_trust_folder() {
         let screen = " Quick safety check: Is this a project you created or one you trust?\n ❯ 1. Yes, I trust this folder";
-        assert!(is_auto_confirm_screen(screen));
+        assert_eq!(
+            auto_confirm_step(screen, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::WorkspaceTrust)
+        );
     }
 
     #[test]
     fn test_is_auto_confirm_screen_negative() {
         let screen = "Welcome to Claude Code\n> how can I help?";
-        assert!(!is_auto_confirm_screen(screen));
+        assert_eq!(auto_confirm_step(screen, &[]), AutoConfirmStep::NoPrompt);
     }
 
     #[test]
@@ -2794,9 +3115,114 @@ mod tests {
             !screen.contains("Loading development channels"),
             "raw -e capture should not contain the contiguous phrase"
         );
-        assert!(
-            is_auto_confirm_screen(screen),
+        assert_eq!(
+            auto_confirm_step(screen, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::DevelopmentChannels),
             "after stripping ANSI the phrase must match"
+        );
+    }
+
+    /// The settle is waited out synchronously before a recovered session is
+    /// handed back, so a mistyped override must not be able to turn recovery
+    /// into a hang.
+    #[test]
+    #[serial_test::serial]
+    fn test_recovery_settle_override_is_capped() {
+        let restore = std::env::var(RECOVERY_SETTLE_ENV).ok();
+
+        std::env::remove_var(RECOVERY_SETTLE_ENV);
+        assert_eq!(recovery_settle(), RECOVERY_SETTLE, "no override, no change");
+
+        std::env::set_var(RECOVERY_SETTLE_ENV, "1200");
+        assert_eq!(
+            recovery_settle(),
+            Duration::from_millis(1200),
+            "a value inside the ceiling is honored as written"
+        );
+
+        std::env::set_var(RECOVERY_SETTLE_ENV, "600000");
+        assert_eq!(
+            recovery_settle(),
+            RECOVERY_SETTLE_MAX,
+            "an over-large value is clamped, not obeyed"
+        );
+
+        std::env::set_var(RECOVERY_SETTLE_ENV, "not-a-number");
+        assert_eq!(
+            recovery_settle(),
+            RECOVERY_SETTLE,
+            "an unparseable value falls back to the default"
+        );
+
+        match restore {
+            Some(v) => std::env::set_var(RECOVERY_SETTLE_ENV, v),
+            None => std::env::remove_var(RECOVERY_SETTLE_ENV),
+        }
+    }
+
+    /// The screen a question is drawn on changes while the question is still up
+    /// -- a spinner tick, a status line, a partial redraw. Answering must key on
+    /// the question, so a redraw is not a second question.
+    #[test]
+    fn test_same_prompt_redrawn_is_answered_once() {
+        let redraws = [
+            "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n  ⠋ 0s",
+            "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n  ⠙ 0s",
+            "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n  ⠹ 1s",
+            "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n  ⠸ 1s",
+        ];
+
+        let mut answered: Vec<AutoConfirmPrompt> = Vec::new();
+        let mut sends = 0;
+        for screen in redraws {
+            if let AutoConfirmStep::Answer(prompt) = auto_confirm_step(screen, &answered) {
+                answered.push(prompt);
+                sends += 1;
+            }
+        }
+
+        assert_eq!(sends, 1, "four redraws of one question are one question");
+        assert_eq!(answered, vec![AutoConfirmPrompt::DevelopmentChannels]);
+    }
+
+    /// A second, different question is a second question even though the first
+    /// was already answered -- including when it arrives after a quiet gap.
+    #[test]
+    fn test_second_distinct_prompt_is_answered_after_the_first() {
+        let dev =
+            "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development";
+        let quiet = "  Welcome to Claude Code\n  ⠋ starting";
+        let trust = " Quick safety check: Is this a project you created or one you trust?\n ❯ 1. Yes, I trust this folder";
+
+        let mut answered: Vec<AutoConfirmPrompt> = Vec::new();
+        let mut sends = 0;
+        for screen in [dev, dev, quiet, quiet, trust, trust] {
+            if let AutoConfirmStep::Answer(prompt) = auto_confirm_step(screen, &answered) {
+                answered.push(prompt);
+                sends += 1;
+            }
+        }
+
+        assert_eq!(sends, 2, "two distinct questions, each answered once");
+        assert_eq!(
+            answered,
+            vec![
+                AutoConfirmPrompt::DevelopmentChannels,
+                AutoConfirmPrompt::WorkspaceTrust
+            ]
+        );
+    }
+
+    /// A question already answered reports itself as such rather than as absent,
+    /// so the caller can tell "waiting for this to be processed" from "nothing
+    /// is being asked".
+    #[test]
+    fn test_answered_prompt_still_on_screen_is_not_no_prompt() {
+        let dev =
+            "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development";
+        assert_eq!(
+            auto_confirm_step(dev, &[AutoConfirmPrompt::DevelopmentChannels]),
+            AutoConfirmStep::AlreadyAnswered
         );
     }
 
@@ -3046,8 +3472,11 @@ mod tests {
 
         let mut inst = codex_xats_instance();
         assert!(inst.is_cross_agent_team());
-        assert!(!inst.is_claude_cross_agent_team());
-        assert!(inst.is_codex_cross_agent_team());
+        // A Codex instance takes Codex's integration, and takes Claude's for a
+        // Claude pane adopted into it -- the instance's tool decides neither.
+        assert!(inst.cross_agent_team_pane("codex"));
+        assert!(inst.cross_agent_team_pane("claude"));
+        assert!(!inst.cross_agent_team_pane("gemini"));
 
         inst.sandbox_info = Some(SandboxInfo {
             enabled: true,
@@ -3571,6 +4000,270 @@ mod tests {
         assert!(
             !cmd.contains("exec env sh"),
             "the instance's shell must not replace the adopted agent, got: {cmd}"
+        );
+    }
+
+    /// Cross Agent Team decoration describes the agent that runs in the pane, not
+    /// the instance's tool. A Claude instance's development-channels flag handed
+    /// to an adopted Gemini pane is a flag Gemini does not understand.
+    #[test]
+    fn test_cat_decoration_follows_the_pane_agent_not_the_instance_tool() {
+        const FLAG: &str = "--dangerously-load-development-channels";
+
+        // Both command-construction paths, because they decorate separately: an
+        // instance with no command override builds from the agent's own binary,
+        // one with an override builds from the override. Covering only the first
+        // leaves the second free to hand the flag to the wrong agent.
+        for command in ["", "claude --some-override"] {
+            let mut inst = Instance::new("test", "/tmp/test");
+            inst.tool = "claude".to_string();
+            inst.command = command.to_string();
+            inst.cross_agent_team = true;
+            assert!(inst.cross_agent_team_pane("claude"));
+
+            let own = inst
+                .build_pane_command("claude", None, true, None)
+                .expect("claude pane command");
+            assert!(
+                own.contains(FLAG),
+                "the instance's own agent still gets the flag (command {command:?}), got: {own}"
+            );
+
+            let adopted = inst
+                .build_pane_command("gemini", None, true, None)
+                .expect("gemini pane command");
+            assert!(
+                !adopted.contains(FLAG),
+                "an adopted pane running another agent must not get Claude's flag \
+                 (command {command:?}), got: {adopted}"
+            );
+        }
+    }
+
+    /// The completion signal is Claude's own input prompt, so a launch that
+    /// raises no question -- or only one of the two -- does not have to wait out
+    /// the deadline. The questions are drawn with the same glyph, so this must
+    /// never be consulted while one is on screen; that ordering is the caller's,
+    /// and these cases pin both halves of it.
+    #[test]
+    fn test_claude_input_prompt_is_the_ready_signal() {
+        let ready = "  Welcome to Claude Code\n  ~/workspace/aoe\n\n\u{276f} ";
+        assert!(shows_claude_input_prompt(ready));
+        assert_eq!(auto_confirm_step(ready, &[]), AutoConfirmStep::NoPrompt);
+
+        let bare = "\u{276f}";
+        assert!(shows_claude_input_prompt(bare));
+
+        let blank = "\n\n   \n";
+        assert!(
+            !shows_claude_input_prompt(blank),
+            "a pane that has rendered nothing is not a pane that is ready"
+        );
+
+        let starting = "  Welcome to Claude Code\n  \u{280b} starting";
+        assert!(
+            !shows_claude_input_prompt(starting),
+            "no input prompt yet means not ready"
+        );
+
+        // A confirmation screen must fail both halves: it is a question, and it
+        // is not readiness. It draws the same glyph, so this held only by the
+        // caller's ordering until the predicate learned to tell a menu entry
+        // from an input prompt -- see `test_menu_selection_is_not_the_input_prompt`
+        // for what that costs when the ordering is the only defence.
+        let question = "  WARNING: Loading development channels\n  \u{276f} 1. I am using this for local development";
+        assert!(
+            !shows_claude_input_prompt(question),
+            "a selected menu entry is not an input prompt"
+        );
+        assert_eq!(
+            auto_confirm_step(question, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::DevelopmentChannels),
+            "a question is still a question, whatever glyph draws it"
+        );
+    }
+
+    /// A narrow pane is the shape this whole change exists for, and it is where
+    /// the question text arrives split across lines. Verbatim from a real Claude
+    /// confirmation screen captured at 36 columns.
+    #[test]
+    fn test_wrapped_question_is_still_recognized() {
+        let wrapped = "  Please use --channels to run a\n  list of approved channels.\n  Channels:\n                         server:cross-agent-teams-channel\n  \u{276f} 1. I am using this for local\n                              development\n    2. Exit\n  Enter to confirm \u{b7} Esc to cancel";
+
+        assert!(
+            !wrapped.contains("I am using this for local development"),
+            "precondition: the phrase really is split in the captured screen"
+        );
+        assert_eq!(
+            auto_confirm_step(wrapped, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::DevelopmentChannels),
+            "a question split by the pane width is still that question"
+        );
+    }
+
+    /// The glyph is Claude's selection marker, not its input prompt: the theme
+    /// picker, the login chooser and the startup confirmations all draw it.
+    /// Reading any of them as ready abandons a pane on an unanswered question.
+    #[test]
+    fn test_menu_selection_is_not_the_input_prompt() {
+        assert!(is_claude_input_prompt_line("\u{276f}"));
+        assert!(is_claude_input_prompt_line("\u{276f} "));
+        assert!(is_claude_input_prompt_line(
+            "\u{276f} what should I work on?"
+        ));
+
+        assert!(!is_claude_input_prompt_line(
+            "\u{276f} 1. I am using this for local development"
+        ));
+        assert!(!is_claude_input_prompt_line("\u{276f} 2. Exit"));
+        assert!(!is_claude_input_prompt_line(
+            "\u{276f} 1. Claude account with subscription"
+        ));
+        assert!(!is_claude_input_prompt_line("no glyph here"));
+
+        // The combination that stranded a pane: the question's text is split by
+        // the pane width so no marker matches, and its selected entry then reads
+        // as an input prompt.
+        let wrapped_question =
+            "  \u{276f} 1. I am using this for local\n       development\n    2. Exit";
+        assert!(
+            !shows_claude_input_prompt(wrapped_question),
+            "a menu on screen is not a pane that is done being asked"
+        );
+    }
+
+    /// A screen can carry the text of a question already answered above the one
+    /// now being asked. Reporting the first marker found reports history as the
+    /// current state and leaves the real question unanswered.
+    #[test]
+    fn test_answered_prompt_on_screen_does_not_mask_an_unanswered_one() {
+        let both = "  WARNING: Loading development channels\n  ❯ 1. I am using this for local development\n\n                     Quick safety check: Is this a project you created or one you trust?\n ❯ 1. Yes, I trust this folder";
+
+        assert_eq!(
+            auto_confirm_step(both, &[AutoConfirmPrompt::DevelopmentChannels]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::WorkspaceTrust),
+            "the unanswered question on screen is the one to answer"
+        );
+        assert_eq!(
+            auto_confirm_step(both, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::DevelopmentChannels),
+            "with nothing answered yet, the first question present is answered first"
+        );
+        assert_eq!(
+            auto_confirm_step(
+                both,
+                &[
+                    AutoConfirmPrompt::DevelopmentChannels,
+                    AutoConfirmPrompt::WorkspaceTrust
+                ]
+            ),
+            AutoConfirmStep::AlreadyAnswered,
+            "only when every question present is answered is there nothing to do"
+        );
+    }
+
+    /// Cross Agent Team integration is decided by the agent in the pane. Both
+    /// heterogeneous directions must get the integration their own agent needs,
+    /// not merely be spared the one they do not.
+    #[test]
+    fn test_cat_integration_reaches_both_heterogeneous_directions() {
+        const CLAUDE_FLAG: &str = "--dangerously-load-development-channels";
+
+        // A Claude pane adopted into a Codex instance.
+        let mut codex_inst = Instance::new("test", "/tmp/test");
+        codex_inst.tool = "codex".to_string();
+        codex_inst.cross_agent_team = true;
+        let adopted_claude = codex_inst
+            .build_pane_command("claude", None, false, None)
+            .expect("claude pane command");
+        assert!(
+            adopted_claude.contains(CLAUDE_FLAG),
+            "a Claude pane needs Claude's channel flag even in a Codex instance, got: {adopted_claude}"
+        );
+
+        // A Codex pane adopted into a Claude instance.
+        let mut claude_inst = Instance::new("test", "/tmp/test");
+        claude_inst.tool = "claude".to_string();
+        claude_inst.cross_agent_team = true;
+        let adopted_codex = claude_inst
+            .build_pane_command("codex", None, false, None)
+            .expect("codex pane command");
+        assert!(
+            !adopted_codex.contains(CLAUDE_FLAG),
+            "a Codex pane must not carry Claude's flag, got: {adopted_codex}"
+        );
+        assert!(
+            adopted_codex.contains(CODEX_XATS_PACKAGE),
+            "a Codex pane needs Codex's bootstrap even in a Claude instance, got: {adopted_codex}"
+        );
+        // The bootstrap being present says nothing about what it launches. The
+        // binary it execs is the assertion that matters: built from the
+        // instance's tool, this bootstrap runs Claude under Codex's xats
+        // integration, and the package name is there either way.
+        assert!(
+            adopted_codex.contains("codex --remote"),
+            "the Codex bootstrap must exec Codex, got: {adopted_codex}"
+        );
+        assert!(
+            !adopted_codex.contains("claude --remote"),
+            "the Codex bootstrap must not exec the instance's own agent, got: {adopted_codex}"
+        );
+    }
+
+    /// A Codex instance's own agent pane has no Claude questions to answer.
+    /// Sending it into the Claude flow costs the full deadline synchronously on
+    /// every launch, so the entry point has to know whose pane it speaks for.
+    #[test]
+    fn test_agent_pane_claude_prompts_follow_the_instance_tool() {
+        let mut claude_inst = Instance::new("test", "/tmp/test");
+        claude_inst.tool = "claude".to_string();
+        claude_inst.cross_agent_team = true;
+        assert!(claude_inst.agent_pane_has_claude_prompts());
+
+        let mut codex_inst = Instance::new("test", "/tmp/test");
+        codex_inst.tool = "codex".to_string();
+        codex_inst.cross_agent_team = true;
+        assert!(
+            !codex_inst.agent_pane_has_claude_prompts(),
+            "a Codex instance's agent pane raises no Claude question"
+        );
+        // It still takes Claude's integration for an adopted Claude pane: the
+        // two questions are different and must not collapse into one predicate.
+        assert!(codex_inst.cross_agent_team_pane("claude"));
+
+        let mut off = Instance::new("test", "/tmp/test");
+        off.tool = "claude".to_string();
+        assert!(
+            !off.agent_pane_has_claude_prompts(),
+            "Cross Agent Team off means no development-channel question at all"
+        );
+    }
+
+    /// An adopted slot 0 is described by neither key source unless one of them is
+    /// widened: the instance record holds the key for the instance's own agent,
+    /// and the slot-key path used to skip slot 0 outright.
+    #[test]
+    fn test_adopted_slot_zero_needs_its_own_identity_key() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+
+        let own = recovered_slot(0, "claude", "/tmp/test", "%0");
+        assert!(
+            !inst.slot_needs_identity_key(&own),
+            "slot 0 running the instance's own agent is covered by the instance record"
+        );
+
+        let adopted = recovered_slot(0, "gemini", "/tmp/test", "%0");
+        assert!(
+            inst.slot_needs_identity_key(&adopted),
+            "an adopted slot 0 has no other key source, so it must get its own"
+        );
+
+        let secondary = recovered_slot(1, "gemini", "/tmp/test", "%1");
+        assert!(
+            inst.slot_needs_identity_key(&secondary),
+            "a secondary adopted slot keeps needing its own key"
         );
     }
 
@@ -4896,5 +5589,135 @@ mod tests {
         inst.status = Status::Stopped;
         inst.update_status_with_options(StatusUpdateOptions::default());
         assert_eq!(inst.detected_inner_agent.as_deref(), Some("claude"));
+    }
+    // =======================================================================
+    // INDEPENDENT ACCEPTANCE (tester). Two things the author said were never
+    // checked: what a real Claude actually puts on screen, and what the
+    // capture command production uses returns when the text does not fit.
+    // =======================================================================
+
+    /// A real Claude 2.1.220 screen, captured from a live pane on a private
+    /// tmux socket with an isolated HOME. Not synthesized.
+    const REAL_LOGIN_SCREEN: &str = include_str!("testdata_real_claude_login.txt");
+    const REAL_THEME_SCREEN: &str = include_str!("testdata_real_claude_theme.txt");
+
+    /// `shows_claude_input_prompt` is the signal that finishes a pane early:
+    /// paired with `NoPrompt` it declares the startup screens behind it. A menu
+    /// Claude is waiting on is the opposite of that, and Claude draws menu
+    /// options with the same glyph as its input prompt.
+    #[test]
+    fn at_real_claude_login_menu_is_not_an_input_prompt() {
+        assert!(
+            !shows_claude_input_prompt(REAL_LOGIN_SCREEN),
+            "a real login-method menu must not read as Claude waiting for input; \
+             paired with NoPrompt it settles the pane while a menu is still up"
+        );
+    }
+
+    #[test]
+    fn at_real_claude_theme_menu_is_not_an_input_prompt() {
+        assert!(
+            !shows_claude_input_prompt(REAL_THEME_SCREEN),
+            "a real theme-picker screen must not read as Claude waiting for input"
+        );
+    }
+
+    /// The composite the production loop actually evaluates.
+    #[test]
+    fn at_a_menu_screen_does_not_settle_the_pane() {
+        for (name, screen) in [("login", REAL_LOGIN_SCREEN), ("theme", REAL_THEME_SCREEN)] {
+            let step = auto_confirm_step(screen, &[]);
+            let settles =
+                matches!(step, AutoConfirmStep::NoPrompt) && shows_claude_input_prompt(screen);
+            assert!(
+                !settles,
+                "the {name} screen settles the pane: Claude is still on a menu, so \
+                 'startup screens are behind it' is not true yet"
+            );
+        }
+    }
+
+    /// The marker table is matched against the pane's screen as tmux returns it.
+    /// `capture-pane` without `-J` returns one string per screen row, so a line
+    /// too long for the pane is returned already broken -- and a marker broken
+    /// mid-string is not `contains`ed. Built from a real pane, not a synthesized
+    /// string, because the wrap is the thing under test.
+    #[test]
+    #[serial_test::serial]
+    fn at_a_narrow_pane_still_recognizes_the_dev_channels_prompt() {
+        if crate::tmux::tmux_command()
+            .arg("-V")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        crate::tmux::isolate_tmux_socket();
+
+        let session = format!("aoe_test_narrow_confirm_{}", std::process::id());
+        // The option line as the author's own report quotes it, in a pane the
+        // width of one half of a split on a laptop.
+        let line = "  \u{276f} 1. I am using this for local development";
+        let created = crate::tmux::tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "-x",
+                "40",
+                "-y",
+                "12",
+                &format!("sh -c 'printf \"{line}\\n\"; while :; do sleep 60; done'"),
+            ])
+            .output()
+            .expect("tmux new-session");
+        assert!(created.status.success());
+        struct Guard(String);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = crate::tmux::tmux_command()
+                    .args(["kill-session", "-t", &self.0])
+                    .output();
+            }
+        }
+        let _guard = Guard(session.clone());
+        std::thread::sleep(Duration::from_millis(600));
+
+        let pane = String::from_utf8_lossy(
+            &crate::tmux::tmux_command()
+                .args(["display-message", "-t", &session, "-p", "#{pane_id}"])
+                .output()
+                .expect("display-message")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        let screen = crate::tmux::capture_pane_screen(&pane).expect("capture");
+        assert!(
+            screen.contains("I am using this for"),
+            "precondition: the pane really is showing the prompt line, got {screen:?}"
+        );
+        let step = auto_confirm_step(&screen, &[]);
+
+        // The impact, stated as the loop states it: `NoPrompt` plus a screen that
+        // reads as ready settles the pane. On this screen that means the pane is
+        // declared finished with an unanswered question still on it.
+        assert!(
+            !(matches!(step, AutoConfirmStep::NoPrompt) && shows_claude_input_prompt(&screen)),
+            "the pane is settled while its question is unanswered: the marker did \
+             not survive the pane width, and the question's own option glyph then \
+             read as Claude waiting for input. screen={screen:?}"
+        );
+        assert_eq!(
+            step,
+            AutoConfirmStep::Answer(AutoConfirmPrompt::DevelopmentChannels),
+            "the prompt is on screen, so it must be answered; a pane too narrow to \
+             fit the marker on one row must not read as 'no question here'. \
+             screen={screen:?}"
+        );
     }
 }

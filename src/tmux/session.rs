@@ -452,6 +452,34 @@ pub fn set_pane_remain_on_exit(pane: &str, on: bool) -> Result<()> {
     Ok(())
 }
 
+/// Capture only what is currently on a pane's screen, by explicit pane target.
+///
+/// Deliberately excludes scrollback. A caller that decides whether to send input
+/// based on what a pane shows must see the pane's present state: history that
+/// merely mentions a prompt is not that pane asking a question now, and acting
+/// on it means typing into whatever the pane is actually doing.
+///
+/// Failure is returned rather than flattened into an empty capture, so a caller
+/// can tell "this pane shows nothing I act on" from "I could not read this pane".
+///
+/// `-J` rejoins the lines tmux itself soft-wrapped, which split mid-word and so
+/// cannot be repaired after the fact. It does not address text an application
+/// re-flowed to the pane width on its own -- those arrive as genuinely separate
+/// lines, broken at spaces -- so a caller matching phrases still has to tolerate
+/// that. The two kinds of wrapping need different remedies and both occur.
+pub fn capture_pane_screen(pane: &str) -> Result<String> {
+    let output = crate::tmux::tmux_command()
+        .args(["capture-pane", "-t", pane, "-p", "-e", "-J"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to capture pane {}: {}", pane, stderr.trim());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// Send raw key strings to an explicit tmux pane target. No-op for empty input.
 pub fn send_keys_to_pane_target(pane: &str, keys: &[&str]) -> Result<()> {
     if keys.is_empty() {
@@ -658,6 +686,27 @@ fn build_create_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kills one session by its exact name when dropped.
+    ///
+    /// A test that creates a tmux session and cleans it up on the last line
+    /// cleans up only when it passes. Every assertion between is an early exit
+    /// that leaves the server, its shell, and that shell's children running --
+    /// and a session name derived from the pid can then collide with a later
+    /// test once the pid is reused. Unwinding is the path that needs the
+    /// cleanup most, so the cleanup belongs to the value's lifetime.
+    ///
+    /// Exact name only: never a pattern, never `kill-server`. See AGENTS.md
+    /// "Tmux Session Safety".
+    struct SessionGuard(String);
+
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            let _ = crate::tmux::tmux_command()
+                .args(["kill-session", "-t", &self.0])
+                .output();
+        }
+    }
 
     /// Helper: check if tmux is available for tests that need it
     fn tmux_available() -> bool {
@@ -1106,6 +1155,108 @@ mod tests {
         assert!(send_keys_to_pane_target("%nonexistent", &[]).is_ok());
     }
 
+    /// A pane's screen is not its history. Deciding whether to send input from a
+    /// capture that includes scrollback means a pane that once printed a prompt
+    /// looks like a pane asking one now -- and the keystroke goes to whatever it
+    /// is really doing.
+    #[test]
+    #[serial_test::serial]
+    fn test_capture_pane_screen_excludes_scrollback() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        crate::tmux::isolate_tmux_socket();
+
+        let session_name = format!("aoe_test_capture_screen_{}", std::process::id());
+        let marker = "I am using this for local development";
+        // `sh` with no input can reach EOF and exit, taking the session with it
+        // and leaving every later step to fail on a server that is no longer
+        // there. A shell that stays put keeps the failure modes about capture.
+        let created = crate::tmux::tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session_name,
+                "-x",
+                "80",
+                "-y",
+                "10",
+                "sh -c 'while :; do sleep 60; done'",
+            ])
+            .output()
+            .expect("tmux new-session");
+        assert!(
+            created.status.success(),
+            "new-session failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        // From here on every step can fail; the guard owns the teardown so an
+        // early exit does not leave the server and its endless shell behind.
+        let _guard = SessionGuard(session_name.clone());
+
+        // `new-session` returning does not mean the server is answering yet: a
+        // first query can still land before the socket is connectable, which
+        // fails as "error connecting ... No such file or directory" and then
+        // reads an empty stdout as a pane id. Wait for the session to answer.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pane = loop {
+            let out = crate::tmux::tmux_command()
+                .args(["display-message", "-t", &session_name, "-p", "#{pane_id}"])
+                .output()
+                .expect("tmux display-message");
+            let pane = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && pane.starts_with('%') {
+                break pane;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "session never answered: status={:?} stdout={:?} stderr={:?}",
+                out.status,
+                pane,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // Put the marker in history, then push it off a 10-row screen.
+        send_keys_to_pane_target(&pane, &[&format!("echo '{marker}'"), "Enter"])
+            .expect("send marker");
+        for _ in 0..40 {
+            send_keys_to_pane_target(&pane, &["echo filler", "Enter"]).expect("send filler");
+        }
+        std::thread::sleep(Duration::from_millis(600));
+
+        let screen = capture_pane_screen(&pane).expect("capture screen");
+        assert!(
+            !screen.contains(marker),
+            "the visible screen must not carry scrolled-off history, got {screen:?}"
+        );
+
+        let with_history = crate::tmux::tmux_command()
+            .args(["capture-pane", "-t", &pane, "-p", "-S", "-200"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        assert!(
+            with_history.contains(marker),
+            "precondition: the marker must really be in this pane's scrollback"
+        );
+
+        // Normal path: tear down explicitly and check it worked. The guard is the
+        // backstop for the paths that never reach this line.
+        let killed = crate::tmux::tmux_command()
+            .args(["kill-session", "-t", &session_name])
+            .output()
+            .expect("kill-session");
+        assert!(
+            killed.status.success(),
+            "cleanup failed: {}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
+    }
+
     /// The split's `remain_on_exit` describes the pane the split produced. The
     /// only pane `split-window` can target is the pane being split, so setting
     /// the option in that same invocation writes the new pane's value onto the
@@ -1136,6 +1287,7 @@ mod tests {
             .output()
             .expect("tmux new-session");
         assert!(created.status.success());
+        let _guard = SessionGuard(session_name.clone());
 
         let source_pane = crate::tmux::tmux_command()
             .args(["display-message", "-t", &session_name, "-p", "#{pane_id}"])
@@ -1177,9 +1329,17 @@ mod tests {
              onto it would drop the protection a pending relaunch depends on"
         );
 
-        let _ = crate::tmux::tmux_command()
+        // Normal path: tear down explicitly and check it worked. The guard is the
+        // backstop for the paths that never reach this line.
+        let killed = crate::tmux::tmux_command()
             .args(["kill-session", "-t", &session_name])
-            .output();
+            .output()
+            .expect("kill-session");
+        assert!(
+            killed.status.success(),
+            "cleanup failed: {}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
     }
 
     #[test]

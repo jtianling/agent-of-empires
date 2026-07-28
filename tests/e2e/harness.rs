@@ -675,6 +675,20 @@ last_seen_version = "{}"
         self.extra_env.push((key.to_string(), value.to_string()));
     }
 
+    /// Install a stub with an arbitrary script body, for a test that needs the
+    /// stubbed agent to do something specific (render a screen, record the input
+    /// it receives) rather than merely stay alive.
+    pub fn install_stub_script(&self, name: &str, body: &str) {
+        let stub = self.stub_path.join(name);
+        std::fs::write(&stub, body).expect("write stub script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub script");
+        }
+    }
+
     pub fn install_tool_stub(&self, name: &str) {
         let stub = self.stub_path.join(name);
         std::fs::write(&stub, "#!/bin/sh\nexec sleep 2147483647\n").expect("write tool stub");
