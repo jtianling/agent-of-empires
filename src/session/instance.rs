@@ -105,13 +105,42 @@ pub(crate) enum AutoConfirmStep {
 /// Callers must establish that no confirmation question is on screen before
 /// consulting this: the questions themselves are drawn with the same prompt
 /// glyph, so on their own screens it means the opposite of ready.
+///
+/// Two things must hold, and the second is what makes this positive rather than
+/// a guess about how menus happen to be drawn: the line looks like the input
+/// prompt, and it sits inside the input box. Claude draws that box as a rule
+/// above and below the prompt; a menu option is drawn among its sibling
+/// options. Requiring the border means a menu whose options carry no numbers --
+/// which the shape test alone reads as ready -- is still recognized as a
+/// question. Measured against a real ready pane, both borders are present.
 fn shows_claude_input_prompt(screen: &str) -> bool {
-    strip_ansi(screen)
+    let plain = strip_ansi(screen);
+    let window: Vec<&str> = plain
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
         .rev()
         .take(6)
-        .any(|line| is_claude_input_prompt_line(line.trim()))
+        .collect();
+
+    window.iter().enumerate().any(|(i, line)| {
+        is_claude_input_prompt_line(line)
+            && [i.checked_sub(1), Some(i + 1)]
+                .into_iter()
+                .flatten()
+                .filter_map(|j| window.get(j))
+                .any(|neighbor| is_input_box_border(neighbor))
+    })
+}
+
+/// Whether a line is one of the rules Claude draws above and below its input
+/// prompt.
+///
+/// Only the characters a real ready pane was observed to use. A rule this does
+/// not recognize costs a pane the wait its deadline already bounds; treating
+/// some other horizontal run as the input box would settle a pane on a question.
+fn is_input_box_border(line: &str) -> bool {
+    line.chars().count() >= 3 && line.chars().all(|c| c == '\u{2500}' || c == '\u{2501}')
 }
 
 /// Whether one line is Claude's input prompt rather than a selected menu entry.
@@ -4047,12 +4076,25 @@ mod tests {
     /// and these cases pin both halves of it.
     #[test]
     fn test_claude_input_prompt_is_the_ready_signal() {
-        let ready = "  Welcome to Claude Code\n  ~/workspace/aoe\n\n\u{276f} ";
-        assert!(shows_claude_input_prompt(ready));
-        assert_eq!(auto_confirm_step(ready, &[]), AutoConfirmStep::NoPrompt);
+        // The box Claude draws around its prompt, as a real ready pane shows it
+        // -- see `at_a_real_ready_screen_reads_as_ready` for the capture these
+        // are modeled on. The glyph on its own is a shape a menu shares.
+        let rule = "\u{2500}".repeat(40);
+        let ready = format!(
+            "  Welcome to Claude Code\n  ~/workspace/aoe\n\n{rule}\n\u{276f} \n{rule}\n  main"
+        );
+        assert!(shows_claude_input_prompt(&ready));
+        assert_eq!(auto_confirm_step(&ready, &[]), AutoConfirmStep::NoPrompt);
 
-        let bare = "\u{276f}";
-        assert!(shows_claude_input_prompt(bare));
+        let bare = format!("{rule}\n\u{276f}\n{rule}");
+        assert!(shows_claude_input_prompt(&bare));
+
+        let unboxed = "\u{276f}";
+        assert!(
+            !shows_claude_input_prompt(unboxed),
+            "the glyph outside the input box is not the input prompt: menus draw \
+             it too, and some of them number nothing"
+        );
 
         let blank = "\n\n   \n";
         assert!(
@@ -5600,6 +5642,39 @@ mod tests {
     /// tmux socket with an isolated HOME. Not synthesized.
     const REAL_LOGIN_SCREEN: &str = include_str!("testdata_real_claude_login.txt");
     const REAL_THEME_SCREEN: &str = include_str!("testdata_real_claude_theme.txt");
+    const REAL_READY_SCREEN: &str = include_str!("testdata_real_claude_ready.txt");
+
+    /// The other half of the criterion. The menu fixtures prove it rejects what
+    /// it must reject, which a criterion that never fires also does. This is the
+    /// screen it exists to recognize: a launched Claude past its startup
+    /// screens, captured from a live pane that was never spoken to.
+    #[test]
+    fn at_a_real_ready_screen_reads_as_ready() {
+        assert!(
+            shows_claude_input_prompt(REAL_READY_SCREEN),
+            "a real Claude waiting for input must read as ready; otherwise every \
+             pane waits out the full deadline and the criterion is decoration"
+        );
+        let step = auto_confirm_step(REAL_READY_SCREEN, &[]);
+        assert!(
+            matches!(step, AutoConfirmStep::NoPrompt),
+            "a ready screen asks nothing, got {step:?}"
+        );
+    }
+
+    /// Not every menu numbers its options. Rejecting numbered entries is a
+    /// statement about how the menus this code has seen happen to be drawn, and
+    /// a pane settled here is a pane whose question no one answers.
+    #[test]
+    fn at_an_unnumbered_menu_option_is_not_an_input_prompt() {
+        let screen = "Do you want to proceed?\n\
+                      \u{276f} Yes\n\
+                      \u{0020} No, and tell Claude what to do differently\n";
+        assert!(
+            !shows_claude_input_prompt(screen),
+            "an unnumbered menu option must not read as Claude waiting for input"
+        );
+    }
 
     /// `shows_claude_input_prompt` is the signal that finishes a pane early:
     /// paired with `NoPrompt` it declares the startup screens behind it. A menu
