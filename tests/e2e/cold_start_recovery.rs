@@ -339,6 +339,30 @@ fn wait_for_slot0_rebound(db: &Path, instance_id: &str, old: &str) -> String {
     }
 }
 
+/// Wait until no persisted slot still holds a pre-recovery pane id, then return
+/// the slots' panes in slot order.
+///
+/// Slot 0 rebinding is not the signal that recovery finished writing back:
+/// recovery writes each slot as it launches it, so reading the whole set on slot
+/// 0's signal can catch a rebuilt slot 0 beside a sibling that still holds the
+/// pane it had before. That read is stable in isolation and races under a full
+/// suite run, which is the worst way for it to be wrong.
+fn wait_for_all_slots_rebound(db: &Path, instance_id: &str, old_panes: &[String]) -> Vec<String> {
+    let start = Instant::now();
+    loop {
+        let panes = slot_panes(db, instance_id);
+        let rebound =
+            panes.len() == old_panes.len() && panes.iter().all(|pane| !old_panes.contains(pane));
+        if rebound {
+            return panes;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            return panes;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Wait until every persisted slot pane belongs to `live`, then return them in
 /// slot order.
 ///
@@ -487,37 +511,6 @@ fn recover_rebuilds_session_with_n_panes_resumed_and_writes_back() {
     h.send_keys("R");
 
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
-
-    eprintln!("DEBUG old_panes={:?}", old_panes);
-    eprintln!(
-        "DEBUG agent_slot rows:\n{}",
-        sqlite_query(
-            &db,
-            &format!(
-                "SELECT slot, tmux_pane, native_session_id, agent FROM agent_slot WHERE instance_id='{instance_id}' ORDER BY slot;"
-            ),
-        )
-    );
-    eprintln!(
-        "DEBUG live panes (idx id cmd):\n{}",
-        String::from_utf8_lossy(
-            &tmux(
-                &h,
-                &[
-                    "list-panes",
-                    "-t",
-                    &session_name,
-                    "-F",
-                    "#{pane_index} #{pane_id} [#{pane_start_command}]",
-                ],
-            )
-            .stdout
-        )
-    );
-    eprintln!(
-        "DEBUG instance error note / screen:\n{}",
-        h.capture_screen()
-    );
 
     assert_ne!(
         new_slot0, old_panes[0],
@@ -713,7 +706,7 @@ fn invalid_layout_snapshot_falls_back_and_recovers_every_pane() {
         old_panes[0]
     );
     assert_eq!(session_pane_ids(&h, &session_name).len(), slots.len());
-    let new_panes = slot_panes(&db, &instance_id);
+    let new_panes = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
     for (pane, native) in new_panes.iter().zip(slot_natives(&db, &instance_id)) {
         wait_for_pane_start_command_contains(&h, pane, &format!("--resume {native}"));
     }
@@ -1299,7 +1292,7 @@ fn recover_relaunches_an_adopted_slot_as_its_agent_not_the_instance_tool() {
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
     assert_ne!(new_slot0, old_panes[0], "recovery did not run");
 
-    let new_panes = slot_panes(&db, &instance_id);
+    let new_panes = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
     assert_eq!(new_panes.len(), 2, "both slots must be written back");
 
     // Slot 0 is the interesting one: the instance's own tool describes nothing
@@ -1597,7 +1590,7 @@ fn at_shell_command_instance_recovers_all_three_slots_and_layout() {
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
     assert_ne!(new_slot0, old_panes[0], "recovery did not run");
 
-    let new_panes = slot_panes(&db, &instance_id);
+    let new_panes = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
     assert_eq!(new_panes.len(), 3, "every slot must be written back");
 
     wait_for_pane_geometry(&h, &session_name, 3);
@@ -1658,7 +1651,7 @@ fn at_relaunched_pane_remain_on_exit_matches_its_own_agent() {
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
     assert_ne!(new_slot0, old_panes[0], "recovery did not run");
 
-    let new_panes = slot_panes(&db, &instance_id);
+    let new_panes = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
     assert_eq!(new_panes.len(), 2);
     wait_for_pane_geometry(&h, &session_name, 2);
 
