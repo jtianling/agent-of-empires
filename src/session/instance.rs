@@ -58,6 +58,27 @@ const AUTO_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// on screen (Claude has moved past the confirmation prompts).
 const AUTO_CONFIRM_DONE_GRACE: Duration = Duration::from_millis(1200);
 
+/// How long a rebuilt session is left to settle before recovery decides which
+/// slots came back. A relaunched pane can survive its own respawn and disappear
+/// a moment later, so checking immediately would confirm a state that is about
+/// to stop being true. Recovery is a one-shot user action that already spends
+/// far longer rebuilding the session, so the wait is affordable here in a way it
+/// would not be on a polling path.
+const RECOVERY_SETTLE: Duration = Duration::from_millis(500);
+
+/// Override for [`RECOVERY_SETTLE`], in milliseconds. Exists for tests: whether a
+/// pane dies inside the default window depends on process scheduling, so a test
+/// that needs the "launched, then vanished" state to be observable widens the
+/// window instead of racing it.
+const RECOVERY_SETTLE_ENV: &str = "AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS";
+
+fn recovery_settle() -> Duration {
+    std::env::var(RECOVERY_SETTLE_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(RECOVERY_SETTLE, Duration::from_millis)
+}
+
 const CODEX_XATS_APP_SERVER_HOST: &str = "127.0.0.1";
 const CODEX_XATS_APP_SERVER_PORT: &str = "8799";
 const CODEX_XATS_APP_SERVER_URL: &str = "ws://127.0.0.1:8799";
@@ -757,6 +778,14 @@ impl Instance {
         self.build_pane_command(&tool, resume_token, true, None)
     }
 
+    /// Whether a pane running `target_agent` is the pane the instance's own
+    /// launch context describes. Agent tracking is observe-first, so a slot can
+    /// record an agent the instance never launched; the instance's conversation
+    /// identity and launch overrides belong to `self.tool` alone.
+    fn pane_runs_instance_tool(&self, target_agent: &str) -> bool {
+        target_agent == self.tool
+    }
+
     /// Build the launch command for a single pane, applying the full launch
     /// context (resume flag, YOLO mode, cross-agent-team flag, `AOE_INSTANCE_ID`
     /// for hook-config agents, sandbox `docker exec` wrapping, custom instruction,
@@ -764,14 +793,17 @@ impl Instance {
     /// single-pane start/respawn path and the slot-based multi-pane resume path.
     ///
     /// `target_agent` is the agent that runs in this pane (the instance tool for
-    /// the primary pane, or a slot's recorded agent for a secondary pane).
-    /// `is_primary` is true only for the instance's primary pane (slot 0): the
-    /// command override (`self.command`), pre-allocated session id, fork token,
-    /// and `extra_args` are instance-primary concepts and apply to that pane only.
-    /// Secondary panes build from their own agent binary.
+    /// the primary pane, or a slot's recorded agent for an adopted or secondary
+    /// one). `is_primary` marks the instance's primary pane (slot 0), but the
+    /// instance-primary concepts -- the command override (`self.command`),
+    /// pre-allocated session id, fork token, `extra_args` and the instance's own
+    /// identity key -- describe `self.tool` and nothing else. They are therefore
+    /// applied only when the pane's agent *is* that tool: a pane whose slot
+    /// recorded a different agent (a hand-started pane AoE only adopted) builds
+    /// from its own binary even when it occupies the primary slot.
     ///
     /// `slot_identity_key` supplies an adopted pane's xats identity key. It is
-    /// ignored for the primary pane, which uses the instance's own key.
+    /// ignored for the instance's own agent pane, which uses the instance's key.
     pub fn build_pane_command(
         &self,
         target_agent: &str,
@@ -780,6 +812,7 @@ impl Instance {
         slot_identity_key: Option<&str>,
     ) -> Option<String> {
         let agent = crate::agents::get_agent(target_agent);
+        let is_primary = is_primary && self.pane_runs_instance_tool(target_agent);
 
         if self.is_sandboxed() {
             let sandbox = self.sandbox_info.as_ref()?;
@@ -899,12 +932,14 @@ impl Instance {
     /// Build the bare tool command (binary + resume/fork/session-id flags +
     /// extra args) for a single pane before launch-context decoration.
     ///
-    /// For the primary pane (`is_primary = true`) this honors the instance
-    /// command override (`self.command`), `extra_args`, pre-allocated session id,
-    /// and fork token, matching the single-pane start/respawn path byte-for-byte.
-    /// For secondary panes (`is_primary = false`) those instance-primary concepts
-    /// do not apply: the command is built from the slot agent's own binary plus,
-    /// when present, a resume flag from the supplied token.
+    /// For the instance's own agent pane (`is_primary = true`, already narrowed
+    /// by the caller to a pane whose agent is `self.tool`) this honors the
+    /// instance command override (`self.command`), `extra_args`, pre-allocated
+    /// session id, and fork token, matching the single-pane start/respawn path
+    /// byte-for-byte. For every other pane (`is_primary = false`) those
+    /// instance-primary concepts do not apply: the command is built from the
+    /// pane agent's own binary plus, when present, a resume flag from the
+    /// supplied token.
     fn build_base_pane_command(
         &self,
         agent: Option<&crate::agents::AgentDef>,
@@ -1420,9 +1455,14 @@ impl Instance {
     /// Fresh recovery runs the same identity transaction as a live fresh restart.
     ///
     /// Per-pane failures are collected into the returned outcomes and never abort
-    /// recovery of sibling panes. Returns an error only when the session/pane
-    /// rebuild itself fails (before any per-pane launch runs) or when the created
-    /// pane count does not match the slot count.
+    /// recovery of sibling panes. Once every pane has been launched the rebuild is
+    /// given a moment to settle and every slot is checked against the session's
+    /// panes (see
+    /// [`report_slots_that_did_not_come_back`](Self::report_slots_that_did_not_come_back)),
+    /// so a pane that disappears after its relaunch is reported instead of passing
+    /// for success. Returns an error only when the session/pane rebuild itself
+    /// fails (before any per-pane launch runs) or when the created pane count does
+    /// not match the slot count.
     pub fn recover_from_slots(
         &mut self,
         store: &crate::db::Store,
@@ -1550,12 +1590,68 @@ impl Instance {
             }
         }
 
+        self.report_slots_that_did_not_come_back(store, &session_name, &paired, &mut outcomes, now);
+
         self.run_auto_confirm();
         self.apply_tmux_options(&Self::current_profile());
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
 
         Ok(outcomes)
+    }
+
+    /// Once every slot has been launched, check that each one still has a pane in
+    /// the rebuilt session and turn each slot that does not into a per-pane
+    /// failure. A pane that is created, respawned and then disappears is invisible
+    /// to the launch outcomes, which is how recovery used to hand back fewer panes
+    /// than the user had and still report success.
+    ///
+    /// Each missing slot is also appended to the instance's event log next to the
+    /// `adopt`/`capture` entries that recorded it in the first place, so the fact
+    /// outlives the in-memory outcome the caller shows once.
+    ///
+    /// The check deliberately neither retries nor recreates a missing pane:
+    /// recovery's job here is to be honest about what came back, and a retry would
+    /// mask whatever removed it.
+    fn report_slots_that_did_not_come_back(
+        &self,
+        store: &crate::db::Store,
+        session_name: &str,
+        paired: &[(crate::db::AgentSlot, Option<String>)],
+        outcomes: &mut [PaneResumeOutcome],
+        now: i64,
+    ) {
+        std::thread::sleep(recovery_settle());
+        tmux::refresh_session_cache();
+
+        let live: std::collections::HashSet<String> =
+            crate::db::reconcile::session_pane_ids(session_name)
+                .into_iter()
+                .collect();
+
+        for (index, report) in missing_slot_failures(paired, &live) {
+            tracing::warn!("Recovery of '{}' lost a pane: {}", self.title, report);
+            let slot = &paired[index].0;
+            if let Err(e) = store.append_event(
+                &slot.instance_id,
+                Some(slot.slot),
+                "lost",
+                Some(&report),
+                now,
+            ) {
+                tracing::error!(
+                    "Failed to record lost pane for slot {} of '{}': {}",
+                    slot.slot,
+                    self.title,
+                    e
+                );
+            }
+            // A launch that already failed said why, which is more specific than
+            // "it is not here"; keep that reason and only fill in the silent case.
+            if !matches!(outcomes[index], PaneResumeOutcome::Error(_)) {
+                outcomes[index] = PaneResumeOutcome::Error(report);
+            }
+        }
     }
 
     fn clear_resume_token(&mut self) {
@@ -2204,7 +2300,26 @@ impl Instance {
             return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
         };
 
-        tmux::kill_pane_process_tree_target(tmux_pane);
+        // The process tree is killed outside tmux (an agent's children can
+        // outlive the SIGHUP that `respawn-pane -k` alone would send them), and a
+        // pane whose remain-on-exit is off is destroyed by tmux the moment that
+        // kill lands -- taking the respawn target with it. Hold the pane open
+        // across the kill; the respawn below then writes the setting this pane's
+        // agent actually wants.
+        //
+        // If the pane cannot be held open, the external kill is skipped rather
+        // than performed unprotected: `respawn-pane -k` below still replaces
+        // what runs in the pane, so the slot comes back either way, and the cost
+        // of skipping is orphaned grandchildren rather than a destroyed pane and
+        // a lost slot.
+        match tmux::set_pane_remain_on_exit(tmux_pane, true) {
+            Ok(()) => tmux::kill_pane_process_tree_target(tmux_pane),
+            Err(err) => tracing::warn!(
+                "Could not hold pane {} open for relaunch, skipping its process-tree kill: {}",
+                tmux_pane,
+                err
+            ),
+        }
 
         if let Err(err) =
             tmux::respawn_pane_target(tmux_pane, &command, cwd, !pane_agent_is_shell(agent))
@@ -2246,6 +2361,37 @@ pub(crate) fn is_valid_resume_token(s: &str) -> bool {
 /// persisted slots and its tmux session is not currently alive.
 fn is_recoverable_from(has_slots: bool, session_alive: bool) -> bool {
     has_slots && !session_alive
+}
+
+/// Which of the rebuilt slots no longer have a pane in the session, as
+/// `(index into `paired`, report)`. A slot whose pane could not be created in the
+/// first place is skipped: it already carries the creation failure and reporting
+/// it twice would say the same thing in two voices.
+///
+/// The report names the slot by the agent and working directory it recorded,
+/// which is what the user recognizes; a bare pane id names something that no
+/// longer exists and that the user never saw.
+fn missing_slot_failures(
+    paired: &[(crate::db::AgentSlot, Option<String>)],
+    live_panes: &std::collections::HashSet<String>,
+) -> Vec<(usize, String)> {
+    paired
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (slot, pane))| {
+            let pane = pane.as_ref()?;
+            if live_panes.contains(pane) {
+                return None;
+            }
+            Some((
+                index,
+                format!(
+                    "slot {} ({} in {}) did not come back",
+                    slot.slot, slot.agent, slot.cwd
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// Recreate one pane per slot and pair each slot with its new pane id in slot
@@ -3398,6 +3544,147 @@ mod tests {
         );
     }
 
+    // --- Instance-primary treatment follows the agent, not the slot position ---
+
+    #[test]
+    fn test_adopted_primary_slot_relaunches_as_the_agent_it_recorded() {
+        // The reported shape: the instance's own tool stayed a shell because both
+        // panes were started by hand and only adopted, so slot 0 records `claude`.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "shell".to_string();
+        inst.command = "sh".to_string();
+
+        let (cmd, resumed) = inst
+            .build_pane_resume_plan(
+                "claude",
+                "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+                true,
+                RestartMode::Resume,
+                None,
+            )
+            .unwrap();
+        assert!(resumed, "expected a resume plan, got fresh");
+        assert!(
+            cmd.contains("exec env claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"),
+            "the adopted pane must relaunch as its own agent, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("exec env sh"),
+            "the instance's shell must not replace the adopted agent, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_mismatched_primary_slot_carries_no_instance_conversation_identity() {
+        // A pre-allocated conversation id, a pending fork and the instance's extra
+        // arguments all describe `self.tool`; a slot running a different agent must
+        // receive none of them.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.agent_session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+        inst.fork_pending = Some("22222222-2222-4222-8222-222222222222".to_string());
+        inst.extra_args = "--instance-only".to_string();
+
+        let (cmd, _) = inst
+            .build_pane_resume_plan("codex", "", true, RestartMode::Fresh, None)
+            .unwrap();
+        assert!(
+            cmd.contains("exec env codex"),
+            "expected the slot's own binary, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("11111111-1111-4111-8111-111111111111"),
+            "the instance's conversation id must not reach another agent, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("22222222-2222-4222-8222-222222222222"),
+            "the instance's fork token must not reach another agent, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--instance-only"),
+            "the instance's extra args must not reach another agent, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_matching_slot_keeps_the_instances_own_launch_context() {
+        // A slot recording the instance's own tool must still build exactly what
+        // the single-pane launch path builds: command override plus extra args.
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.command = "claude --wrapper".to_string();
+        inst.extra_args = "--instance-only".to_string();
+
+        let (cmd, _) = inst
+            .build_pane_resume_plan("claude", "", true, RestartMode::Fresh, None)
+            .unwrap();
+        assert_eq!(
+            cmd,
+            inst.build_agent_command(None).unwrap(),
+            "a matching slot must build the instance's own launch command byte for byte"
+        );
+        assert!(cmd.contains("--wrapper"), "got: {cmd}");
+        assert!(cmd.contains("--instance-only"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_matching_slot_keeps_pre_allocated_session_id_and_fork_token() {
+        let parent = parent_instance("claude", Some("parent-uuid"));
+        let fork = parent.create_fork("f".to_string(), None).unwrap();
+        let new_id = fork.agent_session_id.clone().expect("fork allocates an id");
+
+        let (cmd, _) = fork
+            .build_pane_resume_plan("claude", "", true, RestartMode::Fresh, None)
+            .unwrap();
+        assert!(
+            cmd.contains("--fork-session"),
+            "expected the pending fork to still apply, got: {cmd}"
+        );
+        assert!(
+            cmd.contains(&new_id),
+            "expected the pre-allocated session id to still apply, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_a_later_slot_running_the_instance_tool_stays_secondary() {
+        // Two slots recording the same agent is the ordinary case (a user running
+        // `claude` in both halves of a split). The instance has one conversation
+        // id, one pending fork and one identity key, and slot 0 is what names the
+        // pane they belong to: a later slot recording the same agent must build
+        // from the bare binary and receive none of them.
+        let mut inst = claude_xats_instance();
+        inst.agent_session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+        inst.fork_pending = Some("22222222-2222-4222-8222-222222222222".to_string());
+        inst.extra_args = "--instance-only".to_string();
+        inst.xats_identity_key = Some("instance-key".to_string());
+
+        let (cmd, _) = inst
+            .build_pane_resume_plan("claude", "", false, RestartMode::Fresh, None)
+            .unwrap();
+        assert!(
+            cmd.contains("exec env claude"),
+            "expected the agent's own binary, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("11111111-1111-4111-8111-111111111111"),
+            "a second pane must not claim the instance's conversation id, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--fork-session")
+                && !cmd.contains("22222222-2222-4222-8222-222222222222"),
+            "a second pane must not replay the instance's pending fork, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--instance-only"),
+            "the instance's extra args describe its own pane only, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("instance-key"),
+            "a second pane must not claim the instance's identity, got: {cmd}"
+        );
+    }
+
     #[test]
     fn test_build_pane_resume_plan_unknown_safe_agent_uses_recorded_name_fresh() {
         // An unknown but safe agent name cannot be decorated; it degrades to a
@@ -3408,6 +3695,68 @@ mod tests {
             .unwrap();
         assert!(!resumed);
         assert_eq!(cmd, "mystery");
+    }
+
+    // --- Slots that did not come back after a rebuild ---
+
+    fn recovered_slot(slot: i64, agent: &str, cwd: &str, pane: &str) -> crate::db::AgentSlot {
+        crate::db::AgentSlot {
+            instance_id: "inst".to_string(),
+            slot,
+            agent: agent.to_string(),
+            native_session_id: String::new(),
+            cwd: cwd.to_string(),
+            tmux_pane: pane.to_string(),
+            xats_identity_key: String::new(),
+            last_seen_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_missing_slot_failures_names_the_agent_and_directory() {
+        let paired = vec![(
+            recovered_slot(1, "claude", "/tmp/other", "%9"),
+            Some("%9".to_string()),
+        )];
+        let live = std::collections::HashSet::new();
+
+        let failures = missing_slot_failures(&paired, &live);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, 0);
+        assert!(
+            failures[0].1.contains("claude") && failures[0].1.contains("/tmp/other"),
+            "the report must name what the user recognizes, got: {}",
+            failures[0].1
+        );
+    }
+
+    #[test]
+    fn test_missing_slot_failures_ignores_slots_whose_pane_is_still_there() {
+        let paired = vec![
+            (
+                recovered_slot(0, "claude", "/tmp/project", "%1"),
+                Some("%1".to_string()),
+            ),
+            (
+                recovered_slot(1, "shell", "/tmp/other", "%2"),
+                Some("%2".to_string()),
+            ),
+        ];
+        let live: std::collections::HashSet<String> = ["%1".to_string()].into_iter().collect();
+
+        let failures = missing_slot_failures(&paired, &live);
+        assert_eq!(failures.len(), 1, "only the vanished pane is reported");
+        assert_eq!(failures[0].0, 1);
+    }
+
+    #[test]
+    fn test_missing_slot_failures_skips_a_slot_that_never_got_a_pane() {
+        // Pane creation already failed for this slot and was reported as such;
+        // saying it twice would only repeat the same fact in a second voice.
+        let paired = vec![(recovered_slot(1, "claude", "/tmp/other", "%9"), None)];
+        let live = std::collections::HashSet::new();
+
+        assert!(missing_slot_failures(&paired, &live).is_empty());
     }
 
     #[test]

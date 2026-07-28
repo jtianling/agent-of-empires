@@ -180,6 +180,7 @@ pub struct TuiTestHarness {
     tmux_tmpdir: PathBuf,
     socket_path: PathBuf,
     spawned: bool,
+    extra_env: Vec<(String, String)>,
     control_client: Option<Child>,
     recording: bool,
     cast_path: Option<PathBuf>,
@@ -258,6 +259,7 @@ last_seen_version = "{}"
             tmux_tmpdir,
             socket_path,
             spawned: false,
+            extra_env: Vec::new(),
             control_client: None,
             recording,
             cast_path: None,
@@ -320,6 +322,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
             .expect("failed to run tmux new-session");
@@ -662,6 +665,14 @@ last_seen_version = "{}"
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod tool stub");
         }
+    }
+
+    /// Set an environment variable for the `aoe` process this harness spawns.
+    /// Must be called before `spawn_tui`. Scoped to one harness so a test that
+    /// needs unusual runtime behavior does not perturb the timing of every other
+    /// test in the suite.
+    pub fn set_env(&mut self, key: &str, value: &str) {
+        self.extra_env.push((key.to_string(), value.to_string()));
     }
 
     pub fn install_tool_stub(&self, name: &str) {

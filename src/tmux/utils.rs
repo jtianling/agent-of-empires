@@ -755,13 +755,18 @@ pub(crate) fn sanitize_session_name(name: &str) -> String {
         .collect()
 }
 
-/// Append `; set-option -p -t <target> remain-on-exit on` to an in-flight
+/// Append `; set-option -p -t <target> remain-on-exit on|off` to an in-flight
 /// tmux argument list so that remain-on-exit is set atomically with session
 /// creation. Using pane-level (`-p`) avoids bleeding into user-created panes
 /// in the same session.
 ///
+/// The value is always written, never left implicit: a pane can be respawned
+/// into an agent after having been created (or respawned) as something with the
+/// opposite setting, so "don't set it" would silently inherit the previous
+/// launch's value instead of describing what now runs there.
+///
 /// Note: the `-p` (pane-level) flag requires tmux >= 3.0.
-pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str) {
+pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str, on: bool) {
     args.extend([
         ";".to_string(),
         "set-option".to_string(),
@@ -769,8 +774,22 @@ pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str) {
         "-t".to_string(),
         target.to_string(),
         "remain-on-exit".to_string(),
-        "on".to_string(),
+        if on { "on" } else { "off" }.to_string(),
     ]);
+}
+
+/// Build the standalone `set-option -p -t <pane> remain-on-exit on|off` command
+/// arguments, for callers that need the option set on its own rather than
+/// appended to another tmux command.
+pub fn remain_on_exit_args(pane: &str, on: bool) -> Vec<String> {
+    vec![
+        "set-option".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        "remain-on-exit".to_string(),
+        if on { "on" } else { "off" }.to_string(),
+    ]
 }
 
 /// Command string for the session's `pane-died` hook: turn remain-on-exit off

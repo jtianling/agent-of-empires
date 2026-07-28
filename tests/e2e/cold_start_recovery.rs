@@ -95,11 +95,27 @@ fn run_record_pane(
     session_id: &str,
     cwd: &str,
 ) -> bool {
+    run_record_pane_as(h, tmux_pane, aoe_instance_id, "claude", session_id, cwd)
+}
+
+/// [`run_record_pane`] for a pane running `agent`, the way the hook reports a
+/// non-Claude agent. A slot's recorded agent is what recovery relaunches it as,
+/// so it is the interesting variable for an instance whose own tool differs.
+fn run_record_pane_as(
+    h: &TuiTestHarness,
+    tmux_pane: &str,
+    aoe_instance_id: &str,
+    agent: &str,
+    session_id: &str,
+    cwd: &str,
+) -> bool {
     let stdin_json = format!(
         "{{\"session_id\":\"{session_id}\",\"cwd\":\"{cwd}\",\"hook_event_name\":\"SessionStart\"}}"
     );
     let mut child = Command::new(h.binary_path())
         .arg("__record-pane")
+        .arg("--agent")
+        .arg(agent)
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")
@@ -123,15 +139,38 @@ fn run_record_pane(
         .success()
 }
 
-/// Add + start an instance whose primary agent is `tool`. The instance tool must
-/// match slot 0's recorded agent: recovery rebuilds the primary pane's resume
-/// command from `self.tool` (`get_tool_command()`), so a `--cmd-override` that
-/// swaps in a shell would suppress the `--resume <id>` these tests assert on. A
-/// long-lived stub for `tool` keeps the started primary pane alive to be tracked.
+/// Add + start an instance whose own tool is `tool`, with a long-lived stub for
+/// `tool` so the started primary pane stays alive to be tracked.
+///
+/// The instance tool no longer has to match slot 0's recorded agent: recovery
+/// builds each pane's command from the agent that pane's slot recorded, so
+/// `add_and_start(h, title, "shell")` plus [`SlotSeed`]s recording `claude` gives
+/// the shape a user gets by starting agents by hand inside a terminal session.
 fn add_and_start(h: &TuiTestHarness, title: &str, tool: &str) -> String {
+    add_and_start_with_command(h, title, tool, None)
+}
+
+/// [`add_and_start`], with `command` overriding the instance's agent binary the
+/// way `session.agent_command_override` does for a real user.
+///
+/// This is what decides `expects_shell()`, and with it whether the session's
+/// first pane is created holding itself open. The tool name alone cannot say:
+/// the `shell` agent's binary is the literal string `shell`, which is not one of
+/// the shells that predicate knows, so a shell-tool instance built without an
+/// override does not have the shape a terminal session on a real machine has.
+fn add_and_start_with_command(
+    h: &TuiTestHarness,
+    title: &str,
+    tool: &str,
+    command: Option<&str>,
+) -> String {
     h.install_tool_stub(tool);
     let project = h.project_path();
-    let add = h.run_cli(&["add", project.to_str().unwrap(), "-t", title, "-c", tool]);
+    let mut add_args = vec!["add", project.to_str().unwrap(), "-t", title, "-c", tool];
+    if let Some(command) = command {
+        add_args.extend(["--cmd-override", command]);
+    }
+    let add = h.run_cli(&add_args);
     assert!(
         add.status.success(),
         "aoe add failed: {}",
@@ -300,6 +339,27 @@ fn wait_for_slot0_rebound(db: &Path, instance_id: &str, old: &str) -> String {
     }
 }
 
+/// Wait until every persisted slot pane belongs to `live`, then return them in
+/// slot order.
+///
+/// Recovery writes each slot back as it launches it, so slot 0 being rebound
+/// says nothing about its siblings: reading the whole set on that signal can
+/// catch a fresh slot 0 beside a slot still holding its pre-recovery pane id.
+/// Membership in the live set is the property that actually distinguishes them.
+fn wait_for_slots_within(db: &Path, instance_id: &str, live: &[String]) -> Vec<String> {
+    let start = Instant::now();
+    loop {
+        let panes = slot_panes(db, instance_id);
+        if !panes.is_empty() && panes.iter().all(|pane| live.contains(pane)) {
+            return panes;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            return panes;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Seed a started instance with `slots.len()` tracked agent panes, each captured
 /// and reconciled into `agent_slot`, then return `(instance_id, session_name,
 /// project_cwd, old_pane_ids)`. The home-view TUI is left running (sized large so
@@ -310,18 +370,56 @@ fn seed_recoverable(
     slots: &[&str],
 ) -> (String, String, String, Vec<String>) {
     let instance_id = add_and_start(h, title, "claude");
-    let db = db_path(h);
     let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, title);
     let project = h.project_path().to_str().unwrap().to_string();
 
-    // Room for the pre-kill splits that establish the tracked panes.
-    h.resize_window(&session_name, 220, 60);
+    let seeds: Vec<SlotSeed> = slots
+        .iter()
+        .map(|native| SlotSeed {
+            agent: "claude",
+            native,
+            cwd: &project,
+        })
+        .collect();
+    let old_panes = seed_tracked_panes(h, &instance_id, &session_name, &seeds);
+    (instance_id, session_name, project, old_panes)
+}
 
-    let primary = h.tmux_display_message(&session_name, "#{pane_id}");
-    run_record_pane(h, &primary, &instance_id, slots[0], &project);
-    for sess in &slots[1..] {
-        let pane = h.split_window_get_pane(&session_name);
-        run_record_pane(h, &pane, &instance_id, sess, &project);
+/// One pane to track: the agent the hook reports, the native session id it
+/// captures, and the on-disk directory it runs in.
+struct SlotSeed<'a> {
+    agent: &'a str,
+    native: &'a str,
+    cwd: &'a str,
+}
+
+/// Track one pane per seed in a started instance: the first seed lands on the
+/// primary pane, the rest on splits. Leaves the home-view TUI running (sized
+/// large so the later recovery splits fit) and returns the persisted pane ids in
+/// slot order.
+fn seed_tracked_panes(
+    h: &mut TuiTestHarness,
+    instance_id: &str,
+    session_name: &str,
+    seeds: &[SlotSeed],
+) -> Vec<String> {
+    let db = db_path(h);
+
+    // Room for the pre-kill splits that establish the tracked panes.
+    h.resize_window(session_name, 220, 60);
+
+    let primary = h.tmux_display_message(session_name, "#{pane_id}");
+    run_record_pane_as(
+        h,
+        &primary,
+        instance_id,
+        seeds[0].agent,
+        seeds[0].native,
+        seeds[0].cwd,
+    );
+    for seed in &seeds[1..] {
+        let pane = h.split_window_get_pane(session_name);
+        run_record_pane_as(h, &pane, instance_id, seed.agent, seed.native, seed.cwd);
     }
 
     h.spawn_tui();
@@ -334,16 +432,16 @@ fn seed_recoverable(
         h,
         &db,
         &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
-        &slots.len().to_string(),
+        &seeds.len().to_string(),
     );
 
-    let old_panes = slot_panes(&db, &instance_id);
+    let old_panes = slot_panes(&db, instance_id);
     assert_eq!(
         old_panes.len(),
-        slots.len(),
+        seeds.len(),
         "precondition: one persisted slot per seeded pane"
     );
-    (instance_id, session_name, project, old_panes)
+    old_panes
 }
 
 /// Kill the managed session (simulating a reboot) and wait for the home view to
@@ -563,25 +661,7 @@ fn recover_preserves_nested_left_and_stacked_right_layout() {
         old_panes[0]
     );
 
-    let geometry = tmux(
-        &h,
-        &[
-            "list-panes",
-            "-t",
-            &session_name,
-            "-F",
-            "#{pane_left},#{pane_top},#{pane_width},#{pane_height}",
-        ],
-    );
-    let panes: Vec<Vec<u32>> = String::from_utf8_lossy(&geometry.stdout)
-        .lines()
-        .map(|line| {
-            line.split(',')
-                .map(|value| value.parse().unwrap())
-                .collect()
-        })
-        .collect();
-    assert_eq!(panes.len(), 3);
+    let panes = wait_for_pane_geometry(&h, &session_name, 3);
     let left = panes.iter().filter(|pane| pane[0] == 0).count();
     let right_left = panes.iter().map(|pane| pane[0]).max().unwrap();
     let right: Vec<&Vec<u32>> = panes.iter().filter(|pane| pane[0] == right_left).collect();
@@ -597,10 +677,7 @@ fn recover_preserves_nested_left_and_stacked_right_layout() {
     );
 
     let new_panes = slot_panes(&db, &instance_id);
-    let new_positions: Vec<(u32, u32)> = new_panes
-        .iter()
-        .map(|pane| pane_position(&h, pane))
-        .collect();
+    let new_positions = wait_for_slot_positions(&h, &new_panes, &old_positions);
     assert_eq!(
         new_positions, old_positions,
         "each durable slot must return to its original spatial position"
@@ -1160,4 +1237,561 @@ fn clean_recovery_survives_an_agent_that_exits_immediately() {
         !cmd.contains("--resume"),
         "clean recovery must still launch without a resume flag, got {cmd:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: A tracked pane relaunches as the agent its slot recorded
+//   An instance whose own tool is a shell with an agent adopted into every slot:
+//   the shape a user gets by starting agents by hand inside a terminal session.
+//   Slot 0 used to be rebuilt from the instance's tool, so it came back running
+//   the shell where an agent belonged, while slot 1 came back correctly.
+// ---------------------------------------------------------------------------
+
+/// A recovery settle short enough that a test can wait it out, for tests whose
+/// subject is not the settle itself.
+const SHORT_SETTLE: Duration = Duration::from_millis(300);
+
+#[test]
+#[serial]
+fn recover_relaunches_an_adopted_slot_as_its_agent_not_the_instance_tool() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_adopted_shell");
+    h.set_env(
+        "AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS",
+        &SHORT_SETTLE.as_millis().to_string(),
+    );
+    h.install_tool_stub("claude");
+    let other = h.home_path().join("other-dir");
+    std::fs::create_dir_all(&other).expect("create the second slot's cwd");
+    let other = other.to_str().unwrap().to_string();
+    let project = h.project_path().to_str().unwrap().to_string();
+
+    let instance_id = add_and_start(&h, "Adopted Shell", "shell");
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Adopted Shell");
+    let db = db_path(&h);
+
+    let left = "cf75f4aa-4812-4bfc-9f88-075d3824b5fa";
+    let right = "55245107-81ba-4b3e-b740-247d27802d3f";
+    let old_panes = seed_tracked_panes(
+        &mut h,
+        &instance_id,
+        &session_name,
+        &[
+            SlotSeed {
+                agent: "claude",
+                native: left,
+                cwd: &project,
+            },
+            SlotSeed {
+                agent: "claude",
+                native: right,
+                cwd: &other,
+            },
+        ],
+    );
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    let new_panes = slot_panes(&db, &instance_id);
+    assert_eq!(new_panes.len(), 2, "both slots must be written back");
+
+    // Slot 0 is the interesting one: the instance's own tool describes nothing
+    // about the agent the user started in that pane.
+    wait_for_pane_start_command_contains(&h, &new_panes[0], &format!("claude --resume {left}"));
+    wait_for_pane_start_command_contains(&h, &new_panes[1], &format!("claude --resume {right}"));
+
+    let live = session_pane_ids(&h, &session_name);
+    assert!(
+        live.contains(&new_panes[0]) && live.contains(&new_panes[1]),
+        "both adopted agents must still be there after recovery, got {live:?}"
+    );
+
+    // Recovery writes the new pane ids back before it settles and checks which
+    // slots came back, so asserting the absence of a report right after the
+    // write-back would assert it against a check that has not run yet. Wait out
+    // the (shortened) settle first so the absence means what it says.
+    std::thread::sleep(SHORT_SETTLE * 4);
+    assert_eq!(
+        lost_events(&db, &instance_id),
+        "",
+        "a recovery where every pane is present must report no failure"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: A tracked pane relaunches as the agent its slot recorded
+//   The same shape as above, but for the instance a user actually has: one whose
+//   command is a real shell. Recovery kills each pane's process tree from
+//   outside tmux before respawning it, and the session's first pane used to be
+//   created without remain-on-exit whenever the instance expected a shell -- so
+//   that kill destroyed the pane and the respawn had nothing to target. With one
+//   slot the destroyed pane is the session's only pane, so the session went with
+//   it and recovery looked like it had done nothing at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn recover_relaunches_the_only_slot_of_a_shell_command_instance() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_shell_command");
+    h.set_env(
+        "AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS",
+        &SHORT_SETTLE.as_millis().to_string(),
+    );
+    h.install_tool_stub("claude");
+    let project = h.project_path().to_str().unwrap().to_string();
+
+    let instance_id = add_and_start_with_command(&h, "Shell Command", "shell", Some("/bin/sh"));
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Shell Command");
+    let db = db_path(&h);
+
+    let native = "3f6d4c21-9b7e-4a55-8c10-2d9e6b4f7a83";
+    let old_panes = seed_tracked_panes(
+        &mut h,
+        &instance_id,
+        &session_name,
+        &[SlotSeed {
+            agent: "claude",
+            native,
+            cwd: &project,
+        }],
+    );
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    wait_for_pane_start_command_contains(&h, &new_slot0, &format!("claude --resume {native}"));
+
+    let live = session_pane_ids(&h, &session_name);
+    assert_eq!(
+        live,
+        vec![new_slot0.clone()],
+        "the instance's only slot must still be there after recovery"
+    );
+
+    std::thread::sleep(SHORT_SETTLE * 4);
+    assert_eq!(
+        lost_events(&db, &instance_id),
+        "",
+        "a recovery where every pane is present must report no failure"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: Recovery reports slots that did not come back
+//   A pane that is created, respawned and then disappears is invisible to the
+//   launch outcomes, so recovery used to hand back fewer panes than the user had
+//   and still report success.
+// ---------------------------------------------------------------------------
+
+/// The `lost` events recorded for an instance, one `slot|detail` line each.
+fn lost_events(db: &Path, instance_id: &str) -> String {
+    sqlite_query(
+        db,
+        &format!(
+            "SELECT slot || '|' || detail FROM events \
+             WHERE instance_id='{instance_id}' AND kind='lost';"
+        ),
+    )
+}
+
+#[test]
+#[serial]
+fn recovery_reports_a_slot_whose_pane_disappears() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("cold_start_lost_pane");
+    // Whether the relaunched pane has died by the time recovery decides which
+    // slots came back depends on process scheduling, so under load the default
+    // window can close first. Widen it for this test alone: recovery's settle is
+    // a blocking wait, and lengthening it for every test perturbs the timing of
+    // the whole suite.
+    h.set_env("AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS", "3000");
+    let instance_id = add_and_start(&h, "Lost Pane", "claude");
+    let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, "Lost Pane");
+    let db = db_path(&h);
+    let project = h.project_path().to_str().unwrap().to_string();
+
+    // Slot 1 is a shell pane adopted next to the agent. Its recorded binary
+    // exits at once here, so the pane closes moments after recovery respawns it
+    // -- surviving its own relaunch, then vanishing.
+    h.install_exiting_tool_stub("shell", 0);
+
+    let old_panes = seed_tracked_panes(
+        &mut h,
+        &instance_id,
+        &session_name,
+        &[
+            SlotSeed {
+                agent: "claude",
+                native: "99999999-9999-4999-8999-999999999990",
+                cwd: &project,
+            },
+            SlotSeed {
+                agent: "shell",
+                native: "99999999-9999-4999-8999-999999999991",
+                cwd: &project,
+            },
+        ],
+    );
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    wait_for_count(
+        &h,
+        &db,
+        &format!("SELECT count(*) FROM events WHERE instance_id='{instance_id}' AND kind='lost';"),
+        "1",
+    );
+
+    let reported = lost_events(&db, &instance_id);
+    assert!(
+        reported.starts_with("1|") && reported.contains("shell") && reported.contains(&project),
+        "the report must name the slot by the agent and directory it recorded, got {reported:?}"
+    );
+
+    let new_panes = slot_panes(&db, &instance_id);
+    let live = session_pane_ids(&h, &session_name);
+    assert!(
+        live.contains(&new_panes[0]),
+        "the surviving sibling must still be there, got {live:?}"
+    );
+    assert!(
+        !live.contains(&new_panes[1]),
+        "the reported slot's pane really is gone, got {live:?}"
+    );
+    assert_eq!(
+        live.len(),
+        1,
+        "a missing pane must not be relaunched or recreated, got {live:?}"
+    );
+}
+
+// ===========================================================================
+// INDEPENDENT ACCEPTANCE (tester) -- written from the spec, not from the
+// implementer's own tests. Covers the three gaps the implementer flagged:
+//   1. multi-slot shell-command instance, layout preserved
+//   2. remain-on-exit after relaunch describes the pane's own agent
+//   3. the C (clean) path, not just R
+// ===========================================================================
+
+const AT_SETTLE: Duration = Duration::from_millis(300);
+
+/// Pane-level `remain-on-exit` as tmux reports it, or `""` when the option is
+/// not set on the pane at all. The distinction matters: "not set" is exactly
+/// the state a relaunch leaves behind when it declines to write the value.
+fn pane_remain_on_exit(h: &TuiTestHarness, pane: &str) -> String {
+    let out = tmux(h, &["show-options", "-p", "-t", pane, "remain-on-exit"]);
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Persisted `agent_slot.agent` values for an instance, in ascending slot order
+/// (aligned element-for-element with [`slot_panes`]).
+fn slot_agents(db: &Path, instance_id: &str) -> Vec<String> {
+    sqlite_query(
+        db,
+        &format!("SELECT agent FROM agent_slot WHERE instance_id='{instance_id}' ORDER BY slot;"),
+    )
+    .lines()
+    .filter(|l| !l.trim().is_empty())
+    .map(str::to_string)
+    .collect()
+}
+
+/// Assert that the set of seeded conversation ids survived recovery exactly
+/// once. Slot numbers are assigned by ascending pane index, not by the order a
+/// test seeded them, so only the set is meaningful across the boundary.
+fn assert_same_natives(db: &Path, instance_id: &str, seeded: &[&str]) {
+    let mut got: Vec<String> = slot_natives(db, instance_id);
+    let mut want: Vec<String> = seeded.iter().map(|s| s.to_string()).collect();
+    got.sort();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "every seeded conversation must survive recovery exactly once"
+    );
+}
+
+/// A shell-command instance (`expects_shell()` true) with `agents.len()` tracked
+/// slots, seeded and cold-started. Returns `(instance_id, session, db, old_panes)`.
+fn at_seed_shell_instance(
+    h: &mut TuiTestHarness,
+    title: &str,
+    agents: &[&str],
+    natives: &[&str],
+) -> (String, String, PathBuf, Vec<String>) {
+    h.set_env(
+        "AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS",
+        &AT_SETTLE.as_millis().to_string(),
+    );
+    h.install_tool_stub("claude");
+    let project = h.project_path().to_str().unwrap().to_string();
+    let instance_id = add_and_start_with_command(h, title, "shell", Some("/bin/sh"));
+    for agent in agents {
+        if *agent != "shell" {
+            h.install_tool_stub(agent);
+        }
+    }
+    let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, title);
+    let db = db_path(h);
+    let seeds: Vec<SlotSeed> = agents
+        .iter()
+        .zip(natives.iter())
+        .map(|(agent, native)| SlotSeed {
+            agent,
+            native,
+            cwd: &project,
+        })
+        .collect();
+    let old_panes = seed_tracked_panes(h, &instance_id, &session_name, &seeds);
+    (instance_id, session_name, db, old_panes)
+}
+
+/// AT-1: three slots on an instance whose command is a real shell. Every slot
+/// must come back as the agent it recorded, in the position it held.
+#[test]
+#[serial]
+fn at_shell_command_instance_recovers_all_three_slots_and_layout() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_shell_three_slots");
+    let natives = [
+        "a1a1a1a1-1111-4111-8111-111111111111",
+        "b2b2b2b2-2222-4222-8222-222222222222",
+        "c3c3c3c3-3333-4333-8333-333333333333",
+    ];
+    let (instance_id, session_name, db, old_panes) = at_seed_shell_instance(
+        &mut h,
+        "AT Shell Three",
+        &["claude", "claude", "claude"],
+        &natives,
+    );
+    let old_positions: Vec<(u32, u32)> = old_panes.iter().map(|p| pane_position(&h, p)).collect();
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    let new_panes = slot_panes(&db, &instance_id);
+    assert_eq!(new_panes.len(), 3, "every slot must be written back");
+
+    wait_for_pane_geometry(&h, &session_name, 3);
+    let live = session_pane_ids(&h, &session_name);
+    assert_eq!(
+        live.len(),
+        3,
+        "a shell-command instance must not lose panes to the relaunch, got {live:?}"
+    );
+    assert_same_natives(&db, &instance_id, &natives);
+    let new_natives = slot_natives(&db, &instance_id);
+    for (i, pane) in new_panes.iter().enumerate() {
+        assert!(
+            live.contains(pane),
+            "slot {i} pane {pane} is gone: {live:?}"
+        );
+        wait_for_pane_start_command_contains(
+            &h,
+            pane,
+            &format!("claude --resume {}", new_natives[i]),
+        );
+    }
+
+    let new_positions = wait_for_slot_positions(&h, &new_panes, &old_positions);
+    assert_eq!(
+        new_positions, old_positions,
+        "each slot must return to the position it held before the cold start"
+    );
+
+    std::thread::sleep(AT_SETTLE * 5);
+    assert_eq!(
+        lost_events(&db, &instance_id),
+        "",
+        "no slot went missing, so nothing may be reported lost"
+    );
+}
+
+/// AT-2: the relaunch must leave remain-on-exit describing the agent that now
+/// runs in the pane -- on for an agent pane, off for a shell pane. Holding the
+/// pane open across the kill is a means, not the end state.
+#[test]
+#[serial]
+fn at_relaunched_pane_remain_on_exit_matches_its_own_agent() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_remain_on_exit");
+    let natives = [
+        "d4d4d4d4-4444-4444-8444-444444444444",
+        "e5e5e5e5-5555-4555-8555-555555555555",
+    ];
+    let (instance_id, session_name, db, old_panes) =
+        at_seed_shell_instance(&mut h, "AT Remain", &["claude", "shell"], &natives);
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+
+    let new_panes = slot_panes(&db, &instance_id);
+    assert_eq!(new_panes.len(), 2);
+    wait_for_pane_geometry(&h, &session_name, 2);
+
+    // Slot numbers follow pane index, not seed order, so read back which slot
+    // ended up recording which agent instead of assuming.
+    let agents = slot_agents(&db, &instance_id);
+    let mut sorted = agents.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["claude".to_string(), "shell".to_string()]);
+
+    for (i, agent) in agents.iter().enumerate() {
+        let pane = &new_panes[i];
+        let (needle, want) = match agent.as_str() {
+            "claude" => ("claude --resume", "on"),
+            _ => ("shell", "off"),
+        };
+        wait_for_pane_start_command_contains(&h, pane, needle);
+        assert_eq!(
+            pane_remain_on_exit(&h, pane),
+            want,
+            "slot {i} runs {agent}, so its remain-on-exit must be {want}: an agent pane \
+             is held open when its process exits, a shell pane closes with the user's \
+             shell instead of being stuck open by the setting the relaunch used to \
+             survive its own kill"
+        );
+    }
+
+    std::thread::sleep(AT_SETTLE * 5);
+    assert_eq!(lost_events(&db, &instance_id), "", "no slot went missing");
+}
+
+/// AT-3: the C (clean) path on the shape where losing the pane loses the whole
+/// session -- a shell-command instance with a single slot. The implementer
+/// covered this shape on R only.
+#[test]
+#[serial]
+fn at_clean_recovery_of_a_single_slot_shell_command_instance() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_clean_single_shell");
+    let natives = ["f6f6f6f6-6666-4666-8666-666666666666"];
+    let (instance_id, session_name, db, old_panes) =
+        at_seed_shell_instance(&mut h, "AT Clean Single", &["claude"], &natives);
+
+    cold_start(&h, &session_name);
+    h.assert_screen_contains("Clean Rec");
+    h.send_keys("C");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "clean recovery did not run");
+
+    assert!(
+        session_exists(&h, &session_name),
+        "clean recovery must leave the session alive"
+    );
+    let live = session_pane_ids(&h, &session_name);
+    assert_eq!(
+        live,
+        vec![new_slot0.clone()],
+        "the only slot must still be there after a clean recovery, got {live:?}"
+    );
+
+    let cmd = wait_for_launched_claude_command(&h, &new_slot0);
+    assert!(
+        !cmd.contains("--resume") && !cmd.contains(natives[0]),
+        "clean recovery must launch fresh, got {cmd:?}"
+    );
+    assert!(
+        !cmd.contains("/bin/sh"),
+        "the instance's shell override must not replace the slot's agent, got {cmd:?}"
+    );
+
+    std::thread::sleep(AT_SETTLE * 5);
+    assert_eq!(lost_events(&db, &instance_id), "", "no slot went missing");
+}
+
+/// AT-4: the C path with more than one slot on the same shape.
+#[test]
+#[serial]
+fn at_clean_recovery_of_a_multi_slot_shell_command_instance() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_clean_multi_shell");
+    let natives = [
+        "17171717-7777-4777-8777-777777777777",
+        "18181818-8888-4888-8888-888888888888",
+    ];
+    let (instance_id, session_name, db, old_panes) =
+        at_seed_shell_instance(&mut h, "AT Clean Multi", &["claude", "claude"], &natives);
+
+    cold_start(&h, &session_name);
+    h.send_keys("C");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    assert_ne!(new_slot0, old_panes[0], "clean recovery did not run");
+
+    wait_for_pane_geometry(&h, &session_name, 2);
+    let live = session_pane_ids(&h, &session_name);
+    assert_eq!(
+        live.len(),
+        2,
+        "clean recovery must rebuild one live pane per slot, got {live:?}"
+    );
+
+    // Slot 0 rebinding does not mean every slot has been written back: recovery
+    // writes each slot as it launches it, so reading the whole set on slot 0's
+    // signal can catch a new slot 0 next to a stale sibling.
+    let new_panes = wait_for_slots_within(&db, &instance_id, &live);
+    assert_eq!(new_panes.len(), 2);
+    for (i, pane) in new_panes.iter().enumerate() {
+        assert!(
+            live.contains(pane),
+            "slot {i} pane {pane} is gone: {live:?}"
+        );
+        let cmd = wait_for_launched_claude_command(&h, pane);
+        assert!(
+            !cmd.contains("--resume"),
+            "slot {i} must launch fresh: {cmd:?}"
+        );
+        for native in &natives {
+            assert!(
+                !cmd.contains(native),
+                "slot {i} must carry no persisted conversation id, got {cmd:?}"
+            );
+        }
+        assert!(
+            !cmd.contains("/bin/sh"),
+            "the instance's shell override must not replace the slot's agent, got {cmd:?}"
+        );
+    }
+
+    std::thread::sleep(AT_SETTLE * 5);
+    assert_eq!(lost_events(&db, &instance_id), "", "no slot went missing");
 }

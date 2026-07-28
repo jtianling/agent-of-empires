@@ -80,9 +80,7 @@ impl Session {
         }
 
         let mut args = build_create_args(&self.name, working_dir, command, size);
-        if remain_on_exit {
-            append_remain_on_exit_args(&mut args, &self.name);
-        }
+        append_remain_on_exit_args(&mut args, &self.name, remain_on_exit);
         append_pane_died_hook_args(&mut args, &self.name);
         append_store_pane_id_args(&mut args, &self.name);
         append_store_project_path_args(&mut args, &self.name, working_dir);
@@ -405,9 +403,7 @@ pub fn respawn_pane_target(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    if remain_on_exit {
-        append_remain_on_exit_args(&mut args, pane);
-    }
+    append_remain_on_exit_args(&mut args, pane, remain_on_exit);
 
     let output = crate::tmux::tmux_command().args(&args).output()?;
 
@@ -425,6 +421,35 @@ pub fn kill_pane_process_tree_target(pane: &str) {
     if let Some(pid) = process::get_pane_pid(pane) {
         process::kill_process_tree(pid);
     }
+}
+
+/// Set `remain-on-exit` on one pane on its own.
+///
+/// Killing a pane's process from outside tmux only leaves the pane behind when
+/// remain-on-exit is on; with it off tmux destroys the pane the moment the
+/// process goes, and anything that meant to respawn into that pane has nothing
+/// left to target. A caller that kills a pane in order to relaunch it therefore
+/// has to establish that itself rather than assume how the pane was created.
+///
+/// The result is reported rather than swallowed precisely because callers rely
+/// on it as a precondition: a caller that kills the pane's process anyway after
+/// this failed would destroy the pane it meant to protect.
+pub fn set_pane_remain_on_exit(pane: &str, on: bool) -> Result<()> {
+    let output = crate::tmux::tmux_command()
+        .args(super::utils::remain_on_exit_args(pane, on))
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Failed to set remain-on-exit={} on pane {}: {}",
+            if on { "on" } else { "off" },
+            pane,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
 }
 
 /// Send raw key strings to an explicit tmux pane target. No-op for empty input.
@@ -471,9 +496,7 @@ pub fn split_window_right(
     // Set remain-on-exit on the new (right) pane. After split-window the new
     // pane is the active pane, so we can target it without an explicit pane ID
     // by using the session name (which resolves to the active pane).
-    if remain_on_exit {
-        append_remain_on_exit_args(&mut args, session_name);
-    }
+    append_remain_on_exit_args(&mut args, session_name, remain_on_exit);
 
     // Select the original (left) pane back so that the user lands on the agent pane
     args.extend([
@@ -510,7 +533,7 @@ pub fn split_window_right_capture_pane(
     command: &str,
     remain_on_exit: bool,
 ) -> Result<String> {
-    let mut args = vec![
+    let args = vec![
         "split-window".to_string(),
         "-h".to_string(),
         "-P".to_string(),
@@ -523,10 +546,6 @@ pub fn split_window_right_capture_pane(
         command.to_string(),
     ];
 
-    if remain_on_exit {
-        append_remain_on_exit_args(&mut args, target_pane);
-    }
-
     let output = crate::tmux::tmux_command().args(&args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -534,15 +553,23 @@ pub fn split_window_right_capture_pane(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match stdout
+    let pane_id = match stdout
         .lines()
         .next()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(pane_id) => Ok(pane_id.to_string()),
+        Some(pane_id) => pane_id.to_string(),
         None => bail!("split-window did not report a pane id"),
-    }
+    };
+
+    // Written to the pane the split produced, not to the one it was split from.
+    // The option cannot ride along on the `split-window` command itself: its
+    // only pane target there is the split source, so setting it in the same
+    // invocation writes the new pane's setting onto the old pane.
+    set_pane_remain_on_exit(&pane_id, remain_on_exit)?;
+
+    Ok(pane_id)
 }
 
 /// Read the active window's serialized layout for one session.
@@ -1077,6 +1104,82 @@ mod tests {
     fn test_send_keys_to_pane_target_empty_is_noop() {
         // Empty key list returns Ok without invoking tmux against a real pane.
         assert!(send_keys_to_pane_target("%nonexistent", &[]).is_ok());
+    }
+
+    /// The split's `remain_on_exit` describes the pane the split produced. The
+    /// only pane `split-window` can target is the pane being split, so setting
+    /// the option in that same invocation writes the new pane's value onto the
+    /// old one -- silently, and in the direction that matters: it turns the
+    /// source pane's protection off.
+    #[test]
+    #[serial_test::serial]
+    fn test_split_capture_pane_sets_remain_on_exit_on_the_new_pane_only() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        crate::tmux::isolate_tmux_socket();
+
+        let session_name = format!("aoe_test_split_remain_{}", std::process::id());
+        let created = crate::tmux::tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session_name,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sleep 30",
+            ])
+            .output()
+            .expect("tmux new-session");
+        assert!(created.status.success());
+
+        let source_pane = crate::tmux::tmux_command()
+            .args(["display-message", "-t", &session_name, "-p", "#{pane_id}"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .expect("pane id");
+
+        // The source pane is protected, as a pane awaiting relaunch is.
+        set_pane_remain_on_exit(&source_pane, true).expect("hold source pane open");
+
+        let new_pane = split_window_right_capture_pane(&source_pane, "/tmp", "sleep 30", false)
+            .expect("split window");
+        assert_ne!(new_pane, source_pane);
+
+        let read = |pane: &str| {
+            crate::tmux::tmux_command()
+                .args(["show-options", "-p", "-t", pane, "remain-on-exit"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_string()
+        };
+
+        assert_eq!(
+            read(&new_pane),
+            "off",
+            "the new pane takes the split's value"
+        );
+        assert_eq!(
+            read(&source_pane),
+            "on",
+            "the source pane keeps its own setting: writing the split's value \
+             onto it would drop the protection a pending relaunch depends on"
+        );
+
+        let _ = crate::tmux::tmux_command()
+            .args(["kill-session", "-t", &session_name])
+            .output();
     }
 
     #[test]
