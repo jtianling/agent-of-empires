@@ -73,6 +73,12 @@ The gap this leaves converges rather than persisting, because the daemon binds t
 
 So the cost of a hand-started pane is one extra manual registration, not permanent exclusion. The convergence step depends on the agent following the startup hint, which is the same natural-language link the Risks section already calls the most fragile in the chain; a hand-started pane simply passes through it once more.
 
+**Step 2 above is conditional on the daemon half having shipped, and was written here as though it were unconditional.** Correction confirmed against the live daemon on 2026-07-28: the key is attached only if the registration that follows the fallback *carries* the key, and the only thing that tells an agent to carry it is the startup hint's identity branch. Until that branch is in the proxy an agent actually runs, the fallback registration goes out without a key, the key stays unbound, and the next restart falls back again -- with nothing reporting an error at either end. That is a loop, not a convergence, and it is worse than a plain failure because it looks like progress.
+
+Two facts that make this concrete rather than theoretical. The daemon already serves `identity_key` on both `register_agent` and `reconnect`; what is missing is only the hint that tells an agent to use it, which is written but unreleased. And the binding count on the live database is zero out of 540 identities, so no identity has ever converged by this path.
+
+The consequence for anything reading this document: do not treat "the first run reports register normally" as the documented one-time step until an agent's own startup hint mentions the identity key. Before then it is the loop above.
+
 ### Decision 5: Injection is unconditional, not restart-specific
 
 Whenever Cross Agent Team is enabled for a pane, the key is injected. It is injected on the very first launch, on resume, on clean restart, and on both recovery modes.
