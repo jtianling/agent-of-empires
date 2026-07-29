@@ -27,4 +27,4 @@
 - [x] 5.1 Run `cargo fmt`, `cargo clippy`, `cargo test --lib`, and `cargo test --test e2e` with all tmux-touching tests confined to the project harness's private socket.
 - [x] 5.2 Run `openspec validate track-codex-agent-panes --strict`.
 - [ ] 5.3 On the real machine, install and then run a Codex session with the hook trusted, and verify a `pane_live` row appears carrying the thread id. This is the only step that can answer whether a hook command Codex spawns inherits `$CODEX_THREAD_ID` (see Open Questions); reading the binary cannot. **Needs the user: the trust prompt is theirs to answer.**
-- [ ] 5.4 Verify `~/.codex/config.toml` is byte-identical before and after install, since this change claims not to write it. **Same session as 5.3.**
+- [ ] 5.4 Verify `~/.codex/config.toml` gains no AoE hook entry. **Same session as 5.3.** Not a whole-file comparison: Codex rewrites that file on its own -- observed on 2026-07-29, plugin paths and a `last_updated` stamp changing with no AoE involvement -- so a hash check reports a difference whatever AoE does. The invariant is that no `[hooks]` section and no `aoe-hooks` marker ever appears in it.
