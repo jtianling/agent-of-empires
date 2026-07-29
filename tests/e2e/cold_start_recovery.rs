@@ -2004,3 +2004,341 @@ fn at_cat_recovery_decorates_each_pane_and_types_into_no_other() {
          Claude pane this flow launched -- it must receive no keystroke. got {received:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// AT-B3: independent acceptance tests (batch 3, tester).
+// Focus: shell-launched codex recovery (slot path and no-slot path), the
+// default-command guard, and identity-key injection for adopted codex slots.
+// ---------------------------------------------------------------------------
+
+/// AT-B3-1: the dispatched headline form, slot path. A shell-command instance
+/// whose tracked slots record a shell and a codex conversation must bring the
+/// codex pane back with `codex resume <its own thread id>`, and remain-on-exit
+/// must describe each pane's own agent afterwards.
+#[test]
+#[serial]
+fn at_b3_shell_instance_recovers_codex_slot_as_codex() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_b3_shell_codex_slot");
+    let natives = [
+        "5be11000-0000-4000-8000-000000000000",
+        "019d1af9-b3b3-4333-8333-333333333333",
+    ];
+    let (instance_id, session_name, db, old_panes) =
+        at_seed_shell_instance(&mut h, "AT B3 Shell Codex", &["shell", "codex"], &natives);
+    assert_eq!(old_panes.len(), 2);
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let _ = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    let new_panes = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
+    let agents = slot_agents(&db, &instance_id);
+    let new_natives = slot_natives(&db, &instance_id);
+
+    let codex_at = agents
+        .iter()
+        .position(|a| a == "codex")
+        .expect("a slot must still record codex after recovery");
+    let shell_at = agents
+        .iter()
+        .position(|a| a == "shell")
+        .expect("a slot must still record shell after recovery");
+
+    wait_for_pane_start_command_contains(
+        &h,
+        &new_panes[codex_at],
+        &format!("codex resume {}", new_natives[codex_at]),
+    );
+    let codex_cmd = pane_start_command(&h, &new_panes[codex_at]);
+    assert!(
+        !codex_cmd.contains("claude"),
+        "the codex slot must not be relaunched as claude, got {codex_cmd:?}"
+    );
+    let shell_cmd = pane_start_command(&h, &new_panes[shell_at]);
+    assert!(
+        !shell_cmd.contains("codex") && !shell_cmd.contains("claude"),
+        "the shell slot must come back as a shell, got {shell_cmd:?}"
+    );
+
+    assert_eq!(
+        pane_remain_on_exit(&h, &new_panes[codex_at]),
+        "on",
+        "a relaunched codex pane must keep remain-on-exit on"
+    );
+    assert_eq!(
+        pane_remain_on_exit(&h, &new_panes[shell_at]),
+        "off",
+        "a relaunched shell pane must have remain-on-exit off"
+    );
+}
+
+/// AT-B3-2: what the Cross Agent Team flag does on a shell instance -- nothing.
+/// `is_cross_agent_team()` gates on the INSTANCE tool being claude/codex, so a
+/// shell instance's adopted codex slot resumes its conversation but gets no
+/// xats bootstrap and no identity key, and none is minted for the slot. This
+/// pins that semantics; the acceptance report carries what it means for
+/// hand-launched agents in shell sessions.
+#[test]
+#[serial]
+fn at_b3_cat_flag_on_a_shell_instance_is_structurally_inert() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_b3_cat_codex_key");
+    h.set_env(
+        "AGENT_OF_EMPIRES_RECOVERY_SETTLE_MS",
+        &AT_SETTLE.as_millis().to_string(),
+    );
+    h.install_tool_stub("claude");
+    h.install_tool_stub("codex");
+    let project = h.project_path().to_str().unwrap().to_string();
+    let title = "AT B3 CAT Codex";
+
+    let add = h.run_cli(&[
+        "add",
+        &project,
+        "-t",
+        title,
+        "-c",
+        "shell",
+        "--cmd-override",
+        "/bin/sh",
+    ]);
+    assert!(
+        add.status.success(),
+        "aoe add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let sessions_path = if cfg!(target_os = "linux") {
+        h.home_path()
+            .join(".config/agent-of-empires/profiles/default/sessions.json")
+    } else {
+        h.home_path()
+            .join(".agent-of-empires/profiles/default/sessions.json")
+    };
+    let content = std::fs::read_to_string(&sessions_path).expect("read sessions.json");
+    let mut sessions: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let instance_id = {
+        let session = sessions
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|s| s["title"] == title)
+            .expect("created session");
+        session["cross_agent_team"] = serde_json::Value::Bool(true);
+        session["id"].as_str().unwrap().to_string()
+    };
+    std::fs::write(
+        &sessions_path,
+        serde_json::to_string_pretty(&sessions).unwrap(),
+    )
+    .expect("enable Cross Agent Team");
+    let start = h.run_cli_in_tmux(&["session", "start", title]);
+    assert!(
+        start.status.success(),
+        "aoe session start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, title);
+    let db = db_path(&h);
+    let native = "019d1af9-c4c4-4444-8444-444444444444";
+    let seeds = [SlotSeed {
+        agent: "codex",
+        native,
+        cwd: &project,
+    }];
+    let old_panes = seed_tracked_panes(&mut h, &instance_id, &session_name, &seeds);
+
+    cold_start(&h, &session_name);
+    h.send_keys("R");
+
+    let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
+    wait_for_pane_start_command_contains(&h, &new_slot0, &format!("resume {native}"));
+    let cmd = pane_start_command(&h, &new_slot0);
+
+    // Shipped semantics, pinned: `is_cross_agent_team()` requires the INSTANCE
+    // tool to be claude/codex, so a shell instance's flag is structurally inert.
+    // The adopted codex slot resumes its conversation but receives neither the
+    // xats bootstrap nor an identity key, and no key is minted for the slot.
+    // (The new-session dialog hides the CAT field for shell, so this state is
+    // only reachable by editing the store -- which is also how the flag default
+    // could reach it.) The acceptance report carries the implication.
+    assert!(
+        !cmd.contains("--remote"),
+        "shipped: a shell instance takes no CAT integration, got {cmd:?}"
+    );
+    assert!(
+        !cmd.contains("XATS_IDENTITY_KEY"),
+        "shipped: a shell instance injects no identity key, got {cmd:?}"
+    );
+    let persisted = sqlite_query(
+        &db,
+        &format!(
+            "SELECT xats_identity_key FROM agent_slot \
+             WHERE instance_id='{instance_id}' AND slot=0;"
+        ),
+    );
+    assert_eq!(
+        persisted, "",
+        "shipped: no key is minted for an adopted slot of a shell instance"
+    );
+}
+
+/// AT-B3-3: R on a live shell-override instance with no tracked slots -- the
+/// exact shape of every real shell session on the reporting machine (command
+/// `/bin/zsh`, hooks not yet installed, so no slots).
+///
+/// Two things must hold. The session must survive the restart: a shell pane is
+/// created with remain-on-exit off, and until `43bbd087` the no-slot path
+/// killed the pane's process tree before respawning, so the single-pane
+/// session died with its pane and R destroyed what it was asked to restart.
+/// And the pane must come back as its override: the instance carries a
+/// command override, so the restart relaunches that override and never reads
+/// the pane -- even when the pane demonstrably runs codex.
+#[test]
+#[serial]
+fn at_b3_r_on_a_live_no_slot_shell_instance_relaunches_its_override() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_b3_override_skips");
+    let instance_id = add_and_start_with_command(&h, "AT B3 Override", "shell", Some("/bin/sh"));
+    let db = db_path(&h);
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "AT B3 Override");
+
+    let Some(codex_bin) = h.install_native_stub("codex") else {
+        eprintln!("Skipping test: no C compiler to build a native stub");
+        return;
+    };
+
+    h.spawn_tui();
+    h.wait_for("Agent of Empires");
+    assert_eq!(
+        sqlite_query(
+            &db,
+            &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
+        ),
+        "0",
+        "precondition: no tracked slots"
+    );
+
+    // The hand-off: the pane now runs codex, and nothing recorded it.
+    let primary = h.tmux_display_message(&session_name, "#{pane_id}");
+    let respawn = tmux(
+        &h,
+        &[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &primary,
+            codex_bin.to_str().unwrap(),
+        ],
+    );
+    assert!(respawn.status.success());
+    let start = Instant::now();
+    loop {
+        if h.tmux_display_message(&primary, "#{pane_current_command}") == "codex" {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the pane never came up running codex"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    h.send_keys("R");
+
+    wait_for_pane_start_command_contains(&h, &primary, "sh");
+    assert!(
+        session_exists(&h, &session_name),
+        "the restart must not destroy the session it restarts"
+    );
+    let cmd = pane_start_command(&h, &primary);
+    assert!(
+        !cmd.contains("codex"),
+        "a command-override instance relaunches its override and never reads \
+         the pane; got {cmd:?}"
+    );
+    // The restart must leave the shell pane able to die normally again: the
+    // hold is a means, not the end state.
+    assert_eq!(
+        pane_remain_on_exit(&h, &primary),
+        "off",
+        "a relaunched shell pane must have remain-on-exit off"
+    );
+}
+
+/// AT-B3-4: the same guard on a codex instance. `aoe add -c codex` stores the
+/// default command `codex` (set_default_command), which is not an override --
+/// `has_command_override()` is false -- yet the guard tests `command.is_empty()`
+/// and so skips the pane read here too. A codex instance whose pane was handed
+/// to another agent is relaunched as codex. Pinned as shipped; flagged in the
+/// report as an imprecise predicate.
+#[test]
+#[serial]
+fn at_b3_r_on_a_default_command_codex_instance_does_not_read_the_pane() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("at_b3_codex_default_cmd");
+    let instance_id = add_and_start_with_command(&h, "AT B3 Codex Default", "codex", None);
+    let db = db_path(&h);
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "AT B3 Codex Default");
+
+    let Some(claude_bin) = h.install_native_stub("claude") else {
+        eprintln!("Skipping test: no C compiler to build a native stub");
+        return;
+    };
+
+    h.spawn_tui();
+    h.wait_for("Agent of Empires");
+    assert_eq!(
+        sqlite_query(
+            &db,
+            &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
+        ),
+        "0",
+        "precondition: no tracked slots"
+    );
+
+    let primary = h.tmux_display_message(&session_name, "#{pane_id}");
+    let respawn = tmux(
+        &h,
+        &[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &primary,
+            claude_bin.to_str().unwrap(),
+        ],
+    );
+    assert!(respawn.status.success());
+    let start = Instant::now();
+    loop {
+        if h.tmux_display_message(&primary, "#{pane_current_command}") == "claude" {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the pane never came up running the native claude stub"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    h.send_keys("R");
+
+    wait_for_pane_start_command_contains(&h, &primary, "codex");
+    let cmd = pane_start_command(&h, &primary);
+    assert!(
+        !cmd.contains("claude"),
+        "shipped behavior: the default-command guard never reads the pane of a \
+         codex instance; got {cmd:?}"
+    );
+}
