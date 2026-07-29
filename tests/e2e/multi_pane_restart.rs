@@ -156,6 +156,10 @@ fn add_and_start(h: &TuiTestHarness, title: &str, tool: &str) -> String {
         String::from_utf8_lossy(&start.stderr)
     );
 
+    instance_id_for(h, title)
+}
+
+fn instance_id_for(h: &TuiTestHarness, title: &str) -> String {
     let sessions_path = if cfg!(target_os = "linux") {
         h.home_path()
             .join(".config/agent-of-empires/profiles/default/sessions.json")
@@ -457,6 +461,97 @@ fn no_tracked_panes_restarts_primary_pane_fresh() {
         !cmd.contains("--resume"),
         "no-slots fallback must restart fresh (no --resume), got start command: {:?}",
         cmd
+    );
+}
+
+/// Restarting a shell instance that has no tracked slots must leave it alive.
+///
+/// The single-pane path kills the pane's process tree and then respawns into
+/// the pane it just emptied. That works only while something holds the pane
+/// open across the kill. An agent pane is created with `remain-on-exit` on; a
+/// shell pane is created with it off, so the pane dies with its process -- and
+/// for a single-pane session, the session dies with the pane. The restart then
+/// has nothing left to respawn into.
+///
+/// The slot-based path had the same defect and was fixed in `f136e8f5`. This
+/// path was not, and it is the one every untracked shell session takes.
+#[test]
+#[serial]
+fn no_tracked_panes_restart_keeps_a_shell_instance_alive() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("multi_pane_shell_alive");
+    // A shell instance the way a real one is written: the tool is a shell, so
+    // the pane carries no `remain-on-exit`.
+    h.install_tool_stub("shell");
+    let project = h.project_path();
+    let add = h.run_cli(&[
+        "add",
+        project.to_str().unwrap(),
+        "-t",
+        "Shell Stays Alive",
+        "-c",
+        "shell",
+        "--cmd-override",
+        "/bin/sh",
+    ]);
+    assert!(
+        add.status.success(),
+        "aoe add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let start = h.run_cli_in_tmux(&["session", "start", "Shell Stays Alive"]);
+    assert!(
+        start.status.success(),
+        "aoe session start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    let instance_id = instance_id_for(&h, "Shell Stays Alive");
+    let db = db_path(&h);
+    let session_name =
+        agent_of_empires::tmux::Session::generate_name(&instance_id, "Shell Stays Alive");
+
+    h.spawn_tui();
+    h.wait_for("Agent of Empires");
+    let slot_count = sqlite_query(
+        &db,
+        &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
+    assert_eq!(
+        slot_count, "0",
+        "precondition: the instance must have no tracked slots, which is what \
+         sends the restart down the single-pane path"
+    );
+
+    press_restart(&h);
+
+    // The session outliving its own restart is the whole assertion. Poll rather
+    // than sample once: the kill and the respawn are not simultaneous, and a
+    // session that is gone stays gone.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_alive = true;
+    while Instant::now() < deadline {
+        last_alive = Command::new("tmux")
+            .arg("-S")
+            .arg(h.tmux_socket_path())
+            .args(["has-session", "-t", &session_name])
+            .output()
+            .expect("failed to run tmux has-session")
+            .status
+            .success();
+        if !last_alive {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        last_alive,
+        "restarting an untracked shell instance destroyed its session: the pane \
+         was killed without anything holding it open, and a single-pane session \
+         dies with its pane.\n\n--- Screen ---\n{}",
+        h.capture_screen()
     );
 }
 

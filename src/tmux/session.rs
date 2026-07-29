@@ -308,9 +308,30 @@ impl Session {
         send_keys_to_pane_target(&target, keys)
     }
 
+    /// Kill the agent pane's process tree, holding the pane open across the
+    /// kill so a respawn has somewhere to land.
+    ///
+    /// A pane whose `remain-on-exit` is off dies with its process, and a
+    /// single-pane session dies with the pane -- so killing first and
+    /// respawning after destroys exactly what it meant to restart. Agent panes
+    /// are created with `remain-on-exit` on and survive; a shell pane is
+    /// created with it off and does not. The subsequent respawn writes the
+    /// flag back to whatever the pane should have, so turning it on here is
+    /// not left behind.
+    ///
+    /// If the flag cannot be set, the kill is skipped: the cost of skipping is
+    /// orphaned grandchildren, and the cost of proceeding is a destroyed
+    /// session.
     pub fn kill_agent_pane_process_tree(&self) {
         let target = get_agent_pane_id(&self.name).unwrap_or_else(|| self.name.clone());
-        kill_pane_process_tree_target(&target);
+        match set_pane_remain_on_exit(&target, true) {
+            Ok(()) => kill_pane_process_tree_target(&target),
+            Err(err) => tracing::warn!(
+                "Could not hold pane {} open for relaunch, skipping its process-tree kill: {}",
+                target,
+                err
+            ),
+        }
     }
 
     pub fn get_pane_pid(&self) -> Option<u32> {
