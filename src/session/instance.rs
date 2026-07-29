@@ -264,7 +264,21 @@ fn recovery_settle() -> Duration {
 const CODEX_XATS_APP_SERVER_HOST: &str = "127.0.0.1";
 const CODEX_XATS_APP_SERVER_PORT: &str = "8799";
 const CODEX_XATS_APP_SERVER_URL: &str = "ws://127.0.0.1:8799";
-const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp";
+/// The npx spec for the xats pre-registration CLI, `@latest` included.
+///
+/// The tag is load-bearing, not decoration. `npx --no-install` resolves against
+/// its cache by the exact spec it was asked for, so a bare name and `@latest`
+/// look up different entries -- and the entry that exists on a machine running
+/// xats is the one its own launcher creates, which is `@latest`. Asking for the
+/// bare name therefore reports the package missing and, with `--no-install`,
+/// refuses to run it: the bootstrap exits, Codex never execs, and the pane
+/// falls back to a shell with npm's error as the only explanation.
+///
+/// A pinned version is no better -- `@0.7.7` misses the `@latest` entry just as
+/// the bare name does, even with 0.7.7 sitting in the cache. And this is not
+/// reaching for the network: the app-server check immediately above already
+/// requires xats to be running here, which is what put the entry there.
+const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp@latest";
 /// Environment variable carrying a pane's opaque xats identity key. Deliberately
 /// not named `*_TOKEN`: the xats project already uses `XATS_TOKEN` for the
 /// daemon's bearer credential, and both appear in the same launcher shell.
@@ -4309,6 +4323,16 @@ mod tests {
         assert!(
             adopted_codex.contains("codex --remote"),
             "the Codex bootstrap must exec Codex, got: {adopted_codex}"
+        );
+        // And the spec it asks npx for must carry the tag. `--no-install`
+        // resolves against its cache by the exact spec, so a bare name misses
+        // the `@latest` entry that xats's own launcher creates -- npx then
+        // reports the package missing, refuses to run it, and the pane comes up
+        // as a shell. Observed on a machine with the right version cached.
+        assert!(
+            adopted_codex.contains("cross-agent-teams-mcp@latest"),
+            "the bootstrap must ask npx for the tagged spec, not a bare name, \
+             got: {adopted_codex}"
         );
         assert!(
             !adopted_codex.contains("claude --remote"),
