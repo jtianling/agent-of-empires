@@ -8,7 +8,7 @@ The one moment the key IS readable is AoE's own xats bootstrap: it runs `pre-reg
 
 ## What Changes
 
-- The Codex xats bootstrap passes `--identity-key-env XATS_IDENTITY_KEY` to `pre-register-codex-pane` when the variable is non-empty; the CLI reads the value from its own environment, so the value rides only the pre-register HTTP channel and appears on the argv of no process the bootstrap starts. AoE debug logs of launch commands mask the value.
+- The Codex xats bootstrap passes `--identity-key-env XATS_IDENTITY_KEY` to `pre-register-codex-pane` when the variable is non-empty; the CLI reads the value from its inherited environment and sends it to the daemon over HTTP, so the value appears on the argv of no process the bootstrap starts. (The value still reaches the pane through AoE's pre-existing env-injection prefix, which transits the tmux launch argv -- a mechanism shared with Claude panes and out of scope here; see the design doc.) AoE debug logs of launch commands mask the value.
 - Compatibility fallback: if the pre-register call with the new flags fails, the bootstrap retries once without them, so a `cross-agent-teams-mcp` that rejects them cannot break a Codex launch.
 - The bootstrap passes a lengthened pre-registration row TTL (`--ttl 600`), covering Codex cold starts that exceed the daemon's 120s default (the daemon's poke-back waits on an unexpired row).
 

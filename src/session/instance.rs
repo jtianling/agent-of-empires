@@ -3815,9 +3815,12 @@ mod tests {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         };
+        // Netstring framing: `<byte-len>:<bytes>,` per argument, `;` closing
+        // each call. Unambiguous for every possible argument -- leading or
+        // bare newlines, empty strings, a literal `--`.
         let record = |log: &std::path::Path| {
             format!(
-                "{{ for a in \"$@\"; do printf '%s\\0' \"$a\"; done; printf '\\n'; }} >> {}",
+                "{{ for a in \"$@\"; do                      printf '%s:' \"$(printf %s \"$a\" | wc -c | tr -d ' ')\";                      printf '%s,' \"$a\";                  done; printf ';'; }} >> {}",
                 shell_escape(&log.display().to_string())
             )
         };
@@ -3840,22 +3843,64 @@ mod tests {
         (npx_log, codex_log)
     }
 
-    /// Decode a NUL-framed fake log back into per-call argv vectors.
+    /// Decode a netstring-framed fake log back into per-call argv vectors.
     fn parse_fake_calls(path: &std::path::Path) -> FakeCalls {
         let bytes = std::fs::read(path).unwrap_or_default();
         let mut calls = Vec::new();
         let mut call: Vec<String> = Vec::new();
-        let mut arg: Vec<u8> = Vec::new();
         let mut i = 0;
         while i < bytes.len() {
-            match bytes[i] {
-                0 => call.push(String::from_utf8(std::mem::take(&mut arg)).unwrap()),
-                b'\n' if arg.is_empty() => calls.push(std::mem::take(&mut call)),
-                b => arg.push(b),
+            if bytes[i] == b';' {
+                calls.push(std::mem::take(&mut call));
+                i += 1;
+                continue;
             }
-            i += 1;
+            let colon = bytes[i..].iter().position(|b| *b == b':').unwrap() + i;
+            let len: usize = std::str::from_utf8(&bytes[i..colon])
+                .unwrap()
+                .parse()
+                .unwrap();
+            let start = colon + 1;
+            call.push(String::from_utf8(bytes[start..start + len].to_vec()).unwrap());
+            assert_eq!(bytes[start + len], b',', "malformed fake log");
+            i = start + len + 1;
         }
         calls
+    }
+
+    /// Run a bootstrap script under `sh` with the fake-binary PATH and a
+    /// controlled environment. `env` entries with `None` remove the variable.
+    fn execute_bootstrap_script(
+        script: &str,
+        bin: &std::path::Path,
+        identity_key: Option<&str>,
+        env: &[(&str, Option<&str>)],
+    ) -> std::process::Output {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("TMUX_PANE", "%fake")
+            .env_remove("SHELLOPTS");
+        match identity_key {
+            Some(key) => {
+                cmd.env("XATS_IDENTITY_KEY", key);
+            }
+            None => {
+                cmd.env_remove("XATS_IDENTITY_KEY");
+            }
+        }
+        for (name, value) in env {
+            match value {
+                Some(v) => {
+                    cmd.env(name, v);
+                }
+                None => {
+                    cmd.env_remove(name);
+                }
+            }
+        }
+        cmd.output().unwrap()
     }
 
     /// Execute the real generated bootstrap script with fake binaries on PATH
@@ -3893,31 +3938,7 @@ mod tests {
         };
         let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base);
 
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(script)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("TMUX_PANE", "%fake")
-            .env_remove("SHELLOPTS");
-        match identity_key {
-            Some(key) => {
-                cmd.env("XATS_IDENTITY_KEY", key);
-            }
-            None => {
-                cmd.env_remove("XATS_IDENTITY_KEY");
-            }
-        }
-        for (name, value) in env {
-            match value {
-                Some(v) => {
-                    cmd.env(name, v);
-                }
-                None => {
-                    cmd.env_remove(name);
-                }
-            }
-        }
-        let out = cmd.output().unwrap();
+        let out = execute_bootstrap_script(&script, &bin, identity_key, env);
         if !out.status.success() {
             eprintln!("bootstrap stderr: {}", String::from_utf8_lossy(&out.stderr));
         }
@@ -4075,6 +4096,35 @@ mod tests {
             "a successful first attempt must not be followed by a fallback: {npx:?}"
         );
         assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+    }
+
+    /// The fake-argv framing must be lossless for awkward arguments: a bare
+    /// `--` and an empty string round-trip exactly (netstrings; a
+    /// delimiter-based format broke on these). A real newline cannot reach an
+    /// argument through this path at all: `environment::shell_escape`
+    /// flattens newlines to literal `\n` before the script is built
+    /// (pre-existing), and the recording faithfully shows that flattened
+    /// form.
+    #[test]
+    fn test_codex_xats_fake_recording_roundtrips_awkward_args() {
+        let (ok, _npx, codex) = run_codex_bootstrap_with_fakes(
+            Some("live-key-123"),
+            FakeNpx::Succeed,
+            &[],
+            "--note 'lead\ntail' -- ''",
+        );
+        assert!(ok);
+        let argv = codex_argv(&codex);
+        let tail: Vec<&str> = argv
+            .iter()
+            .skip_while(|a| *a != "--note")
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            tail,
+            ["--note", "lead\\ntail", "--", ""],
+            "awkward args must survive recording exactly: {argv:?}"
+        );
     }
 
     #[test]
