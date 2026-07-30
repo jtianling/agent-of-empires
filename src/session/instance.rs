@@ -889,12 +889,15 @@ impl Instance {
                  exit 1; \
              fi; \
              if [ -n \"${{{identity_env}:-}}\" ]; then \
-                 set -- --identity-key \"${identity_env}\" --ttl-seconds {ttl}; \
+                 npx --no-install {package} pre-register-codex-pane \
+                     --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
+                     --identity-key \"${identity_env}\" --ttl {ttl}; \
              else \
-                 set -- --ttl-seconds {ttl}; \
+                 npx --no-install {package} pre-register-codex-pane \
+                     --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
+                     --ttl {ttl}; \
              fi; \
-             if ! npx --no-install {package} pre-register-codex-pane \
-                 --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \"$@\"; then \
+             if [ $? -ne 0 ]; then \
                  if ! npx --no-install {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"; then \
                      printf '%s\\n' '[xats] Failed to pre-register the Codex pane.' >&2; \
@@ -3706,17 +3709,27 @@ mod tests {
     }
 
     /// The pre-registration call shape every launch plan must carry: the
-    /// identity key as a pane-shell expansion plus the lengthened row TTL.
+    /// identity key as a pane-shell expansion plus the lengthened row TTL,
+    /// under the flag names the xats CLI actually parses (`--ttl`, not a
+    /// guessed spelling -- its parser ignores unknown flags silently, so a
+    /// wrong name would "succeed" while changing nothing).
     fn assert_codex_xats_preregister_shape(cmd: &str) {
         assert!(
             cmd.contains(r#"--identity-key "$XATS_IDENTITY_KEY""#),
             "missing identity-key shell expansion: {cmd}"
         );
         assert!(
-            cmd.contains(&format!(
-                "--ttl-seconds {CODEX_XATS_PREREGISTER_TTL_SECONDS}"
-            )),
+            cmd.contains(&format!("--ttl {CODEX_XATS_PREREGISTER_TTL_SECONDS}")),
             "missing pre-registration TTL: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--ttl-seconds"),
+            "--ttl-seconds is not a flag the xats CLI parses: {cmd}"
+        );
+        assert!(
+            !cmd.contains("set --"),
+            "positional parameters are shared script state; the exec'ed \
+             command must not be able to see pre-registration args: {cmd}"
         );
     }
 
@@ -3735,28 +3748,164 @@ mod tests {
         let script = &cmd[cmd.find("sh -c").unwrap()..];
         assert!(!script.contains("secret-identity-key-value"));
         assert!(cmd.contains("XATS_IDENTITY_KEY='secret-identity-key-value' "));
-        // The key is optional: the empty-variable branch sends only the TTL.
-        assert!(cmd.contains(&format!(
-            "set -- --ttl-seconds {CODEX_XATS_PREREGISTER_TTL_SECONDS}"
-        )));
 
-        // Two pre-registration calls: the first carries the optional args,
-        // the retry reproduces the exact pre-change call.
-        let first = cmd.find("pre-register-codex-pane").unwrap();
-        let second = cmd[first + 1..]
-            .find("pre-register-codex-pane")
-            .map(|i| i + first + 1)
-            .expect("expected a retry pre-registration call");
-        assert!(
-            !cmd[second + 1..].contains("pre-register-codex-pane"),
-            "expected exactly two pre-registration calls: {cmd}"
+        // Three pre-registration call sites: the with-key and without-key
+        // branches of the first attempt, then the retry reproducing the exact
+        // pre-change call.
+        let calls: Vec<usize> = cmd
+            .match_indices("pre-register-codex-pane")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected key-branch, keyless-branch, and retry calls: {cmd}"
         );
-        let first_call = &cmd[first..second];
-        let retry_call = &cmd[second..cmd.rfind(" exec ").unwrap()];
-        assert!(first_call.contains(r#""$@""#));
-        assert!(!retry_call.contains(r#""$@""#));
+        let retry_call = &cmd[calls[2]..cmd.rfind(" exec ").unwrap()];
         assert!(!retry_call.contains("identity-key"));
         assert!(!retry_call.contains("ttl"));
+    }
+
+    /// Execute the real generated bootstrap script with fake binaries on PATH
+    /// and assert on the argv each one actually receives. String-shape
+    /// assertions cannot catch a flag the CLI does not parse or script state
+    /// leaking into the exec'ed command; running the script can.
+    ///
+    /// `expect_fail` makes every fake npx call exit 1. Returns
+    /// (script exit ok, npx calls log, codex argv log).
+    fn run_codex_bootstrap_with_fakes(
+        identity_key: Option<&str>,
+        fail_first_npx: bool,
+        expect_fail: bool,
+    ) -> (bool, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let npx_log = tmp.path().join("npx.log");
+        let codex_log = tmp.path().join("codex.log");
+        let write_fake = |name: &str, body: String| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        };
+        write_fake(
+            "uuidgen",
+            "echo 12345678-1234-1234-1234-123456789abc".into(),
+        );
+        write_fake("nc", "exit 0".into());
+        let npx_fail = if fail_first_npx {
+            // Fail exactly the first invocation, by call-counter file.
+            format!(
+                "if [ ! -f {c} ]; then touch {c}; exit 1; fi",
+                c = tmp.path().join("npx.first").display()
+            )
+        } else if expect_fail {
+            "exit 1".to_string()
+        } else {
+            String::new()
+        };
+        write_fake(
+            "npx",
+            format!("printf '%s\\n' \"$*\" >> {}\n{npx_fail}", npx_log.display()),
+        );
+        write_fake(
+            "codex",
+            format!("printf '%s\\n' \"$*\" >> {}", codex_log.display()),
+        );
+
+        let mut inst = codex_xats_instance();
+        inst.xats_identity_key = identity_key.map(str::to_string);
+        // The bootstrap `sh -c` core straight from the builder: the full pane
+        // command re-escapes it inside a login-shell wrapper (which would also
+        // load the developer's rc files), so it cannot be sliced back out and
+        // executed. The key travels via this runner's env instead of the
+        // wrapper's env prefix, which is equivalent for the script.
+        let script = inst.codex_xats_bootstrap_command("codex", "codex");
+
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("TMUX_PANE", "%fake");
+        match identity_key {
+            Some(key) => {
+                cmd.env("XATS_IDENTITY_KEY", key);
+            }
+            None => {
+                cmd.env_remove("XATS_IDENTITY_KEY");
+            }
+        }
+        let out = cmd.output().unwrap();
+        let status = out.status;
+        if !status.success() {
+            eprintln!("bootstrap stderr: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default();
+        (status.success(), read(&npx_log), read(&codex_log))
+    }
+
+    #[test]
+    fn test_codex_xats_bootstrap_executes_preregister_with_key_and_ttl() {
+        let (ok, npx, codex) = run_codex_bootstrap_with_fakes(Some("live-key-123"), false, false);
+        assert!(ok, "bootstrap should succeed");
+        let calls: Vec<&str> = npx.lines().collect();
+        assert_eq!(calls.len(), 1, "one successful pre-register call: {npx}");
+        assert!(
+            calls[0].contains("--identity-key live-key-123"),
+            "the daemon must actually receive the key: {npx}"
+        );
+        assert!(
+            calls[0].contains(&format!("--ttl {CODEX_XATS_PREREGISTER_TTL_SECONDS}")),
+            "the daemon must receive the TTL under the flag it parses: {npx}"
+        );
+        assert!(
+            !codex.contains("live-key-123") && !codex.contains("identity-key"),
+            "the key must never reach the codex argv: {codex}"
+        );
+        assert!(
+            codex.contains("--remote"),
+            "codex must have exec'ed: {codex}"
+        );
+    }
+
+    #[test]
+    fn test_codex_xats_bootstrap_executes_keyless_preregister() {
+        let (ok, npx, codex) = run_codex_bootstrap_with_fakes(None, false, false);
+        assert!(ok);
+        let calls: Vec<&str> = npx.lines().collect();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            !calls[0].contains("identity-key"),
+            "no key in the environment means no flag: {npx}"
+        );
+        assert!(calls[0].contains("--ttl"), "the TTL still rides: {npx}");
+        assert!(codex.contains("--remote"));
+    }
+
+    #[test]
+    fn test_codex_xats_bootstrap_falls_back_to_bare_retry() {
+        let (ok, npx, codex) = run_codex_bootstrap_with_fakes(Some("live-key-123"), true, false);
+        assert!(ok, "a successful retry keeps the launch alive");
+        let calls: Vec<&str> = npx.lines().collect();
+        assert_eq!(calls.len(), 2, "first attempt plus bare retry: {npx}");
+        assert!(calls[0].contains("--identity-key"));
+        assert!(
+            !calls[1].contains("identity-key") && !calls[1].contains("ttl"),
+            "the retry must reproduce the exact pre-change call: {npx}"
+        );
+        assert!(codex.contains("--remote"));
+    }
+
+    #[test]
+    fn test_codex_xats_bootstrap_double_failure_is_fatal_without_codex() {
+        let (ok, npx, codex) = run_codex_bootstrap_with_fakes(Some("live-key-123"), false, true);
+        assert!(!ok, "both attempts failing must fail the launch");
+        assert_eq!(npx.lines().count(), 2);
+        assert!(codex.is_empty(), "codex must not launch: {codex}");
     }
 
     #[test]
