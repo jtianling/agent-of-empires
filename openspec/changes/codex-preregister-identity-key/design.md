@@ -24,7 +24,13 @@ Constraints: the two projects must remain independently runnable (aoe without xa
 
 ### Decision 1: The key is named, never spelled -- `--identity-key-env`
 
-The bootstrap passes `--identity-key-env XATS_IDENTITY_KEY` and the CLI reads the value from its own environment (which the `npx` child inherits from the pane's shell). The first draft expanded the value into the pre-register argv (`--identity-key "$XATS_IDENTITY_KEY"`); the xats CLI then shipped the env-naming flag instead, on the observation that the pre-register process's own argv is just as `ps`-visible as Codex's. So the value now appears on no argv at all, and AoE's Rust still interpolates nothing: the script carries only the variable's name. The script branches on `[ -n "${XATS_IDENTITY_KEY:-}" ]` because the CLI treats the flag with a missing/empty variable as a hard error, which for AoE would just mean a wasted retry.
+The bootstrap passes `--identity-key-env XATS_IDENTITY_KEY` and the CLI reads the value from its own environment (which the `npx` child inherits from the pane's shell). The first draft expanded the value into the pre-register argv (`--identity-key "$XATS_IDENTITY_KEY"`); the xats CLI then shipped the env-naming flag instead, on the observation that the pre-register process's own argv is just as `ps`-visible as Codex's. So no process the bootstrap script starts carries the value on its argv, and AoE's Rust still interpolates nothing: the script carries only the variable's name. The script branches on `[ -n "${XATS_IDENTITY_KEY:-}" ]` because the CLI treats the flag with a missing/empty variable as a hard error, which for AoE would just mean a wasted retry.
+
+Scope honesty, from review: the value still reaches the pane at all through AoE's pre-existing env-injection prefix (`XATS_IDENTITY_KEY='...' <shell> -lc ...`), and that full command string transits the `tmux new-session`/`respawn-pane` argv at launch. That mechanism predates this change and is shared with Claude panes; replacing it (e.g. with tmux's own per-session environment) is a separate change touching every agent. What this change does take on is the derived exposure it can reach cheaply: AoE's debug logs of launch commands now mask the key's value (`redact_identity_key`).
+
+### Decision 4: The failure sentinel is script-local by assignment
+
+`pre_register_failed=` is assigned empty before the first attempt: `sh` variables are seeded from the environment, so without the reset an inherited `pre_register_failed=1` would turn a successful first attempt into a spurious bare fallback -- which on the daemon side would overwrite the key- and TTL-carrying row with a bare one (found in review, reproduced, pinned by a regression test that launches with the variable inherited).
 
 ### Decision 2: Fallback is retry-without-flag, decided by the exit code, immune to inherited shell options
 

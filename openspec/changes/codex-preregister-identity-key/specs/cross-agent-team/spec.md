@@ -11,11 +11,16 @@ the session project path supplied as the Codex working directory.
 When the pane's environment carries a non-empty `XATS_IDENTITY_KEY`, the
 bootstrap SHALL tell the pre-registration call to read it, by naming the
 variable via `--identity-key-env`; the CLI reads the value from its own
-environment. The key's value SHALL NOT appear on any argv -- not the executed
-Codex command line and not the pre-registration call's own -- because argv is
-readable by every process on the machine. The pre-registration call SHALL also
-carry a lengthened row TTL (`--ttl`, the flag the CLI parses) so the daemon's
-poke-back window covers a Codex cold start.
+environment. The key's value SHALL NOT appear on the argv of any process the
+bootstrap script starts -- not the executed Codex command line and not the
+pre-registration call's own -- because argv is readable by every process on
+the machine. (The value does reach the pane through AoE's pre-existing
+env-injection prefix, which transits the tmux launch argv; that mechanism
+predates this change, is shared with Claude panes, and is out of scope here.
+What this change adds on top is masking the value in AoE's own debug logs of
+launch commands.) The pre-registration call SHALL also carry a lengthened row
+TTL (`--ttl`, the flag the CLI parses) so the daemon's poke-back window covers
+a Codex cold start.
 
 If a pre-registration call carrying the new flags fails, the bootstrap SHALL
 retry it once as the exact pre-change call (no identity-key flag, no TTL), so
@@ -39,6 +44,11 @@ token value. It SHALL rely on the already-configured local xats environment.
 - **WHEN** a Codex Cross Agent Team pane launches with `XATS_IDENTITY_KEY` in its environment
 - **THEN** the pre-registration call carries `--identity-key-env` naming the variable
 - **AND** neither the pre-registration argv nor the executed Codex command line contains the key's value
+
+#### Scenario: Debug logs of launch commands mask the key's value
+
+- **WHEN** AoE logs a pane launch command or its tmux argv at debug level
+- **THEN** the logged text carries the identity-key env prefix with its value struck out
 
 #### Scenario: A pane without an identity key pre-registers without the flag
 

@@ -89,7 +89,10 @@ impl Session {
 
         // Note: With -d flag, tmux new-session returns 0 even if the shell command fails.
         // Log args at debug level for troubleshooting.
-        tracing::debug!("tmux new-session args: {:?}", args);
+        tracing::debug!(
+            "tmux new-session args: {:?}",
+            crate::tmux::redact_identity_key_args(&args)
+        );
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -558,8 +561,8 @@ pub fn split_window_right(
     tracing::debug!(
         session = session_name,
         working_dir,
-        command,
-        args = ?args,
+        command = %crate::tmux::redact_identity_key(command),
+        args = ?crate::tmux::redact_identity_key_args(&args),
         "Splitting tmux window for right pane"
     );
 

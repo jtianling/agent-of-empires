@@ -127,6 +127,34 @@ fn build_tmux_command(socket_name: Option<&str>) -> Command {
     cmd
 }
 
+/// Mask identity-key values in command text bound for logs.
+///
+/// A pane command embeds `XATS_IDENTITY_KEY='<uuid>'` as an env prefix; the
+/// value is an identity credential (whoever holds it can claim the pane's
+/// xats identity once its process dies), so debug logs get the prefix with
+/// the value struck out rather than the value.
+pub(crate) fn redact_identity_key(text: &str) -> String {
+    const MARK: &str = "XATS_IDENTITY_KEY='";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(MARK) {
+        let after = &rest[i + MARK.len()..];
+        let Some(end) = after.find('\'') else {
+            break;
+        };
+        out.push_str(&rest[..i + MARK.len()]);
+        out.push_str("***");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// [`redact_identity_key`] over an argv the way tmux receives it.
+pub(crate) fn redact_identity_key_args(args: &[String]) -> Vec<String> {
+    args.iter().map(|a| redact_identity_key(a)).collect()
+}
+
 /// Test-only: pin tmux to a private per-process socket and drop `$TMUX` /
 /// `$TMUX_PANE`. `tmux_command()` already forces a private `-L` under
 /// `#[cfg(test)]`, so this is belt-and-suspenders: clearing `$TMUX`/`$TMUX_PANE`
@@ -816,5 +844,23 @@ aoe_proj_c_ghi11111\t0\t1\tbash\n";
             Some("opencode")
         );
         assert!(map.get("aoe_proj_c_ghi11111").unwrap().pane_dead);
+    }
+
+    #[test]
+    fn redact_identity_key_masks_values_and_leaves_the_rest() {
+        let cmd = "XATS_IDENTITY_KEY='3024499a-cf08-4696' AOE_INSTANCE_ID='x' zsh -lc 'exec codex'";
+        let redacted = redact_identity_key(cmd);
+        assert!(!redacted.contains("3024499a"));
+        assert_eq!(
+            redacted,
+            "XATS_IDENTITY_KEY='***' AOE_INSTANCE_ID='x' zsh -lc 'exec codex'"
+        );
+        // Multiple occurrences (multi-pane launch scripts) all masked.
+        let two = format!("{cmd}; {cmd}");
+        assert_eq!(redact_identity_key(&two).matches("'***'").count(), 2);
+        // No marker, unchanged; unterminated quote, left alone rather than eaten.
+        assert_eq!(redact_identity_key("plain command"), "plain command");
+        let broken = "XATS_IDENTITY_KEY='unterminated";
+        assert_eq!(redact_identity_key(broken), broken);
     }
 }

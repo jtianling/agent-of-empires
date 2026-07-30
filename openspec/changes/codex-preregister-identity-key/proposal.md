@@ -8,9 +8,9 @@ The one moment the key IS readable is AoE's own xats bootstrap: it runs `pre-reg
 
 ## What Changes
 
-- The Codex xats bootstrap passes `--identity-key "$XATS_IDENTITY_KEY"` to `pre-register-codex-pane` when the variable is non-empty. The key travels only over the pre-register CLI channel (HTTP + token); it MUST NOT appear in the Codex process argv, which is visible to every process on the machine.
-- Compatibility fallback: if the pre-register call with `--identity-key` fails, the bootstrap retries once without it, so an older `cross-agent-teams-mcp` that does not know the flag cannot break a Codex launch.
-- The bootstrap passes a lengthened `ttl_seconds` for the pre-registration row, covering Codex cold starts that exceed the daemon's 120s default TTL (the daemon's poke-back waits on an unexpired row).
+- The Codex xats bootstrap passes `--identity-key-env XATS_IDENTITY_KEY` to `pre-register-codex-pane` when the variable is non-empty; the CLI reads the value from its own environment, so the value rides only the pre-register HTTP channel and appears on the argv of no process the bootstrap starts. AoE debug logs of launch commands mask the value.
+- Compatibility fallback: if the pre-register call with the new flags fails, the bootstrap retries once without them, so a `cross-agent-teams-mcp` that rejects them cannot break a Codex launch.
+- The bootstrap passes a lengthened pre-registration row TTL (`--ttl 600`), covering Codex cold starts that exceed the daemon's 120s default (the daemon's poke-back waits on an unexpired row).
 
 ## Capabilities
 
@@ -26,4 +26,4 @@ The one moment the key IS readable is AoE's own xats bootstrap: it runs `pre-reg
 
 - `src/session/instance.rs`: `codex_xats_bootstrap_command` (the generated shell script) and its unit tests.
 - No new runtime dependency: `pre-register-codex-pane` is already invoked; only its arguments change.
-- Cross-project contract: xats ships `--identity-key` support first (`cross-agent-teams-mcp` 0.7.8/0.8.x); AoE's fallback keeps older daemons working, so the two projects stay independently runnable in both directions.
+- Cross-project contract: xats ships `--identity-key-env` support first (`cross-agent-teams-mcp` 0.7.8/0.8.x); AoE's fallback keeps older daemons working, so the two projects stay independently runnable in both directions.
