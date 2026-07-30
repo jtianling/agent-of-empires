@@ -103,11 +103,11 @@ fn run_record_pane(
 /// so it is the interesting variable for an instance whose own tool differs.
 /// Put the session id where the simulated agent's hook would actually find it.
 ///
-/// A hook fires with its own agent's environment around it. Claude's id arrives
-/// on stdin, Codex's as `$CODEX_THREAD_ID`, so handing a Codex capture only a
-/// stdin id simulates a hook invocation that does not occur. Read from the
-/// registry rather than restated here, so a new agent's source cannot silently
-/// go missing from the simulation.
+/// A hook fires with its own agent's environment around it, and an agent whose
+/// id does not arrive on stdin names the variable it does arrive in. No agent
+/// does today, so this sets nothing; it is read from the registry rather than
+/// restated here so a new agent's source cannot silently go missing from the
+/// simulation.
 fn put_session_id_in_env(cmd: &mut Command, agent: &str, session_id: &str) {
     let source = agent_of_empires::agents::get_agent(agent)
         .and_then(|a| a.hook_config.as_ref())

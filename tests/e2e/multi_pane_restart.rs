@@ -97,10 +97,10 @@ fn run_record_pane(
     cmd.arg("__record-pane");
     if let Some(agent) = agent {
         cmd.arg("--agent").arg(agent);
-        // A hook fires with its own agent's environment around it: Codex's
-        // session id is `$CODEX_THREAD_ID`, not a stdin field, so a stdin-only
-        // capture would simulate an invocation that does not occur. Read from
-        // the registry so a new agent's source cannot go missing here.
+        // A hook fires with its own agent's environment around it, and an
+        // agent whose id does not arrive on stdin names the variable it does
+        // arrive in. Read from the registry so a new agent's source cannot go
+        // missing here.
         let source = agent_of_empires::agents::get_agent(agent)
             .and_then(|a| a.hook_config.as_ref())
             .map(|hooks| hooks.session_id_source);

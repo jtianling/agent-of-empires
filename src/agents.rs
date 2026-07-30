@@ -36,11 +36,17 @@ pub struct HookEvent {
 
 /// Where a capture reads an agent's native session id from.
 ///
-/// Named per agent rather than assumed. Claude puts it on the hook's stdin;
-/// Codex exports it into the pane's environment and its stdin shape is not
-/// something AoE needs to depend on for a value it already has a stable name
-/// for. An agent that declares no source is not captured, rather than having
-/// another agent's source guessed for it.
+/// Named per agent rather than assumed, so that an agent whose id does not
+/// arrive on hook stdin can say where its own comes from without changing what
+/// every other agent reads.
+///
+/// Codex is the reason this is a choice at all, and it is currently `HookStdin`
+/// like the rest: it does export `$CODEX_THREAD_ID`, but only into the
+/// environment of the commands its tools run, not into its hooks'. Measured by
+/// elimination on a live session -- the hook wrote its status file, which needs
+/// `$AOE_INSTANCE_ID` and so proves the hook inherits the agent's full
+/// environment, while the same hook's capture wrote nothing, which leaves the
+/// thread variable as the only gate it could have failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionIdSource {
     /// The `session_id` field of the hook's stdin JSON.
@@ -263,7 +269,7 @@ pub const AGENTS: &[AgentDef] = &[
             // keeps their own configuration, and where Codex itself records
             // which hooks have been trusted.
             settings_rel_path: ".codex/hooks.json",
-            session_id_source: SessionIdSource::EnvVar("CODEX_THREAD_ID"),
+            session_id_source: SessionIdSource::HookStdin,
             events: CODEX_HOOK_EVENTS,
         }),
         resume: Some(ResumeConfig {

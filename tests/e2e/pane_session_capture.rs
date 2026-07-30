@@ -198,13 +198,14 @@ fn capture_reads_session_id_from_stdin() {
     );
 }
 
-/// Codex's session id is in its environment, not on the hook's stdin. Its
-/// stdin is deliberately given a `session_id` that must NOT be used: reading it
-/// would mean a Codex pane recorded under an id that does not identify its
-/// conversation, which is worse than not recording it at all.
+/// A Codex capture reads the id off the hook's stdin, and `$CODEX_THREAD_ID`
+/// does not enter into it. Codex exports that variable to the commands its
+/// tools run but not to its hooks, so a capture that preferred it would record
+/// nothing at all; the environment here carries a different value precisely so
+/// that reading it would fail this test.
 #[test]
 #[serial]
-fn codex_capture_reads_the_thread_id_from_its_environment() {
+fn codex_capture_reads_the_session_id_from_hook_stdin() {
     crate::harness::require_tmux!();
     require_sqlite3!();
 
@@ -212,14 +213,14 @@ fn codex_capture_reads_the_thread_id_from_its_environment() {
     add_and_start(&h, "Capture Codex");
     let db = db_path(&h);
 
-    let stdin_json = r#"{"session_id":"not-the-codex-id","cwd":"/work/codex"}"#;
+    let stdin_json = r#"{"session_id":"codex-thread-abc","cwd":"/work/codex"}"#;
     let ok = run_record_pane_as(
         &h,
         Some("%51"),
         Some("inst-codex"),
         stdin_json,
         Some("codex"),
-        &[("CODEX_THREAD_ID", "codex-thread-abc")],
+        &[("CODEX_THREAD_ID", "stale-env-value")],
     );
     assert!(ok, "aoe __record-pane should exit 0 on a valid capture");
 
@@ -229,16 +230,16 @@ fn codex_capture_reads_the_thread_id_from_its_environment() {
     );
     assert_eq!(
         row, "codex|codex-thread-abc|/work/codex",
-        "a Codex capture takes its id from $CODEX_THREAD_ID and its cwd from stdin"
+        "a Codex capture takes both its id and its cwd from the hook's stdin"
     );
 }
 
-/// An agent whose declared source yields nothing is not captured. The stdin
-/// here carries a perfectly good `session_id`, and borrowing it is exactly the
-/// failure this guards: it belongs to another agent's source.
+/// A hook event that carries no session id records nothing. A row with no
+/// conversation on it is worse than no row: recovery would resume the pane
+/// with no way to say which conversation it belongs to.
 #[test]
 #[serial]
-fn a_capture_does_not_borrow_another_agents_session_id_source() {
+fn a_capture_without_a_session_id_writes_no_row() {
     crate::harness::require_tmux!();
     require_sqlite3!();
 
@@ -246,7 +247,7 @@ fn a_capture_does_not_borrow_another_agents_session_id_source() {
     add_and_start(&h, "Capture No Borrow");
     let db = db_path(&h);
 
-    let stdin_json = r#"{"session_id":"stdin-id-that-is-not-codexs","cwd":"/work"}"#;
+    let stdin_json = r#"{"cwd":"/work"}"#;
     let ok = run_record_pane_as(
         &h,
         Some("%52"),
@@ -260,8 +261,45 @@ fn a_capture_does_not_borrow_another_agents_session_id_source() {
     let count = sqlite_query(&db, "SELECT count(*) FROM pane_live WHERE tmux_pane='%52';");
     assert_eq!(
         count, "0",
-        "with its own source empty, the capture must be skipped rather than fall \
-         back to the stdin id"
+        "a hook event with no session id on it must be skipped, not recorded \
+         with an empty conversation"
+    );
+}
+
+/// An agent that supplies its own pane is believed over `$TMUX_PANE`. It only
+/// supplies one when its hooks run somewhere `$TMUX_PANE` names a pane that is
+/// not its own, so the other precedence would let a stale value claim a pane
+/// the agent has nothing to do with.
+#[test]
+#[serial]
+fn an_agent_supplied_pane_beats_the_ambient_one() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let h = TuiTestHarness::new("capture_pane_precedence");
+    add_and_start(&h, "Capture Pane Precedence");
+    let db = db_path(&h);
+
+    let stdin_json = r#"{"session_id":"own-pane-sess","cwd":"/work"}"#;
+    let ok = run_record_pane_as(
+        &h,
+        Some("%80"),
+        Some("inst-pane-precedence"),
+        stdin_json,
+        Some("codex"),
+        &[("AOE_TMUX_PANE", "%81")],
+    );
+    assert!(ok, "capture should exit 0");
+
+    let mine = sqlite_query(&db, "SELECT count(*) FROM pane_live WHERE tmux_pane='%81';");
+    assert_eq!(
+        mine, "1",
+        "the pane the agent named must be the one recorded"
+    );
+    let ambient = sqlite_query(&db, "SELECT count(*) FROM pane_live WHERE tmux_pane='%80';");
+    assert_eq!(
+        ambient, "0",
+        "the ambient $TMUX_PANE must not also claim a row"
     );
 }
 
@@ -441,9 +479,9 @@ fn a_codex_pane_reaches_a_durable_slot_recording_codex() {
         &h,
         Some(&pane_id),
         Some(&instance_id),
-        r#"{"cwd":"/work"}"#,
+        r#"{"session_id":"codex-slot-thread","cwd":"/work"}"#,
         Some("codex"),
-        &[("CODEX_THREAD_ID", "codex-slot-thread")],
+        &[],
     );
     assert!(ok, "capture should succeed for the managed Codex pane");
 

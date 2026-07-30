@@ -35,5 +35,12 @@
 - [x] 6.2 Gate the hook's capture branch on either pane variable.
 - [x] 6.3 Give a Codex launch `shell_environment_policy.set` overrides for its pane and instance id, expanding `$TMUX_PANE` in the pane's own shell. Not applied to a command override, which is the user's own program.
 - [x] 6.4 Cover that a Codex launch carries both overrides and that an agent whose hooks run in its own process does not.
-- [ ] 6.5 On the real machine, confirm a Codex pane now records its own pane id, and that the status file appears under `/tmp/aoe-hooks/<instance>/`. **Needs a Codex client started after the app-server was restarted:** a daemon predating the hooks file never loads it, which is why 5.3 produced nothing until a fresh `codex exec` was run.
+- [x] 6.5 On the real machine, confirm the hook reaches the status file. It does: a Codex session AoE launched wrote `/tmp/aoe-hooks/<instance>/status` on its first turn. That is what disproved "the hook never runs" and, by elimination, located the failure in the session-id source (section 7).
 - [ ] 6.6 Delete the `pane_live` row 5.3 wrote against the unrelated shell pane.
+
+## 7. Correct the Session-Id Source (Decision 1, revised)
+
+- [x] 7.1 Move Codex's declared source to hook stdin, now that a live session has shown `$CODEX_THREAD_ID` is absent from hook environments.
+- [x] 7.2 Rewrite the coverage that encoded the disproved premise, and add coverage that an agent-supplied pane beats the ambient one.
+- [ ] 7.3 On the real machine, confirm a Codex pane finally produces a `pane_live` row. This is what the whole change exists for and is still unverified.
+- [ ] 7.4 If it produces one, decide whether `SessionIdSource` still earns its place: every agent now declares `HookStdin`, so the enum has no live second variant.

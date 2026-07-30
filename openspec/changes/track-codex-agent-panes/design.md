@@ -31,9 +31,13 @@ An earlier draft of this design carried a third: that Codex keeps its hooks in `
 
 The current requirement says the native session id is read from hook stdin JSON, and says so as a correction of an earlier design that read an environment variable. That correction was right for Claude, whose hook receives `{"session_id": ...}` on stdin and whose environment carries no reliable equivalent.
 
-Codex inverts it. It exports `$CODEX_THREAD_ID` into the pane's environment (0.124 and later), and this is the same value that identifies the conversation for resume and for xats reconnect. Its hook stdin shape is not something AoE needs to depend on to get the id it already has a stable name for.
+Codex looked like it inverted this. It exports `$CODEX_THREAD_ID` (0.124 and later), and that is the same value identifying the conversation for resume and for xats reconnect, so this design first had Codex read the variable.
 
-So the source becomes a property of the agent: Claude reads stdin `session_id`, Codex reads `$CODEX_THREAD_ID`. This is narrower than reverting to "read an environment variable", which is what the earlier design got wrong: the variable is named per agent, not guessed from a pattern.
+That was wrong, and a live session is what showed it: Codex exports the variable into the environment of the commands its **tools** run, not into its **hooks'**. The measurement is by elimination, and it is the reason the conclusion is trustworthy rather than another guess. A Codex pane's hook wrote its status file, which is gated on `$AOE_INSTANCE_ID` -- a variable AoE injects into the Codex process and nothing else sets -- so the hook demonstrably inherits the agent's full environment. The same hook's capture, running first in the same command, wrote no row. Full environment plus a live `$TMUX_PANE` leaves the thread variable as the only gate it could have failed.
+
+One earlier observation had pointed the other way and was over-read: a `codex exec` invocation *did* produce a row carrying a thread id. That process was the child of a tool command, so it inherited `$CODEX_THREAD_ID` from the tool environment its parent had set. It showed that the variable reaches nested processes, not that it reaches hooks.
+
+So the source stays a property of the agent, and every agent's is currently `HookStdin`. Keeping it named rather than assumed is what let this be corrected in one registry line instead of across the capture path.
 
 An earlier draft of this decision went one step further and said an agent with no declared source is not captured at all. That was wrong, and the suite is what showed it: a pane recorded as `shell` -- an adopted pane next to an agent -- stopped being capturable, and two recovery tests that depend on that shape went red. The property worth having is narrower than the rule that broke them. What must never happen is a Codex pane recorded under the id on its stdin, because that id is real and identifies something else. An agent AoE installs no hook for cannot reach this path from a hook at all, and a caller that names one is stating the id outright rather than having it guessed. So a declared source is exclusive, and no declaration keeps the stdin id.
 
@@ -83,7 +87,9 @@ What Codex does forward per session is configuration. `-c shell_environment_poli
 
 The capture reads `$AOE_TMUX_PANE` first and `$TMUX_PANE` only as a fallback. The precedence is that way round because an agent sets the first only when the second names a pane that is not its own, so preferring the fallback would let a stale value claim someone else's pane.
 
-Decision 1 is unchanged by this, and the same investigation is what confirms it. A nested `codex exec` inherits `$CODEX_THREAD_ID` from its parent, so a subagent's hook reports the parent conversation under the parent's pane, which is the row that should be there. Reading the id from hook stdin instead would give the subagent's own transient id and overwrite the pane's real conversation with it.
+This is separate from Decision 1, which the same investigation went on to correct in the other direction: the pane is unreliable only for app-server-backed clients, while the thread variable is absent from every Codex hook.
+
+The overrides are kept for the standalone case as well, where `$TMUX_PANE` is already correct. They are what makes `$AOE_INSTANCE_ID` reach the hook regardless of what the user's `shell_environment_policy.inherit` is set to, rather than depending on an inheritance that happens to work today.
 
 ## Risks / Trade-offs
 

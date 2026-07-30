@@ -7,9 +7,8 @@
 //! `$AOE_INSTANCE_ID`.
 //!
 //! The native session id comes from the source the agent declares in the
-//! registry: Claude's arrives as `session_id` in the hook's stdin JSON, Codex's
-//! as `$CODEX_THREAD_ID` in the pane's environment. The working directory keeps
-//! its own chain (stdin `cwd`, then `$PWD`) for both.
+//! registry; today every agent's arrives as `session_id` in the hook's stdin
+//! JSON. The working directory keeps its own chain (stdin `cwd`, then `$PWD`).
 //!
 //! It MUST never block or fail the agent: any error (no tmux pane, bad JSON,
 //! locked db) results in a clean exit 0 with no row written.
