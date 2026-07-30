@@ -283,6 +283,10 @@ const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp@latest";
 /// not named `*_TOKEN`: the xats project already uses `XATS_TOKEN` for the
 /// daemon's bearer credential, and both appear in the same launcher shell.
 const XATS_IDENTITY_KEY_ENV: &str = "XATS_IDENTITY_KEY";
+/// TTL for the Codex pane pre-registration row, in seconds. The daemon's
+/// documented ceiling; its 120s default TTL can expire before a Codex cold
+/// start finishes, closing the poke-back window the identity recovery needs.
+const CODEX_XATS_PREREGISTER_TTL_SECONDS: u32 = 600;
 
 const CODEX_XATS_MISSING_PANE: &str = "[xats] Missing TMUX_PANE for Codex pre-registration.";
 const CODEX_XATS_MISSING_UUIDGEN: &str =
@@ -884,15 +888,25 @@ impl Instance {
                  printf '%s\\n' '{app_server_unavailable}' >&2; \
                  exit 1; \
              fi; \
+             if [ -n \"${{{identity_env}:-}}\" ]; then \
+                 set -- --identity-key \"${identity_env}\" --ttl-seconds {ttl}; \
+             else \
+                 set -- --ttl-seconds {ttl}; \
+             fi; \
              if ! npx --no-install {package} pre-register-codex-pane \
-                 --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"; then \
-                 printf '%s\\n' '[xats] Failed to pre-register the Codex pane.' >&2; \
-                 exit 1; \
+                 --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \"$@\"; then \
+                 if ! npx --no-install {package} pre-register-codex-pane \
+                     --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"; then \
+                     printf '%s\\n' '[xats] Failed to pre-register the Codex pane.' >&2; \
+                     exit 1; \
+                 fi; \
              fi; \
              exec {codex_command}",
             host = CODEX_XATS_APP_SERVER_HOST,
             port = CODEX_XATS_APP_SERVER_PORT,
             package = CODEX_XATS_PACKAGE,
+            identity_env = XATS_IDENTITY_KEY_ENV,
+            ttl = CODEX_XATS_PREREGISTER_TTL_SECONDS,
             missing_pane = CODEX_XATS_MISSING_PANE,
             missing_uuidgen = CODEX_XATS_MISSING_UUIDGEN,
             missing_nc = CODEX_XATS_MISSING_NC,
@@ -3649,6 +3663,7 @@ mod tests {
 
         assert!(cmd.contains(&format!("resume {token}")));
         assert!(cmd.find("--remote").unwrap() < cmd.find(&format!("resume {token}")).unwrap());
+        assert_codex_xats_preregister_shape(&cmd);
     }
 
     #[test]
@@ -3662,6 +3677,7 @@ mod tests {
         assert!(resumed);
         assert!(resume_cmd.contains("pre-register-codex-pane"));
         assert!(resume_cmd.contains(&format!("resume {token}")));
+        assert_codex_xats_preregister_shape(&resume_cmd);
 
         let (fresh_cmd, resumed) = inst
             .build_pane_resume_plan("codex", token, true, RestartMode::Fresh, None)
@@ -3669,6 +3685,7 @@ mod tests {
         assert!(!resumed);
         assert!(fresh_cmd.contains("pre-register-codex-pane"));
         assert!(!fresh_cmd.contains(&format!("resume {token}")));
+        assert_codex_xats_preregister_shape(&fresh_cmd);
     }
 
     #[test]
@@ -3685,6 +3702,77 @@ mod tests {
         assert!(cmd.contains(&format!("fork {token}")));
         assert!(cmd.contains("pre-register-codex-pane"));
         assert!(cmd.find("--remote").unwrap() < cmd.find(&format!("fork {token}")).unwrap());
+        assert_codex_xats_preregister_shape(&cmd);
+    }
+
+    /// The pre-registration call shape every launch plan must carry: the
+    /// identity key as a pane-shell expansion plus the lengthened row TTL.
+    fn assert_codex_xats_preregister_shape(cmd: &str) {
+        assert!(
+            cmd.contains(r#"--identity-key "$XATS_IDENTITY_KEY""#),
+            "missing identity-key shell expansion: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!(
+                "--ttl-seconds {CODEX_XATS_PREREGISTER_TTL_SECONDS}"
+            )),
+            "missing pre-registration TTL: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_codex_xats_preregister_first_attempt_carries_key_and_ttl() {
+        let mut inst = codex_xats_instance();
+        inst.xats_identity_key = Some("secret-identity-key-value".to_string());
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert_codex_xats_preregister_shape(&cmd);
+        // Inside the bootstrap script the key rides only as a shell expansion;
+        // Rust never interpolates the stored value into the script text. The
+        // value's one legitimate home is the env-injection prefix before the
+        // outer shell.
+        let script = &cmd[cmd.find("sh -c").unwrap()..];
+        assert!(!script.contains("secret-identity-key-value"));
+        assert!(cmd.contains("XATS_IDENTITY_KEY='secret-identity-key-value' "));
+        // The key is optional: the empty-variable branch sends only the TTL.
+        assert!(cmd.contains(&format!(
+            "set -- --ttl-seconds {CODEX_XATS_PREREGISTER_TTL_SECONDS}"
+        )));
+
+        // Two pre-registration calls: the first carries the optional args,
+        // the retry reproduces the exact pre-change call.
+        let first = cmd.find("pre-register-codex-pane").unwrap();
+        let second = cmd[first + 1..]
+            .find("pre-register-codex-pane")
+            .map(|i| i + first + 1)
+            .expect("expected a retry pre-registration call");
+        assert!(
+            !cmd[second + 1..].contains("pre-register-codex-pane"),
+            "expected exactly two pre-registration calls: {cmd}"
+        );
+        let first_call = &cmd[first..second];
+        let retry_call = &cmd[second..cmd.rfind(" exec ").unwrap()];
+        assert!(first_call.contains(r#""$@""#));
+        assert!(!retry_call.contains(r#""$@""#));
+        assert!(!retry_call.contains("identity-key"));
+        assert!(!retry_call.contains("ttl"));
+    }
+
+    #[test]
+    fn test_codex_xats_exec_command_carries_no_identity_material() {
+        let cmd = codex_xats_instance().build_agent_command(None).unwrap();
+
+        let execed = &cmd[cmd.rfind(" exec ").unwrap()..];
+        assert!(
+            !execed.contains("identity-key"),
+            "argv leaks flag: {execed}"
+        );
+        assert!(
+            !execed.contains("XATS_IDENTITY_KEY"),
+            "argv leaks key reference: {execed}"
+        );
+        assert!(!execed.contains("ttl"), "argv leaks TTL: {execed}");
     }
 
     #[test]
