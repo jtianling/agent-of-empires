@@ -89,7 +89,19 @@ The capture reads `$AOE_TMUX_PANE` first and `$TMUX_PANE` only as a fallback. Th
 
 This is separate from Decision 1, which the same investigation went on to correct in the other direction: the pane is unreliable only for app-server-backed clients, while the thread variable is absent from every Codex hook.
 
-The overrides are kept for the standalone case as well, where `$TMUX_PANE` is already correct. They are what makes `$AOE_INSTANCE_ID` reach the hook regardless of what the user's `shell_environment_policy.inherit` is set to, rather than depending on an inheritance that happens to work today.
+**The remedy above was then falsified on a live session.** A client launched with both overrides on its command line fired a hook that recorded the daemon's pane anyway: `shell_environment_policy.set` is applied to the environment of the *shell tool's* commands -- the name says so -- and never to hooks. The probe that had validated the mechanism was itself a shell tool command, so it validated the wrong executor. The diagnosis in this section stands; the remedy is superseded by Decision 7.
+
+### Decision 7: No Codex hooks at all -- the rollout file is the source of truth
+
+Decision 6 left Codex hooks with no channel that can carry the pane: the environment lies about it, per-session config never reaches them, and their stdin has no pane field. Baking the pane into the hook command itself per session would change the command's trust hash on every launch and reprompt the user each time. Every hook-shaped option is exhausted, so Codex has no hooks: the registry entry drops its hook configuration, nothing is written under `~/.codex/`, and the trust step (Decision 3) disappears with the file. Codex status stays on pane-content detection, which is what it was before this change.
+
+What replaces the hook is Codex's own bookkeeping. Every conversation, in every launch mode, writes one rollout file -- `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl`, first line carrying the conversation's `cwd` -- and AoE knows everything else at launch: the pane, the instance, the project path, and when the pane's process started. The reconciler binds a Codex instance's primary pane to the earliest unclaimed rollout created after the pane started in the instance's project directory, and the existing snapshot path turns that into a durable slot. A resumed conversation's rollout predates the respawn and never re-matches, which is correct: its slot already carries the conversation. A command override is the user's own program and is never claimed for.
+
+The capture subcommand also stops trusting `$TMUX_PANE` on faith, hook or no hook: it verifies the named pane's root process is among its own ancestors before writing, and skips the write on a positive mismatch. A hook running in a Codex daemon fails that check (the daemon is disowned; the pane it inherited belongs to a shell), which is what turns "stale hooks still installed on some machine" from a data-corruption path into a no-op. Verification is positive-only -- an unanswerable check (no server, pane gone) is accepted -- so hand-launched agents outside AoE's knowledge keep being captured.
+
+What this gives up: a hand-launched Codex in an adopted pane is no longer captured (its hook is gone, and no launch record exists to anchor a rollout match). The app-server case was never capturable by hooks, and the AoE-launched case -- the one recovery is responsible for -- is fully covered.
+
+One trap worth recording for the tests: `tmux` silently falls back to the real default socket when `$TMUX_TMPDIR` names a directory that does not exist. A test that wants "no server reachable" must point at an existing empty directory, or the ownership check above answers against the developer's live server.
 
 ## Risks / Trade-offs
 

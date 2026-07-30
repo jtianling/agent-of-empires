@@ -97,18 +97,16 @@ fn run_record_pane(
     cmd.arg("__record-pane");
     if let Some(agent) = agent {
         cmd.arg("--agent").arg(agent);
-        // A hook fires with its own agent's environment around it, and an
-        // agent whose id does not arrive on stdin names the variable it does
-        // arrive in. Read from the registry so a new agent's source cannot go
-        // missing here.
-        let source = agent_of_empires::agents::get_agent(agent)
-            .and_then(|a| a.hook_config.as_ref())
-            .map(|hooks| hooks.session_id_source);
-        if let Some(agent_of_empires::agents::SessionIdSource::EnvVar(name)) = source {
-            cmd.env(name, session_id);
-        }
     }
+    // This simulates a hook from outside the pane, so keep the capture's
+    // pane-ownership check unanswerable rather than answerably wrong: the dir
+    // MUST exist -- tmux silently falls back to the real default socket when
+    // $TMUX_TMPDIR does not.
+    let no_server = h.home_path().join("no-tmux-server");
+    std::fs::create_dir_all(&no_server).expect("create serverless tmpdir");
     let mut child = cmd
+        .env_remove("TMUX")
+        .env("TMUX_TMPDIR", &no_server)
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")

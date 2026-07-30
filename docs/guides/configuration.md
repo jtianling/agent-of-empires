@@ -210,24 +210,17 @@ start a session with that agent, and the hook is a no-op outside AoE sessions.
 | Agent  | File                    |
 | ------ | ----------------------- |
 | Claude | `~/.claude/settings.json` |
-| Codex  | `~/.codex/hooks.json`     |
 | Gemini | `~/.gemini/settings.json` |
 | Cursor | `~/.cursor/settings.json` |
 
 Entries you wrote yourself are preserved; AoE adds, replaces, and removes only
-its own. For Codex, AoE writes `hooks.json` and never `~/.codex/config.toml` --
-that file is yours, and it is also where Codex records which hooks you have
-trusted.
+its own.
 
-**Codex asks you to trust the hook once.** Codex does not run a newly installed
-hook until you have reviewed it, so the first Codex session after installation
-reports no status and its pane is not tracked for recovery. Trust the hook when
-Codex prompts you and both start working. AoE will not pass
-`--dangerously-bypass-hook-trust` on your behalf.
-
-**Trusting is not enough if a Codex app-server is already running.** Codex
-clients started as `codex --remote ws://...` share one long-lived app-server
-process, and that process reads the hooks file when it starts. One that was
-already running when AoE wrote `hooks.json` never picks it up, so its sessions
-report no status however many times you trust the hook. Restart the app-server
-(or start a Codex client that does not attach to it) and the hooks take effect.
+**Codex is tracked without hooks.** Codex clients started as
+`codex --remote ws://...` share one long-lived app-server process, and that
+process -- not the pane's -- is where hooks execute, with an environment frozen
+at daemon start. A hook there cannot know which pane its session belongs to, so
+AoE does not install Codex hooks at all. Instead it binds an AoE-launched Codex
+pane to its conversation by reading Codex's own session files
+(`~/.codex/sessions/.../rollout-*.jsonl`), and detects its status from pane
+content. Nothing is ever written to `~/.codex/`.

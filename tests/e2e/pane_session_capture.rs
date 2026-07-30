@@ -104,6 +104,14 @@ fn run_record_pane_as(
             cmd.env(key, value);
         }
     }
+    // These tests simulate a hook from outside any pane, so keep the capture's
+    // pane-ownership check unanswerable rather than answerably wrong: point it
+    // at a serverless socket dir, and drop any real $TMUX so it cannot reach
+    // the developer's own server. The dir MUST exist: tmux silently falls back
+    // to the real default socket when $TMUX_TMPDIR does not.
+    let no_server = h.home_path().join("no-tmux-server");
+    std::fs::create_dir_all(&no_server).expect("create serverless tmpdir");
+    cmd.env_remove("TMUX").env("TMUX_TMPDIR", &no_server);
     cmd.env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")
@@ -266,40 +274,96 @@ fn a_capture_without_a_session_id_writes_no_row() {
     );
 }
 
-/// An agent that supplies its own pane is believed over `$TMUX_PANE`. It only
-/// supplies one when its hooks run somewhere `$TMUX_PANE` names a pane that is
-/// not its own, so the other precedence would let a stale value claim a pane
-/// the agent has nothing to do with.
+/// A `$TMUX_PANE` that checkably belongs to someone else is not recorded.
+/// This is the shared-app-server failure measured live: every Codex session's
+/// hooks inherited the daemon's own `$TMUX_PANE`, so each would have claimed
+/// the daemon's pane -- an unrelated live session -- and recovery acts on
+/// those rows.
 #[test]
 #[serial]
-fn an_agent_supplied_pane_beats_the_ambient_one() {
+fn a_pane_that_belongs_to_another_process_is_not_claimed() {
     crate::harness::require_tmux!();
     require_sqlite3!();
 
-    let h = TuiTestHarness::new("capture_pane_precedence");
-    add_and_start(&h, "Capture Pane Precedence");
+    let h = TuiTestHarness::new("capture_foreign_pane");
+    let title = add_and_start(&h, "Capture Foreign Pane");
     let db = db_path(&h);
 
-    let stdin_json = r#"{"session_id":"own-pane-sess","cwd":"/work"}"#;
-    let ok = run_record_pane_as(
-        &h,
-        Some("%80"),
-        Some("inst-pane-precedence"),
-        stdin_json,
-        Some("codex"),
-        &[("AOE_TMUX_PANE", "%81")],
-    );
-    assert!(ok, "capture should exit 0");
+    // A real pane of the managed session, named from OUTSIDE it: the capture
+    // can reach the harness server, resolve the pane's root process, and see
+    // that this process is no descendant of it.
+    let instance_id = instance_id_from_sessions_json(&h);
+    let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, &title);
+    let pane_id = h.tmux_display_message(&session_name, "#{pane_id}");
 
-    let mine = sqlite_query(&db, "SELECT count(*) FROM pane_live WHERE tmux_pane='%81';");
-    assert_eq!(
-        mine, "1",
-        "the pane the agent named must be the one recorded"
+    let stdin_json = r#"{"session_id":"stolen-sess","cwd":"/work"}"#;
+    let mut cmd = Command::new(h.binary_path());
+    cmd.arg("__record-pane")
+        .env_remove("TMUX")
+        .env("TMUX_TMPDIR", h.tmux_tmpdir())
+        .env("HOME", h.home_path())
+        .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
+        .env("AGENT_OF_EMPIRES_PROFILE", "default")
+        .env("TMUX_PANE", &pane_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn record-pane");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_json.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "a refused capture still exits 0");
+
+    let count = sqlite_query(
+        &db,
+        &format!("SELECT count(*) FROM pane_live WHERE tmux_pane='{pane_id}';"),
     );
-    let ambient = sqlite_query(&db, "SELECT count(*) FROM pane_live WHERE tmux_pane='%80';");
     assert_eq!(
-        ambient, "0",
-        "the ambient $TMUX_PANE must not also claim a row"
+        count, "0",
+        "a pane hosted by another process must not be claimed"
+    );
+}
+
+/// The check from the previous test must not eat legitimate captures: run the
+/// same command from INSIDE the pane, the way a real hook fires, and the row
+/// appears.
+#[test]
+#[serial]
+fn a_capture_from_inside_its_own_pane_is_recorded() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let h = TuiTestHarness::new("capture_own_pane");
+    let title = add_and_start(&h, "Capture Own Pane");
+    let db = db_path(&h);
+
+    let instance_id = instance_id_from_sessions_json(&h);
+    let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, &title);
+    let pane_id = h.tmux_display_message(&session_name, "#{pane_id}");
+
+    // The managed pane runs `sh` (cmd-override); type the hook command into it
+    // so the capture is a true descendant of the pane's own process.
+    let json = r#"{\"session_id\":\"own-pane-sess\",\"cwd\":\"/work\"}"#;
+    let capture_cmd = format!(
+        "printf '%s' \"{json}\" | HOME={home} XDG_CONFIG_HOME={home}/.config \
+         AGENT_OF_EMPIRES_PROFILE=default {bin} __record-pane",
+        home = h.home_path().display(),
+        bin = h.binary_path().display(),
+    );
+    h.send_keys_to_session(&session_name, &capture_cmd);
+
+    wait_for_count(
+        &h,
+        &db,
+        &format!(
+            "SELECT count(*) FROM pane_live WHERE tmux_pane='{pane_id}' \
+             AND native_session_id='own-pane-sess';"
+        ),
+        "1",
     );
 }
 
@@ -383,6 +447,23 @@ fn wait_for_count(h: &TuiTestHarness, db: &std::path::Path, sql: &str, expected:
     }
 }
 
+/// Id of the first (only) registered instance, read from sessions.json.
+fn instance_id_from_sessions_json(h: &TuiTestHarness) -> String {
+    let sessions_path = if cfg!(target_os = "linux") {
+        h.home_path()
+            .join(".config/agent-of-empires/profiles/default/sessions.json")
+    } else {
+        h.home_path()
+            .join(".agent-of-empires/profiles/default/sessions.json")
+    };
+    let content = std::fs::read_to_string(&sessions_path).expect("read sessions.json");
+    let sessions: serde_json::Value = serde_json::from_str(&content).unwrap();
+    sessions.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 #[serial]
 fn reconciler_snapshots_pane_capture_into_slot() {
@@ -393,21 +474,7 @@ fn reconciler_snapshots_pane_capture_into_slot() {
     add_and_start(&h, "Reconcile Snapshot");
     let db = db_path(&h);
 
-    let instance_id = {
-        let sessions_path = if cfg!(target_os = "linux") {
-            h.home_path()
-                .join(".config/agent-of-empires/profiles/default/sessions.json")
-        } else {
-            h.home_path()
-                .join(".agent-of-empires/profiles/default/sessions.json")
-        };
-        let content = std::fs::read_to_string(&sessions_path).expect("read sessions.json");
-        let sessions: serde_json::Value = serde_json::from_str(&content).unwrap();
-        sessions.as_array().unwrap()[0]["id"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
+    let instance_id = instance_id_from_sessions_json(&h);
 
     // Resolve the managed session's primary pane id.
     let session_name =
@@ -442,48 +509,66 @@ fn reconciler_snapshots_pane_capture_into_slot() {
 }
 
 /// The behavior the whole Codex change exists for: a Codex pane reaching a
-/// durable slot that records `codex`. Every slot AoE had ever written before
-/// said `claude`, including for panes running Codex, and recovery relaunched
-/// them accordingly.
+/// durable slot that records `codex`, bound to its conversation with no hook
+/// involved -- the reconciler reads Codex's own rollout file, matching on the
+/// instance's working directory and the pane's launch time.
 #[test]
 #[serial]
-fn a_codex_pane_reaches_a_durable_slot_recording_codex() {
+fn a_codex_pane_reaches_a_durable_slot_via_its_rollout_file() {
     crate::harness::require_tmux!();
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("reconcile_codex_slot");
-    add_and_start(&h, "Reconcile Codex");
+    h.install_tool_stub("codex");
+
+    let project = h.project_path();
+    let add = h.run_cli(&[
+        "add",
+        project.to_str().unwrap(),
+        "-t",
+        "Reconcile Codex",
+        "-c",
+        "codex",
+    ]);
+    assert!(
+        add.status.success(),
+        "aoe add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let start = h.run_cli_in_tmux(&["session", "start", "Reconcile Codex"]);
+    assert!(
+        start.status.success(),
+        "aoe session start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
     let db = db_path(&h);
 
-    let instance_id = {
-        let sessions_path = if cfg!(target_os = "linux") {
-            h.home_path()
-                .join(".config/agent-of-empires/profiles/default/sessions.json")
-        } else {
-            h.home_path()
-                .join(".agent-of-empires/profiles/default/sessions.json")
-        };
-        let content = std::fs::read_to_string(&sessions_path).expect("read sessions.json");
-        let sessions: serde_json::Value = serde_json::from_str(&content).unwrap();
-        sessions.as_array().unwrap()[0]["id"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-
+    let instance_id = instance_id_from_sessions_json(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Reconcile Codex");
     let pane_id = h.tmux_display_message(&session_name, "#{pane_id}");
 
-    let ok = run_record_pane_as(
-        &h,
-        Some(&pane_id),
-        Some(&instance_id),
-        r#"{"session_id":"codex-slot-thread","cwd":"/work"}"#,
-        Some("codex"),
-        &[],
+    // The rollout file the running Codex would have written: created after the
+    // pane started, in the instance's working directory.
+    let thread_id = "0199aaaa-bbbb-cccc-dddd-eeeeffff0001";
+    let now = chrono::Local::now();
+    let day_dir = h
+        .home_path()
+        .join(".codex/sessions")
+        .join(now.format("%Y/%m/%d").to_string());
+    std::fs::create_dir_all(&day_dir).expect("create rollout dir");
+    let meta = format!(
+        "{{\"timestamp\":\"x\",\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{thread_id}\",\"cwd\":\"{}\"}}}}\n",
+        project.display()
     );
-    assert!(ok, "capture should succeed for the managed Codex pane");
+    std::fs::write(
+        day_dir.join(format!(
+            "rollout-{}-{thread_id}.jsonl",
+            now.format("%Y-%m-%dT%H-%M-%S")
+        )),
+        meta,
+    )
+    .expect("write rollout file");
 
     h.spawn_tui();
     h.wait_for("Agent of Empires");
@@ -491,19 +576,20 @@ fn a_codex_pane_reaches_a_durable_slot_recording_codex() {
     wait_for_count(
         &h,
         &db,
-        &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
+        &format!(
+            "SELECT count(*) FROM pane_live WHERE tmux_pane='{pane_id}' \
+             AND agent='codex' AND native_session_id='{thread_id}';"
+        ),
         "1",
     );
-
-    let value = sqlite_query(
+    wait_for_count(
+        &h,
         &db,
         &format!(
-            "SELECT agent || '|' || native_session_id FROM agent_slot WHERE instance_id='{instance_id}';"
+            "SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}' \
+             AND agent='codex' AND native_session_id='{thread_id}';"
         ),
-    );
-    assert_eq!(
-        value, "codex|codex-slot-thread",
-        "the durable slot must record the pane's own agent and its thread id"
+        "1",
     );
 }
 
@@ -517,19 +603,7 @@ fn reconciler_caps_at_four_slots() {
     add_and_start(&h, "Reconcile Four Cap");
     let db = db_path(&h);
 
-    let sessions_path = if cfg!(target_os = "linux") {
-        h.home_path()
-            .join(".config/agent-of-empires/profiles/default/sessions.json")
-    } else {
-        h.home_path()
-            .join(".agent-of-empires/profiles/default/sessions.json")
-    };
-    let content = std::fs::read_to_string(&sessions_path).expect("read sessions.json");
-    let sessions: serde_json::Value = serde_json::from_str(&content).unwrap();
-    let instance_id = sessions.as_array().unwrap()[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let instance_id = instance_id_from_sessions_json(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Reconcile Four Cap");
 

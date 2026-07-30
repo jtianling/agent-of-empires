@@ -101,22 +101,6 @@ fn run_record_pane(
 /// [`run_record_pane`] for a pane running `agent`, the way the hook reports a
 /// non-Claude agent. A slot's recorded agent is what recovery relaunches it as,
 /// so it is the interesting variable for an instance whose own tool differs.
-/// Put the session id where the simulated agent's hook would actually find it.
-///
-/// A hook fires with its own agent's environment around it, and an agent whose
-/// id does not arrive on stdin names the variable it does arrive in. No agent
-/// does today, so this sets nothing; it is read from the registry rather than
-/// restated here so a new agent's source cannot silently go missing from the
-/// simulation.
-fn put_session_id_in_env(cmd: &mut Command, agent: &str, session_id: &str) {
-    let source = agent_of_empires::agents::get_agent(agent)
-        .and_then(|a| a.hook_config.as_ref())
-        .map(|hooks| hooks.session_id_source);
-    if let Some(agent_of_empires::agents::SessionIdSource::EnvVar(name)) = source {
-        cmd.env(name, session_id);
-    }
-}
-
 fn run_record_pane_as(
     h: &TuiTestHarness,
     tmux_pane: &str,
@@ -130,8 +114,16 @@ fn run_record_pane_as(
     );
     let mut cmd = Command::new(h.binary_path());
     cmd.arg("__record-pane").arg("--agent").arg(agent);
-    put_session_id_in_env(&mut cmd, agent, session_id);
+    // This simulates a hook from outside the pane, so keep the capture's
+    // pane-ownership check unanswerable rather than answerably wrong: point it
+    // at a serverless socket dir (which MUST exist -- tmux silently falls back
+    // to the real default socket when $TMUX_TMPDIR does not), and drop any
+    // real $TMUX so it cannot reach the developer's own server.
+    let no_server = h.home_path().join("no-tmux-server");
+    std::fs::create_dir_all(&no_server).expect("create serverless tmpdir");
     let mut child = cmd
+        .env_remove("TMUX")
+        .env("TMUX_TMPDIR", &no_server)
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")

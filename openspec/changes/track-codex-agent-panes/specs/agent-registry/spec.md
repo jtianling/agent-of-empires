@@ -1,20 +1,19 @@
 ## ADDED Requirements
 
-### Requirement: Codex is a tracked agent
+### Requirement: Codex is a tracked agent, without hooks
 
-The `codex` registry entry SHALL carry a hook configuration, so that Codex panes report themselves into `pane_live` the way every other tracked agent's panes do.
+The `codex` registry entry SHALL NOT carry a hook configuration. Codex executes hooks inside a shared `--remote` app-server whose environment is frozen at daemon start, so a hook there cannot name the pane its session runs in, and any value it read would be another pane's. A hook configuration in the registry asserts that the agent's hooks run in the agent's own process; Codex cannot make that assertion.
 
-The configuration SHALL target `~/.codex/hooks.json`, the dedicated hooks file Codex reads beside `config.toml`. AoE SHALL NOT write `~/.codex/config.toml`, which is a file the user owns and edits.
+Codex panes SHALL instead be bound to their conversations from Codex's own rollout files (see `pane-session-capture`), and Codex status SHALL come from pane-content detection.
 
-The configuration SHALL declare Codex's own event names. Codex has no `Notification` event; `PermissionRequest` is what stands for a pane waiting on the user.
+AoE SHALL NOT write anything under `~/.codex/`.
 
 #### Scenario: Codex panes can occupy durable slots
-- **WHEN** a Codex agent runs in a pane of a managed session
-- **AND** it fires a hook event
+- **WHEN** an AoE-launched Codex agent runs in the primary pane of a managed session
+- **AND** its rollout file exists
 - **THEN** the reconciler SHALL be able to snapshot that pane into an `agent_slot`
 - **AND** the slot's recorded agent SHALL be `codex`
 
 #### Scenario: The user's Codex configuration is not written
-- **WHEN** AoE installs Codex hooks
-- **THEN** it SHALL write `~/.codex/hooks.json`
-- **AND** `~/.codex/config.toml` SHALL be unchanged
+- **WHEN** a Codex session is started, restarted, or reconciled
+- **THEN** no file under `~/.codex/` SHALL be created or modified by AoE

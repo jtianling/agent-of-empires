@@ -923,6 +923,27 @@ last_seen_version = "{}"
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// The harness's private `TMUX_TMPDIR`, for a test that needs a spawned
+    /// subprocess to reach (or provably fail to reach) this test's tmux server.
+    pub fn tmux_tmpdir(&self) -> &Path {
+        &self.tmux_tmpdir
+    }
+
+    /// Type a shell command into an arbitrary session's active pane and press
+    /// Enter. Unlike [`send_keys`], which drives the harness's own TUI session,
+    /// this targets a managed session's pane directly.
+    pub fn send_keys_to_session(&self, session: &str, command: &str) {
+        let output = self
+            .tmux_command(&["send-keys", "-t", session, command, "Enter"])
+            .expect("failed to send keys to session");
+        assert!(
+            output.status.success(),
+            "send-keys to {} failed: {}",
+            session,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     pub fn tmux_display_message(&self, target: &str, format: &str) -> String {
         let output = self
             .tmux_command(&["display-message", "-t", target, "-p", format])

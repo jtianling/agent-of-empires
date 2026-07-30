@@ -12,6 +12,7 @@
 //! EXISTS`), so both the migration and a defensive open path can apply it
 //! safely.
 
+pub mod codex_rollout;
 pub mod reconcile;
 
 use std::path::{Path, PathBuf};
@@ -162,6 +163,21 @@ impl Store {
             )
             .ok();
         Ok(row)
+    }
+
+    /// Every native session id any pane or slot currently claims. Used by the
+    /// Codex rollout matcher so a conversation is never bound to two panes.
+    pub fn claimed_native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT native_session_id FROM pane_live \
+             UNION SELECT native_session_id FROM agent_slot",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for r in rows {
+            out.insert(r?);
+        }
+        Ok(out)
     }
 
     /// Return all `tmux_pane` keys currently present in `pane_live`.

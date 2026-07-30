@@ -179,6 +179,11 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
             live_panes.insert(id.clone());
         }
         let primary = crate::tmux::get_agent_pane_id(&session_name);
+        // A Codex pane cannot report itself through hooks, so its capture is
+        // derived from Codex's rollout files before the snapshot below.
+        if let Some(primary) = primary.as_deref() {
+            crate::db::codex_rollout::maybe_claim_for_pane(&store, inst, primary);
+        }
         if let Err(e) = reconcile_session(&store, inst, &panes, primary.as_deref()) {
             tracing::debug!("reconcile: session {} failed: {}", inst.id, e);
         }

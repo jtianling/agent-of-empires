@@ -41,6 +41,14 @@
 ## 7. Correct the Session-Id Source (Decision 1, revised)
 
 - [x] 7.1 Move Codex's declared source to hook stdin, now that a live session has shown `$CODEX_THREAD_ID` is absent from hook environments.
-- [x] 7.2 Rewrite the coverage that encoded the disproved premise, and add coverage that an agent-supplied pane beats the ambient one.
-- [ ] 7.3 On the real machine, confirm a Codex pane finally produces a `pane_live` row. This is what the whole change exists for and is still unverified.
-- [ ] 7.4 If it produces one, decide whether `SessionIdSource` still earns its place: every agent now declares `HookStdin`, so the enum has no live second variant.
+- [x] 7.2 Rewrite the coverage that encoded the disproved premise.
+- [x] 7.3 On the real machine, confirm a Codex pane finally produces a `pane_live` row. It did -- and the row carried the app-server daemon's pane despite the section-6 overrides on the client's command line, which is what falsified that remedy (Decision 7). The `SessionIdSource` enum was retired along with it: with Codex out of the hook registry every remaining agent reads stdin, so the source is no longer a per-agent property.
+
+## 8. Replace Codex Hooks with Rollout Binding (Decision 7)
+
+- [x] 8.1 Drop the `codex` hook configuration from the registry; nothing is written under `~/.codex/` anymore, and the trust step disappears with it.
+- [x] 8.2 Bind a Codex instance's primary pane to the earliest unclaimed rollout created after the pane's process started in the instance's project directory, from the reconciler tick, writing the `pane_live` row the snapshot path already consumes.
+- [x] 8.3 Guard the capture subcommand against a `$TMUX_PANE` that names a pane whose root process is not among its ancestors, so a stale hook in a shared daemon skips rather than claims another session's pane. Positive-only: an unanswerable check is accepted.
+- [x] 8.4 Coverage: rollout parsing and claim ordering (unit); a Codex pane reaching a durable slot through a rollout file with no hook involved, a foreign pane refused, and an own-pane capture accepted (e2e). Test helpers that simulate hooks from outside a pane point `$TMUX_TMPDIR` at an existing empty directory -- tmux silently falls back to the real default socket when the directory does not exist.
+- [ ] 8.5 On the real machine: install, restart the TUI, start a Codex session, and confirm its pane and slot rows carry its own pane id and thread id.
+- [ ] 8.6 Clean up the poisoned rows the hook era left behind (`pane_live` and `agent_slot` rows claiming the daemon's panes), and remove `~/.codex/hooks.json`, which nothing reads on AoE's behalf anymore.

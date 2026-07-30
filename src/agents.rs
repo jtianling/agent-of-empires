@@ -34,36 +34,21 @@ pub struct HookEvent {
     pub status: Option<&'static str>,
 }
 
-/// Where a capture reads an agent's native session id from.
-///
-/// Named per agent rather than assumed, so that an agent whose id does not
-/// arrive on hook stdin can say where its own comes from without changing what
-/// every other agent reads.
-///
-/// Codex is the reason this is a choice at all, and it is currently `HookStdin`
-/// like the rest: it does export `$CODEX_THREAD_ID`, but only into the
-/// environment of the commands its tools run, not into its hooks'. Measured by
-/// elimination on a live session -- the hook wrote its status file, which needs
-/// `$AOE_INSTANCE_ID` and so proves the hook inherits the agent's full
-/// environment, while the same hook's capture wrote nothing, which leaves the
-/// thread variable as the only gate it could have failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionIdSource {
-    /// The `session_id` field of the hook's stdin JSON.
-    HookStdin,
-    /// A named environment variable set in the agent's pane.
-    EnvVar(&'static str),
-}
-
 /// Configuration for installing status-detection hooks into an agent's settings file.
+///
+/// An agent belongs here only when its hooks can be relied on to run in the
+/// agent's own process, inheriting the pane's environment. Codex is the
+/// counterexample and has no entry: its `--remote` clients execute hooks in a
+/// shared app-server whose environment was frozen at daemon start, so a hook
+/// there sees another pane's `$TMUX_PANE` and no `$AOE_INSTANCE_ID` at all.
+/// Codex panes are tracked from its rollout files instead (`db::codex_rollout`)
+/// and its status comes from content detection.
 pub struct AgentHookConfig {
     /// Path relative to the home dir where the agent's settings live
     /// (e.g. `.claude/settings.json`).
     pub settings_rel_path: &'static str,
     /// Hook events to register (status transitions).
     pub events: &'static [HookEvent],
-    /// Where this agent's native session id comes from.
-    pub session_id_source: SessionIdSource,
 }
 
 /// Agent-specific configuration for graceful exit and resume-aware restarts.
@@ -160,35 +145,6 @@ const CLAUDE_CURSOR_HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 
-/// Hook events for Codex, whose event names are its own.
-///
-/// Read from the installed `codex-cli 0.145.0` binary rather than from a source
-/// checkout. Codex has no `Notification` event; `PermissionRequest` is what
-/// stands for a pane waiting on the user, and `ElicitationResult` has no
-/// counterpart.
-const CODEX_HOOK_EVENTS: &[HookEvent] = &[
-    HookEvent {
-        name: "PreToolUse",
-        matcher: None,
-        status: Some("running"),
-    },
-    HookEvent {
-        name: "UserPromptSubmit",
-        matcher: None,
-        status: Some("running"),
-    },
-    HookEvent {
-        name: "Stop",
-        matcher: None,
-        status: Some("idle"),
-    },
-    HookEvent {
-        name: "PermissionRequest",
-        matcher: None,
-        status: Some("waiting"),
-    },
-];
-
 pub const AGENTS: &[AgentDef] = &[
     AgentDef {
         name: "claude",
@@ -203,7 +159,6 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("CLAUDE_CONFIG_DIR", "/root/.claude")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".claude/settings.json",
-            session_id_source: SessionIdSource::HookStdin,
             events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
         resume: Some(ResumeConfig {
@@ -263,15 +218,9 @@ pub const AGENTS: &[AgentDef] = &[
         supports_host_launch: true,
         detect_status: status_detection::detect_codex_status,
         container_env: &[],
-        hook_config: Some(AgentHookConfig {
-            // The hooks file Codex reads beside `config.toml`. Codex loads both,
-            // and only this one is AoE's to own: `config.toml` is where the user
-            // keeps their own configuration, and where Codex itself records
-            // which hooks have been trusted.
-            settings_rel_path: ".codex/hooks.json",
-            session_id_source: SessionIdSource::HookStdin,
-            events: CODEX_HOOK_EVENTS,
-        }),
+        // No hooks: see the `AgentHookConfig` doc. Codex panes are tracked
+        // from its rollout files and its status from content detection.
+        hook_config: None,
         resume: Some(ResumeConfig {
             exit_sequence: &[&["C-c"], &["C-c"]],
             resume_pattern: r"codex resume\s+([0-9a-f-]+)",
@@ -295,7 +244,6 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".gemini/settings.json",
-            session_id_source: SessionIdSource::HookStdin,
             events: &[
                 HookEvent {
                     name: "BeforeTool",
@@ -354,7 +302,6 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("CURSOR_CONFIG_DIR", "/root/.cursor")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".cursor/settings.json",
-            session_id_source: SessionIdSource::HookStdin,
             events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
         resume: None,

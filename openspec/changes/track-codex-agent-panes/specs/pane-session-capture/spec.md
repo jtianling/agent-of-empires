@@ -2,27 +2,31 @@
 
 ### Requirement: Hook captures native session id keyed by tmux pane
 
-The installed agent status hook SHALL, in addition to its existing status-file write, capture the agent's native session id into the SQLite store keyed by `$TMUX_PANE`. The native session id SHALL be read from the source that agent declares, named per agent rather than assumed: Claude supplies it as `.session_id` in the hook's **stdin JSON**, and Codex exports it as the `$CODEX_THREAD_ID` **environment variable** in the pane. An agent that declares a source SHALL NOT be captured from any other; an agent AoE has no hook configuration for SHALL keep the stdin id, which the caller stated outright. The capture SHALL also record the working directory (`.cwd` from stdin or `$PWD`).
+The installed agent status hook SHALL, in addition to its existing status-file write, capture the agent's native session id into the SQLite store keyed by `$TMUX_PANE`. The native session id and working directory SHALL be read from the hook's stdin JSON (`.session_id`, `.cwd`), the working directory falling back to `$PWD`.
 
-#### Scenario: Claude session id captured from stdin
-- **WHEN** a Claude agent fires a hook event inside a tmux pane
+`$TMUX_PANE` SHALL be trusted only after a pane-ownership check: when the pane it names can be resolved and that pane's root process is not an ancestor of the capture process, no row SHALL be written. A hook that executes outside the pane it inherited `$TMUX_PANE` from -- Codex's shared app-server is the measured case -- would otherwise claim a pane belonging to a different session, and recovery acts on those rows. The check SHALL be positive-only: a pane whose ownership cannot be determined (no tmux server reachable, pane gone) is accepted.
+
+#### Scenario: Session id captured from stdin
+- **WHEN** an agent fires a hook event inside a tmux pane
 - **AND** the hook stdin JSON contains `session_id`
 - **THEN** the store SHALL hold a `pane_live` row for that pane's `$TMUX_PANE`
 - **AND** the row's `native_session_id` SHALL equal the stdin `session_id`
 - **AND** the row's `cwd` SHALL equal the agent's working directory
 
-#### Scenario: Codex session id captured from its environment
-- **WHEN** a Codex agent fires a hook event inside a tmux pane
-- **AND** `$CODEX_THREAD_ID` is set in that pane's environment
-- **THEN** the store SHALL hold a `pane_live` row for that pane's `$TMUX_PANE`
-- **AND** the row's `native_session_id` SHALL equal `$CODEX_THREAD_ID`
-- **AND** the row's `agent` SHALL be `codex`
-
-#### Scenario: A capture with no session id from its agent's declared source is not written
-- **WHEN** an agent that declares a source fires a hook event inside a tmux pane
-- **AND** that source yields no session id
+#### Scenario: A capture with no session id is not written
+- **WHEN** a hook event's stdin carries no `session_id`
 - **THEN** the hook SHALL NOT write a capture row
-- **AND** the hook SHALL NOT fall back to another agent's source, even when one is present
+- **AND** the hook SHALL exit successfully without error
+
+#### Scenario: A pane that belongs to another process is not claimed
+- **WHEN** a capture runs with a `$TMUX_PANE` naming a resolvable pane
+- **AND** that pane's root process is not an ancestor of the capture process
+- **THEN** the hook SHALL NOT write a capture row
+- **AND** the hook SHALL exit successfully without error
+
+#### Scenario: A capture from inside its own pane is recorded
+- **WHEN** a capture runs as a descendant of the pane's own process
+- **THEN** the store SHALL hold a `pane_live` row for that pane
 
 #### Scenario: Hand-launched agent without AOE_INSTANCE_ID is still captured
 - **WHEN** a user manually runs an agent inside a shell pane (no `$AOE_INSTANCE_ID` in the environment)
@@ -37,45 +41,25 @@ The installed agent status hook SHALL, in addition to its existing status-file w
 
 ## ADDED Requirements
 
-### Requirement: Codex hooks are installed into the hooks file, not the user's configuration
+### Requirement: A Codex pane is bound to its conversation from Codex's rollout files
 
-AoE SHALL install Codex's status hooks into `~/.codex/hooks.json`. It SHALL add or replace only the hook entries it recognizes as its own and SHALL preserve any entries the user put there. Uninstall SHALL remove only AoE's own entries and SHALL leave the file in place when anything else remains in it.
+The reconciler SHALL bind an AoE-launched Codex pane to its conversation without hooks, by reading Codex's own session records under `$CODEX_HOME/sessions` (default `~/.codex/sessions`): one `rollout-<timestamp>-<thread-id>.jsonl` per conversation, whose first line carries the conversation's working directory.
 
-AoE SHALL NOT write `~/.codex/config.toml`. Codex reads hooks from both that file and `hooks.json`, and only the latter is AoE's to own.
+For a Codex instance whose primary pane has no `pane_live` capture, the claim SHALL be the earliest rollout created at or after the pane's process started, whose working directory matches the instance's project path, and whose thread id no other pane or slot already holds. The claim SHALL write a `pane_live` row (`agent = codex`) for the pane, which the existing snapshot path turns into a durable slot.
 
-Nothing SHALL be written unless Codex is a detected agent on the machine.
+An instance whose command is overridden SHALL NOT be claimed for: the pane runs the user's own program. A resumed pane's conversation predates its respawn and SHALL NOT re-match; its durable slot already carries the right conversation.
 
-#### Scenario: The user's Codex configuration is left alone
-- **WHEN** Codex hooks are installed
-- **THEN** `~/.codex/config.toml` SHALL be byte-identical to what it was before
+#### Scenario: A fresh Codex launch is bound to its rollout
+- **WHEN** an AoE-launched Codex instance's primary pane is running
+- **AND** a rollout created after the pane started names the instance's project path
+- **THEN** the store SHALL hold a `pane_live` row for that pane
+- **AND** the row's `native_session_id` SHALL be the rollout's thread id
+- **AND** the row's `agent` SHALL be `codex`
 
-#### Scenario: A user's own hooks survive installation
-- **WHEN** `~/.codex/hooks.json` holds hook entries AoE did not write
-- **AND** Codex hooks are installed
-- **THEN** those entries SHALL be unchanged
-- **AND** the AoE hook entries SHALL be present
+#### Scenario: A conversation is never bound to two panes
+- **WHEN** a rollout's thread id is already held by another pane or slot
+- **THEN** that rollout SHALL NOT be claimed again
 
-#### Scenario: Uninstall removes only AoE's entries
-- **WHEN** `~/.codex/hooks.json` holds both AoE hook entries and the user's own
-- **AND** hooks are uninstalled
-- **THEN** the AoE hook entries SHALL be gone
-- **AND** the user's entries SHALL remain
-- **AND** the file SHALL NOT be deleted
-
-#### Scenario: Reinstalling does not duplicate entries
-- **WHEN** AoE hook entries are already present
-- **AND** installation runs again
-- **THEN** the entries SHALL be replaced rather than appended
-- **AND** the file SHALL hold exactly one AoE entry per hook event
-
-### Requirement: The Codex hook trust step is reported rather than bypassed
-
-Codex does not run a newly installed hook until the user has trusted it. AoE SHALL NOT pass `--dangerously-bypass-hook-trust` or otherwise arrange for its hooks to run without that review. Installation SHALL tell the user that Codex will ask them to trust the hook once, so that a Codex pane not being captured before that step is understood as the pending step rather than as a failure.
-
-#### Scenario: Installation states the pending trust step
-- **WHEN** Codex hooks are installed
-- **THEN** the user SHALL be told that Codex requires trusting the hook once before it runs
-
-#### Scenario: Trust is never bypassed
-- **WHEN** AoE installs or invokes Codex hooks
-- **THEN** it SHALL NOT use a flag that bypasses Codex's hook trust
+#### Scenario: An older conversation in the same directory is not claimed
+- **WHEN** a rollout in the instance's project path predates the pane's process
+- **THEN** it SHALL NOT be claimed for that pane
