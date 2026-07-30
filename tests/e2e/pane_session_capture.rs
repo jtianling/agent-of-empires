@@ -519,7 +519,9 @@ fn a_codex_pane_reaches_a_durable_slot_via_its_rollout_file() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("reconcile_codex_slot");
-    h.install_tool_stub("codex");
+    // Loop instead of `exec sleep`: the claim requires a process whose argv
+    // still names codex, the way the real npm shim's does.
+    h.install_stub_script("codex", "#!/bin/sh\nwhile :; do sleep 60; done\n");
 
     let project = h.project_path();
     let add = h.run_cli(&[

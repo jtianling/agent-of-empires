@@ -56,7 +56,17 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str) {
         Ok(None) => {}
         _ => return,
     }
-    let Some(launched_at) = pane_process_start_unix(pane_id) else {
+    let Some(pane_pid) = pane_root_pid(pane_id) else {
+        return;
+    };
+    // A conversation is only claimed for a pane that is actually running
+    // Codex. Without this, a pane whose Codex has exited (or a shell pane
+    // that merely belongs to a codex-tool instance) would be bound to
+    // whatever conversation happened to start in the same directory.
+    if !process_tree_runs_codex(pane_pid) {
+        return;
+    }
+    let Some(launched_at) = process_start_unix(pane_pid) else {
         return;
     };
     let claimed = match store.claimed_native_session_ids() {
@@ -95,8 +105,8 @@ fn codex_sessions_root() -> PathBuf {
         .join("sessions")
 }
 
-/// Unix start time of the pane's root process, from `ps` elapsed time.
-fn pane_process_start_unix(pane_id: &str) -> Option<i64> {
+/// Root process id of a tmux pane.
+fn pane_root_pid(pane_id: &str) -> Option<u32> {
     let output = crate::tmux::tmux_command()
         .args(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
         .output()
@@ -104,12 +114,54 @@ fn pane_process_start_unix(pane_id: &str) -> Option<i64> {
     if !output.status.success() {
         return None;
     }
-    let pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if pid.is_empty() {
-        return None;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Whether a process or any of its descendants is invoking Codex.
+///
+/// Matched on the command line rather than the process name: Codex installed
+/// through npm runs behind a `node` shim, so the kernel reports `node`, but
+/// the argv still names the `codex` entry point.
+fn process_tree_runs_codex(root_pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-Ao", "pid=,ppid=,command="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
     }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut commands: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (
+            parts.next().and_then(|p| p.parse::<u32>().ok()),
+            parts.next().and_then(|p| p.parse::<u32>().ok()),
+        ) else {
+            continue;
+        };
+        children.entry(ppid).or_default().push(pid);
+        commands.insert(pid, line);
+    }
+    let mut queue = vec![root_pid];
+    while let Some(pid) = queue.pop() {
+        if commands.get(&pid).is_some_and(|cmd| cmd.contains("codex")) {
+            return true;
+        }
+        if let Some(kids) = children.get(&pid) {
+            queue.extend(kids);
+        }
+    }
+    false
+}
+
+/// Unix start time of a process, from `ps` elapsed time.
+fn process_start_unix(pid: u32) -> Option<i64> {
     let output = std::process::Command::new("ps")
-        .args(["-o", "etime=", "-p", &pid])
+        .args(["-o", "etime=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     if !output.status.success() {

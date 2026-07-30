@@ -47,6 +47,8 @@ The reconciler SHALL bind an AoE-launched Codex pane to its conversation without
 
 For a Codex instance whose primary pane has no `pane_live` capture, the claim SHALL be the earliest rollout created at or after the pane's process started, whose working directory matches the instance's project path, and whose thread id no other pane or slot already holds. The claim SHALL write a `pane_live` row (`agent = codex`) for the pane, which the existing snapshot path turns into a durable slot.
 
+A pane SHALL only be claimed for while a process in its tree is invoking Codex, matched on the command line rather than the process name (Codex installed through npm runs behind a `node` shim). A pane whose Codex has exited, or a shell pane that merely belongs to a codex-tool instance, SHALL NOT be bound to whatever conversation happened to start in the same directory.
+
 An instance whose command is overridden SHALL NOT be claimed for: the pane runs the user's own program. A resumed pane's conversation predates its respawn and SHALL NOT re-match; its durable slot already carries the right conversation.
 
 #### Scenario: A fresh Codex launch is bound to its rollout
@@ -63,3 +65,7 @@ An instance whose command is overridden SHALL NOT be claimed for: the pane runs 
 #### Scenario: An older conversation in the same directory is not claimed
 - **WHEN** a rollout in the instance's project path predates the pane's process
 - **THEN** it SHALL NOT be claimed for that pane
+
+#### Scenario: A pane not running Codex is not claimed for
+- **WHEN** a codex-tool instance's primary pane holds no process invoking Codex
+- **THEN** no rollout SHALL be claimed for that pane
