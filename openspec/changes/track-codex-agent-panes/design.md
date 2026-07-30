@@ -71,6 +71,20 @@ It has since been fixed on its own, ahead of this change (`c29ed8be`): decoratio
 
 What remains genuinely out of scope is the restart path for a pane no slot describes, which reads the pane's own process to avoid relaunching it as the instance's tool. That is a guess where this change supplies a fact, and it stops being load-bearing for Codex once Codex panes hold slots.
 
+### Decision 6: Codex is told its own pane, because its hooks do not run in it
+
+The rest of this design assumed a hook inherits the environment of the pane its agent runs in. For Claude that holds. For Codex it does not, and the failure is worse than an absent variable.
+
+Codex clients launched as `codex --remote ws://...` are thin front ends for one long-lived app-server process, and that daemon is where tools and hooks actually execute. It inherits its environment once, when it starts. Measured on the machine this change was written for: the client in pane `%47` had `TMUX_PANE=%47` and `AOE_INSTANCE_ID` set correctly, while a command it ran saw `TMUX_PANE=%39` -- the pane the daemon had been started from, hours earlier, belonging to an unrelated shell session -- and no `AOE_INSTANCE_ID` at all. Every Codex client on that machine shared the one daemon, so every one of them would have reported the same wrong pane.
+
+So the capture would not merely have gone missing. It would have claimed a pane belonging to something else, and recovery reads those rows. One such row was in fact written during this investigation, recording a shell pane as a Codex agent.
+
+What Codex does forward per session is configuration. `-c shell_environment_policy.set.<NAME>=<value>` reaches the executing environment through the daemon, and it merges into the user's own `[shell_environment_policy.set]` table rather than replacing it (verified with a live session: an injected probe variable and the user's two pre-existing entries were all present). A Codex launch therefore carries its pane id and instance id as two such overrides, the pane expanded by the pane's own shell at launch where `$TMUX_PANE` is still correct.
+
+The capture reads `$AOE_TMUX_PANE` first and `$TMUX_PANE` only as a fallback. The precedence is that way round because an agent sets the first only when the second names a pane that is not its own, so preferring the fallback would let a stale value claim someone else's pane.
+
+Decision 1 is unchanged by this, and the same investigation is what confirms it. A nested `codex exec` inherits `$CODEX_THREAD_ID` from its parent, so a subagent's hook reports the parent conversation under the parent's pane, which is the row that should be there. Reading the id from hook stdin instead would give the subagent's own transient id and overwrite the pane's real conversation with it.
+
 ## Risks / Trade-offs
 
 - [A user's own `hooks.json`] -> AoE creates the file, but it may not be the only author. The existing installer already merges rather than overwrites and keeps non-AoE entries; that behavior is what makes this safe, so it is covered rather than assumed.
@@ -85,4 +99,4 @@ No data migration. Existing rows keep their values and correct themselves on the
 ## Open Questions
 
 - Whether Codex hooks should be installed globally (`~/.codex/hooks.json`) or per project. Global matches what AoE does for Claude and is what this change implements; per-project would scope the blast radius but would have to be written once per managed directory.
-- Whether a hook command Codex spawns inherits `$CODEX_THREAD_ID`. Decision 1 depends on it, and it is the one link that cannot be settled by reading the binary's strings -- it needs a real Codex session with the hook trusted. Task 6.3 is where that gets answered; if it turns out the variable is not in the hook's environment, the source for Codex has to be re-derived from its hook stdin instead, and Decision 1 is what changes.
+- ~~Whether a hook command Codex spawns inherits `$CODEX_THREAD_ID`.~~ Answered on a live session with the hook trusted: it does, and the id is the running conversation's. What the same run disproved is the wider assumption behind the question -- that the hook inherits the *pane's* environment at all. It inherits the app-server's. See Decision 6.

@@ -1,9 +1,10 @@
 //! Hidden `aoe __record-pane` capture subcommand.
 //!
 //! The installed agent status hook shells out to this subcommand on hook
-//! events. It reads `$TMUX_PANE` from the environment and upserts a `pane_live`
-//! row keyed by the pane id. It works for both AoE-launched and hand-launched
-//! agents, so it does NOT depend on `$AOE_INSTANCE_ID`.
+//! events. It reads the pane id from the environment (`$AOE_TMUX_PANE` first,
+//! then `$TMUX_PANE`) and upserts a `pane_live` row keyed by it. It works for
+//! both AoE-launched and hand-launched agents, so it does NOT depend on
+//! `$AOE_INSTANCE_ID`.
 //!
 //! The native session id comes from the source the agent declares in the
 //! registry: Claude's arrives as `session_id` in the hook's stdin JSON, Codex's
@@ -33,6 +34,12 @@ struct HookStdin {
     cwd: Option<String>,
 }
 
+fn pane_id_from_env() -> Option<String> {
+    [crate::hooks::AOE_PANE_ENV, "TMUX_PANE"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
+}
+
 /// Run the capture. Always returns success; capture failures are swallowed so
 /// the hook never blocks or errors the agent.
 pub fn run(profile: &str, args: RecordPaneArgs) {
@@ -43,11 +50,16 @@ pub fn run(profile: &str, args: RecordPaneArgs) {
 }
 
 fn try_capture(profile: &str, args: &RecordPaneArgs) -> anyhow::Result<()> {
-    // Only capture inside tmux: $TMUX_PANE is the per-pane keystone. Outside
+    // Only capture inside tmux: the pane id is the per-pane keystone. Outside
     // tmux there is nothing to key on, so no row is written.
-    let tmux_pane = match std::env::var("TMUX_PANE") {
-        Ok(p) if !p.is_empty() => p,
-        _ => return Ok(()),
+    //
+    // The agent-supplied pane wins over `$TMUX_PANE`, because an agent only
+    // sets it when its hooks run somewhere `$TMUX_PANE` names a pane other
+    // than the agent's own. Falling back the other way would let that stale
+    // value claim a pane the agent has nothing to do with.
+    let tmux_pane = match pane_id_from_env() {
+        Some(p) => p,
+        None => return Ok(()),
     };
 
     // Read stdin whatever the agent is: the hook pipes it, and an unread pipe

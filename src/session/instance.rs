@@ -837,6 +837,28 @@ impl Instance {
         }
     }
 
+    /// Codex config overrides that carry this pane's identity into its hooks.
+    ///
+    /// Codex executes hooks and tools inside a shared `--remote` app-server
+    /// process, which inherits its environment once at daemon start. A hook
+    /// therefore sees that daemon's `$TMUX_PANE` -- some other pane, hours old
+    /// -- rather than the pane its own conversation is running in, and never
+    /// sees `$AOE_INSTANCE_ID` at all. What Codex does forward per session is
+    /// config, so both values ride in as `shell_environment_policy.set` entries
+    /// (a merge into the user's own table, not a replacement) and the hook
+    /// reads them from there.
+    ///
+    /// `$TMUX_PANE` is expanded by the pane's own shell at launch, where it is
+    /// still correct; only the hook's environment is unreliable.
+    fn codex_hook_env_overrides(&self) -> String {
+        format!(
+            " -c \"shell_environment_policy.set.{pane_env}=\\\"$TMUX_PANE\\\"\" \
+             -c \"shell_environment_policy.set.AOE_INSTANCE_ID=\\\"{id}\\\"\"",
+            pane_env = crate::hooks::AOE_PANE_ENV,
+            id = self.id,
+        )
+    }
+
     fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
         let project_path = shell_escape(&self.project_path);
@@ -1326,6 +1348,9 @@ impl Instance {
                 let resume_flag = resume.resume_flag.replace("{}", token);
                 cmd = format!("{} {}", cmd, resume_flag);
             }
+            if agent.is_some_and(|a| a.name == "codex") {
+                cmd.push_str(&self.codex_hook_env_overrides());
+            }
             return cmd;
         }
 
@@ -1371,6 +1396,11 @@ impl Instance {
         }
         if !self.extra_args.is_empty() {
             cmd = format!("{} {}", cmd, self.extra_args);
+        }
+        // A command override is the user's own program, not necessarily Codex,
+        // so it does not get Codex flags appended to it.
+        if agent.is_some_and(|a| a.name == "codex") && !self.has_command_override() {
+            cmd.push_str(&self.codex_hook_env_overrides());
         }
         cmd
     }
@@ -3080,21 +3110,64 @@ mod tests {
             .build_agent_command(Some("019d1af9-a899-7df1-8f7d-a244126e5ded"))
             .unwrap();
 
-        let shell = crate::session::environment::user_posix_shell();
         // Codex now carries `AOE_INSTANCE_ID` because it has a hook
         // configuration: the status-file half of the hook is gated on that
         // variable, so a Codex launch without it would capture panes and never
-        // report status. Asserted by suffix so the test speaks about the resume
-        // flag's position, which is what it is named for.
+        // report status. The resume flag's position is what this test is named
+        // for, so it is asserted where it sits rather than at the end: hook
+        // config overrides and the YOLO flag follow it.
         assert!(
-            cmd.ends_with(
-                &format!("{shell} -lc 'stty susp undef; exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 --dangerously-bypass-approvals-and-sandbox'")
+            cmd.contains(
+                "exec env codex resume 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 "
             ),
+            "unexpected codex resume command: {cmd}"
+        );
+        assert!(
+            cmd.ends_with("--dangerously-bypass-approvals-and-sandbox'"),
             "unexpected codex resume command: {cmd}"
         );
         assert!(
             cmd.starts_with("AOE_INSTANCE_ID="),
             "a hook-config agent's launch must carry AOE_INSTANCE_ID: {cmd}"
+        );
+    }
+
+    /// Codex's hooks run in a shared app-server that inherits its environment
+    /// once, at daemon start, so a hook's `$TMUX_PANE` names whatever pane that
+    /// daemon happened to start in and `$AOE_INSTANCE_ID` is absent entirely.
+    /// Both values must therefore travel as per-session config overrides.
+    #[test]
+    fn test_codex_launch_carries_pane_identity_as_config_overrides() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(
+            cmd.contains("-c \"shell_environment_policy.set.AOE_TMUX_PANE=\\\"$TMUX_PANE\\\"\""),
+            "codex must forward its own pane to its hooks: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!(
+                "-c \"shell_environment_policy.set.AOE_INSTANCE_ID=\\\"{}\\\"\"",
+                inst.id
+            )),
+            "codex must forward its instance id to its hooks: {cmd}"
+        );
+    }
+
+    /// An agent whose hooks run in its own process already sees the right
+    /// `$TMUX_PANE`, so it must not be given the Codex workaround.
+    #[test]
+    fn test_claude_launch_has_no_codex_config_overrides() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(
+            !cmd.contains("shell_environment_policy"),
+            "only codex needs the app-server workaround: {cmd}"
         );
     }
 

@@ -22,6 +22,18 @@ pub use status_file::{
 /// Base directory for all AoE hook status files.
 pub(crate) const HOOK_STATUS_BASE: &str = "/tmp/aoe-hooks";
 
+/// Pane id an agent carries for its own hooks when `$TMUX_PANE` cannot be
+/// trusted to reach them.
+///
+/// Codex runs hooks and tools inside a shared `--remote` app-server process, so
+/// a hook inherits whatever environment that daemon started with -- in practice
+/// a different pane entirely, which makes `$TMUX_PANE` actively wrong rather
+/// than merely absent. Codex does forward per-session config, so AoE passes the
+/// launching pane through `shell_environment_policy.set` and the hook reads it
+/// from here. Agents whose hooks run in their own process leave this unset and
+/// keep using `$TMUX_PANE`.
+pub(crate) const AOE_PANE_ENV: &str = "AOE_TMUX_PANE";
+
 /// Maximum age of a hook status file before it is treated as stale.
 ///
 /// In steady-state the hook writer refreshes `/tmp/aoe-hooks/<id>/status` on
@@ -80,7 +92,7 @@ const AOE_HOOK_MARKER: &str = "aoe-hooks";
 ///
 /// Two independent side effects:
 /// 1. Status-file write (gated on `$AOE_INSTANCE_ID`) feeds `status-detection`.
-/// 2. Pane capture (gated on `$TMUX_PANE`) pipes the hook's stdin JSON to
+/// 2. Pane capture (gated on either pane variable) pipes the hook's stdin JSON to
 ///    `<aoe_bin> __record-pane`, which reads the session id from the source its
 ///    agent declares (stdin `.session_id` or a named environment variable),
 ///    takes `.cwd`, and upserts a `pane_live` row keyed by the pane id. This
@@ -99,7 +111,8 @@ fn hook_command(status: &str, aoe_bin: &str, agent: &str) -> String {
     // Capture is best-effort: `|| true` ensures the hook never fails the agent
     // even if the binary path is wrong. The status write does not need stdin.
     format!(
-        "sh -c 'if [ -n \"$TMUX_PANE\" ]; then {bin} __record-pane --agent {agent} || true; fi; \
+        "sh -c 'if [ -n \"${AOE_PANE_ENV}\" ] || [ -n \"$TMUX_PANE\" ]; then \
+         {bin} __record-pane --agent {agent} || true; fi; \
          [ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
          d=/tmp/aoe-hooks/$AOE_INSTANCE_ID; mkdir -p \"$d\"; \
          printf {status} > \"$d/status\"; true'"
@@ -538,10 +551,17 @@ mod tests {
     #[test]
     fn test_hook_command_has_tmux_pane_capture_branch() {
         let cmd = hook_command("running", "/abs/path/aoe", "claude");
-        // Capture is gated on $TMUX_PANE and shells out to __record-pane.
+        // Capture is gated on either pane variable and shells out to
+        // __record-pane. An agent whose hooks do not run in its own process
+        // supplies the pane itself, so the gate must not require $TMUX_PANE.
         assert!(
             cmd.contains("$TMUX_PANE"),
             "missing TMUX_PANE gate: {}",
+            cmd
+        );
+        assert!(
+            cmd.contains(&format!("${AOE_PANE_ENV}")),
+            "missing agent-supplied pane gate: {}",
             cmd
         );
         assert!(

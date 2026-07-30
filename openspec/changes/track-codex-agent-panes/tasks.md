@@ -26,5 +26,14 @@
 
 - [x] 5.1 Run `cargo fmt`, `cargo clippy`, `cargo test --lib`, and `cargo test --test e2e` with all tmux-touching tests confined to the project harness's private socket.
 - [x] 5.2 Run `openspec validate track-codex-agent-panes --strict`.
-- [ ] 5.3 On the real machine, install and then run a Codex session with the hook trusted, and verify a `pane_live` row appears carrying the thread id. This is the only step that can answer whether a hook command Codex spawns inherits `$CODEX_THREAD_ID` (see Open Questions); reading the binary cannot. **Needs the user: the trust prompt is theirs to answer.**
-- [ ] 5.4 Verify `~/.codex/config.toml` gains no AoE hook entry. **Same session as 5.3.** Not a whole-file comparison: Codex rewrites that file on its own -- observed on 2026-07-29, plugin paths and a `last_updated` stamp changing with no AoE involvement -- so a hash check reports a difference whatever AoE does. The invariant is that no `[hooks]` section and no `aoe-hooks` marker ever appears in it.
+- [x] 5.3 On the real machine, install and then run a Codex session with the hook trusted, and verify a `pane_live` row appears carrying the thread id. This is the only step that can answer whether a hook command Codex spawns inherits `$CODEX_THREAD_ID` (see Open Questions); reading the binary cannot. **Needs the user: the trust prompt is theirs to answer.** Run on 2026-07-30: the hooks fire and the thread id is inherited and correct, but the row carried the app-server's pane rather than the agent's. That is section 6.
+- [x] 5.4 Verify `~/.codex/config.toml` gains no AoE hook entry. **Same session as 5.3.** Not a whole-file comparison: Codex rewrites that file on its own -- observed on 2026-07-29, plugin paths and a `last_updated` stamp changing with no AoE involvement -- so a hash check reports a difference whatever AoE does. The invariant is that no `[hooks]` section and no `aoe-hooks` marker ever appears in it. Held: zero `aoe-hooks` markers, and the only hook content Codex added was its own `[hooks.state]` trust hashes.
+
+## 6. Carry the Pane Into Codex's Hooks (Decision 6)
+
+- [x] 6.1 Add the pane variable a hook reads when `$TMUX_PANE` cannot be trusted, and prefer it over `$TMUX_PANE` in `__record-pane`.
+- [x] 6.2 Gate the hook's capture branch on either pane variable.
+- [x] 6.3 Give a Codex launch `shell_environment_policy.set` overrides for its pane and instance id, expanding `$TMUX_PANE` in the pane's own shell. Not applied to a command override, which is the user's own program.
+- [x] 6.4 Cover that a Codex launch carries both overrides and that an agent whose hooks run in its own process does not.
+- [ ] 6.5 On the real machine, confirm a Codex pane now records its own pane id, and that the status file appears under `/tmp/aoe-hooks/<instance>/`. **Needs a Codex client started after the app-server was restarted:** a daemon predating the hooks file never loads it, which is why 5.3 produced nothing until a fresh `codex exec` was run.
+- [ ] 6.6 Delete the `pane_live` row 5.3 wrote against the unrelated shell pane.
