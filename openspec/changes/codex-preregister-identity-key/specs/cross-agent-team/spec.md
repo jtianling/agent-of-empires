@@ -9,17 +9,20 @@ Codex TUI to the local app-server with that UUID supplied as `xats.agent_id` and
 the session project path supplied as the Codex working directory.
 
 When the pane's environment carries a non-empty `XATS_IDENTITY_KEY`, the
-bootstrap SHALL pass it to the pre-registration call as `--identity-key`,
-expanded by the pane's shell rather than interpolated into the generated
-command text. The key SHALL travel only on the pre-registration call: the
-executed Codex command line MUST NOT contain it, because argv is readable by
-every process on the machine. The pre-registration call SHALL also carry a
-lengthened row TTL so the daemon's poke-back window covers a Codex cold start.
+bootstrap SHALL tell the pre-registration call to read it, by naming the
+variable via `--identity-key-env`; the CLI reads the value from its own
+environment. The key's value SHALL NOT appear on any argv -- not the executed
+Codex command line and not the pre-registration call's own -- because argv is
+readable by every process on the machine. The pre-registration call SHALL also
+carry a lengthened row TTL (`--ttl`, the flag the CLI parses) so the daemon's
+poke-back window covers a Codex cold start.
 
 If a pre-registration call carrying the new flags fails, the bootstrap SHALL
-retry it once as the exact pre-change call (no `--identity-key`, no TTL), so a
-daemon that predates the flags cannot fail a Codex launch. The retry decision
-SHALL rest on the exit code alone, not on the CLI's error text.
+retry it once as the exact pre-change call (no identity-key flag, no TTL), so
+a daemon that predates the flags cannot fail a Codex launch. The retry
+decision SHALL rest on the exit code alone, not on the CLI's error text, and
+SHALL survive shell options inherited from the environment (`SHELLOPTS`
+carrying `errexit` reaches the bootstrap's `sh`).
 
 The bootstrap SHALL NOT read, inject, print, or persist the xats authentication
 token value. It SHALL rely on the already-configured local xats environment.
@@ -31,23 +34,24 @@ token value. It SHALL rely on the already-configured local xats environment.
 - **AND** Codex starts in remote mode against the local app-server
 - **AND** Codex receives the project path and the same UUID as `xats.agent_id`
 
-#### Scenario: Identity key rides the pre-registration, not the argv
+#### Scenario: Identity key rides the pre-registration environment, not any argv
 
 - **WHEN** a Codex Cross Agent Team pane launches with `XATS_IDENTITY_KEY` in its environment
-- **THEN** the pre-registration call carries the key as `--identity-key`
-- **AND** the executed Codex command line does not contain the key
+- **THEN** the pre-registration call carries `--identity-key-env` naming the variable
+- **AND** neither the pre-registration argv nor the executed Codex command line contains the key's value
 
-#### Scenario: A pane without an identity key pre-registers without the flag's value
+#### Scenario: A pane without an identity key pre-registers without the flag
 
 - **WHEN** a Codex Cross Agent Team pane launches with no `XATS_IDENTITY_KEY` in its environment
-- **THEN** the pre-registration call carries no identity key value
+- **THEN** the pre-registration call carries no identity-key flag
 - **AND** the launch proceeds as before
 
 #### Scenario: An old daemon that rejects the new flags does not fail the launch
 
-- **WHEN** the pre-registration call carrying `--identity-key` exits non-zero
+- **WHEN** the pre-registration call carrying the new flags exits non-zero
 - **THEN** the bootstrap retries the pre-registration without the new flags
 - **AND** a successful retry launches Codex normally
+- **AND** the retry fires even under shell options inherited from the environment
 
 #### Scenario: YOLO disabled remains non-YOLO
 
