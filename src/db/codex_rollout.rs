@@ -11,16 +11,22 @@
 //! ```
 //!
 //! whose first line is a `session_meta` record carrying the conversation's
-//! `cwd`. AoE knows the rest at launch time: the pane, the instance, when the
-//! pane's process started, and the project path. The reconciler calls in here
-//! for a Codex instance whose primary pane has no capture yet, and the claim is
+//! `cwd` and `originator`. AoE knows the rest at launch time: the pane, the
+//! instance, when the pane's process started, and the project path. The
+//! reconciler calls in here for each pane of a managed session, and the claim is
 //! the earliest rollout file created after the pane's process started, in the
-//! instance's working directory, that no other pane or slot already owns.
+//! instance's working directory, written by an interactive Codex, that no other
+//! pane or slot already owns.
 //!
-//! A resumed pane (`codex resume <token>`) keeps its original rollout file,
-//! whose timestamp predates the respawn, so it never re-matches here -- its
-//! durable slot already carries the right conversation. A forked pane creates
-//! a fresh rollout and is claimed like a fresh launch.
+//! A pane is claimed for when it has no capture, and again when its capture
+//! predates the process now in it -- restarting a live session respawns the pane
+//! and keeps its pane id, so a capture can outlive the conversation it names.
+//!
+//! A resumed pane (`codex resume <token>`) is the exception: its capture also
+//! predates the respawn, but the conversation is deliberately unchanged, and its
+//! command line carries that conversation's id. That says so directly and
+//! outranks the timestamps. A forked pane creates a fresh rollout and is claimed
+//! like a fresh launch.
 
 use std::collections::HashSet;
 use std::io::{BufRead, Read};
@@ -43,10 +49,39 @@ pub struct RolloutMatch {
     pub cwd: String,
 }
 
+/// The fields of a rollout's `session_meta` line that the match reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RolloutHeader {
+    cwd: String,
+    /// Absent in rollouts that do not record one, which stay eligible.
+    originator: Option<String>,
+}
+
+/// The originator Codex records for a conversation started by its TUI, which is
+/// what a pane runs. Observed with a `source` of both `vscode` and `cli`, so
+/// `source` is not the discriminator.
+const CODEX_INTERACTIVE_ORIGINATOR: &str = "codex-tui";
+
+/// Originators that name a Codex entry point which never runs in a pane. A
+/// `codex exec` invoked by a script in the same repository writes a rollout with
+/// the same `cwd` as the panes there, and would otherwise be an eligible match.
+///
+/// Deliberately a list of what to reject rather than what to accept. Rejecting
+/// an unrecognized originator would stop every pane from being adopted if a
+/// future Codex renamed the interactive one, and an unadopted pane has no slot,
+/// so it is silently dropped from restart and recovery -- the failure this
+/// filter exists to prevent. Missing one newly added non-interactive originator
+/// only leaves the previous behavior in place for it.
+const CODEX_NON_INTERACTIVE_ORIGINATORS: &[&str] = &["codex_exec"];
+
 /// Claim a rollout for one pane of a managed session, if one is due.
 ///
-/// No-op unless the pane has no `pane_live` capture yet. Failures are
-/// swallowed: the next reconcile tick tries again.
+/// A claim is due when the pane has no capture, and also when its capture was
+/// recorded before the process now in the pane started -- that capture names a
+/// conversation belonging to a process that no longer exists. Restarting a live
+/// session respawns the pane in place and keeps its pane id, so without this the
+/// pane would keep describing what it ran before the restart forever. Failures
+/// are swallowed: the next reconcile tick tries again.
 ///
 /// The instance-level conditions -- that its tool is Codex, and that its
 /// command has not been overridden (an override is the user's own program) --
@@ -58,10 +93,6 @@ pub struct RolloutMatch {
 pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_primary: bool) {
     if !instance_permits_claim(inst, is_primary) {
         return;
-    }
-    match store.read_pane_live(pane_id) {
-        Ok(None) => {}
-        _ => return,
     }
     let Some(pane_pid) = pane_root_pid(pane_id) else {
         return;
@@ -76,6 +107,21 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_pr
     let Some(launched_at) = process_start_unix(pane_pid) else {
         return;
     };
+    let existing = match store.read_pane_live(pane_id) {
+        Ok(existing) => existing,
+        Err(e) => {
+            tracing::debug!("codex rollout: cannot read capture for {}: {}", pane_id, e);
+            return;
+        }
+    };
+    if let Some(existing) = &existing {
+        let superseded = capture_is_superseded(existing.updated_at, launched_at, || {
+            process_tree_mentions(pane_pid, &existing.native_session_id)
+        });
+        if !superseded {
+            return;
+        }
+    }
     let claimed = match store.claimed_native_session_ids() {
         Ok(c) => c,
         Err(e) => {
@@ -94,13 +140,48 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_pr
         &found.cwd,
         crate::db::now_unix(),
     ) {
-        Ok(()) => tracing::info!(
-            "codex rollout: pane {} bound to thread {}",
-            pane_id,
-            found.thread_id
-        ),
+        Ok(()) => match existing {
+            Some(stale) => tracing::info!(
+                "codex rollout: pane {} rebound to thread {} (was {}, from before this process)",
+                pane_id,
+                found.thread_id,
+                stale.native_session_id
+            ),
+            None => tracing::info!(
+                "codex rollout: pane {} bound to thread {}",
+                pane_id,
+                found.thread_id
+            ),
+        },
         Err(e) => tracing::debug!("codex rollout: claim for {} failed: {}", pane_id, e),
     }
+}
+
+/// Whether a pane's existing capture has been left behind by the process now in
+/// that pane, so the pane should be claimed for again.
+///
+/// Two conditions, in order of cost. The capture must predate the process: a
+/// near-tie resolves to "not superseded", because `process_start_unix` derives
+/// from `ps` elapsed seconds against the current clock and is good to about a
+/// second, and the two errors are not symmetric -- calling a live capture
+/// superseded sends a correctly bound pane looking for another conversation,
+/// while calling a superseded one live only defers the correction to the next
+/// reconcile tick. In practice the two times are tens of seconds apart either
+/// way, so the margin is a guard rather than a working part.
+///
+/// And the pane must not still be running that same conversation.
+/// `pane_runs_that_conversation` is deferred because it costs a process listing
+/// and only matters once the timestamps say otherwise. It is what keeps a
+/// resumed pane bound: `R` respawns it, so its capture necessarily predates the
+/// new process, but `codex resume <token>` carries the conversation's own id on
+/// the command line, and that is direct evidence where the timestamps are only
+/// circumstantial.
+fn capture_is_superseded(
+    captured_at: i64,
+    launched_at: i64,
+    pane_runs_that_conversation: impl FnOnce() -> bool,
+) -> bool {
+    captured_at + LAUNCH_SLACK_SECS < launched_at && !pane_runs_that_conversation()
 }
 
 /// Whether the instance-level conditions permit claiming for this pane.
@@ -138,6 +219,21 @@ fn pane_root_pid(pane_id: &str) -> Option<u32> {
 /// through npm runs behind a `node` shim, so the kernel reports `node`, but
 /// the argv still names the `codex` entry point.
 fn process_tree_runs_codex(root_pid: u32) -> bool {
+    process_tree_any(root_pid, |cmd| cmd.contains("codex"))
+}
+
+/// Whether any process in the pane's tree names `needle` on its command line.
+///
+/// Used to recognize a resumed pane: `codex resume <thread>` carries the
+/// conversation's own id, so a pane still running the conversation its capture
+/// records is not superseded, however old that capture is.
+fn process_tree_mentions(root_pid: u32, needle: &str) -> bool {
+    !needle.is_empty() && process_tree_any(root_pid, |cmd| cmd.contains(needle))
+}
+
+/// Whether any process in `root_pid`'s tree has a command line satisfying
+/// `matches`.
+fn process_tree_any(root_pid: u32, matches: impl Fn(&str) -> bool) -> bool {
     let Ok(output) = std::process::Command::new("ps")
         .args(["-Ao", "pid=,ppid=,command="])
         .output()
@@ -163,7 +259,7 @@ fn process_tree_runs_codex(root_pid: u32) -> bool {
     }
     let mut queue = vec![root_pid];
     while let Some(pid) = queue.pop() {
-        if commands.get(&pid).is_some_and(|cmd| cmd.contains("codex")) {
+        if commands.get(&pid).is_some_and(|cmd| matches(cmd)) {
             return true;
         }
         if let Some(kids) = children.get(&pid) {
@@ -241,14 +337,49 @@ pub fn find_rollout(
     candidates.sort();
 
     for (_, thread_id, path) in candidates {
-        let Some(cwd) = rollout_cwd(&path) else {
+        let Some(header) = rollout_header(&path) else {
             continue;
         };
-        if same_dir(&cwd, project_path) {
-            return Some(RolloutMatch { thread_id, cwd });
+        if !same_dir(&header.cwd, project_path) {
+            continue;
         }
+        if !originator_can_run_in_a_pane(header.originator.as_deref(), &path) {
+            continue;
+        }
+        return Some(RolloutMatch {
+            thread_id,
+            cwd: header.cwd,
+        });
     }
     None
+}
+
+/// Whether a conversation with this originator could have been running in a
+/// pane. An absent or unrecognized originator is eligible; see
+/// [`CODEX_NON_INTERACTIVE_ORIGINATORS`] for why the filter rejects rather than
+/// accepts.
+fn originator_can_run_in_a_pane(originator: Option<&str>, path: &Path) -> bool {
+    let Some(originator) = originator else {
+        return true;
+    };
+    if CODEX_NON_INTERACTIVE_ORIGINATORS.contains(&originator) {
+        tracing::debug!(
+            "codex rollout: skipping {} from non-interactive originator '{}'",
+            path.display(),
+            originator
+        );
+        return false;
+    }
+    if originator != CODEX_INTERACTIVE_ORIGINATOR {
+        // Not a behavior change, a signal: Codex's originator values have moved
+        // and this filter's assumption needs revisiting.
+        tracing::warn!(
+            "codex rollout: unrecognized originator '{}' in {}; treating it as eligible",
+            originator,
+            path.display()
+        );
+    }
+    true
 }
 
 /// Directory equality that survives symlinked prefixes (macOS `/var` vs
@@ -312,7 +443,7 @@ fn parse_rollout_name(name: &str) -> Option<(i64, String)> {
 }
 
 /// Read the conversation `cwd` from a rollout's first line (`session_meta`).
-fn rollout_cwd(path: &Path) -> Option<String> {
+fn rollout_header(path: &Path) -> Option<RolloutHeader> {
     let file = std::fs::File::open(path).ok()?;
     // The first line carries the full base instructions, so it can be large,
     // but it is one line: cap what a broken file can make us read.
@@ -320,7 +451,10 @@ fn rollout_cwd(path: &Path) -> Option<String> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let value: serde_json::Value = serde_json::from_str(&line).ok()?;
-    value["payload"]["cwd"].as_str().map(str::to_string)
+    Some(RolloutHeader {
+        cwd: value["payload"]["cwd"].as_str()?.to_string(),
+        originator: value["payload"]["originator"].as_str().map(str::to_string),
+    })
 }
 
 #[cfg(test)]
@@ -329,6 +463,10 @@ mod tests {
     use chrono::Datelike;
 
     fn write_rollout(root: &Path, ts: i64, uuid: &str, cwd: &str) {
+        write_rollout_from(root, ts, uuid, cwd, Some(CODEX_INTERACTIVE_ORIGINATOR));
+    }
+
+    fn write_rollout_from(root: &Path, ts: i64, uuid: &str, cwd: &str, originator: Option<&str>) {
         let local = Local.timestamp_opt(ts, 0).single().unwrap();
         let day_dir = root
             .join(format!("{:04}", local.year()))
@@ -336,10 +474,14 @@ mod tests {
             .join(format!("{:02}", local.day()));
         std::fs::create_dir_all(&day_dir).unwrap();
         let name = format!("rollout-{}-{uuid}.jsonl", local.format("%Y-%m-%dT%H-%M-%S"));
+        let mut payload = serde_json::json!({ "session_id": uuid, "cwd": cwd });
+        if let Some(originator) = originator {
+            payload["originator"] = serde_json::json!(originator);
+        }
         let meta = serde_json::json!({
             "timestamp": "x",
             "type": "session_meta",
-            "payload": { "session_id": uuid, "cwd": cwd }
+            "payload": payload
         });
         std::fs::write(day_dir.join(name), format!("{meta}\n")).unwrap();
     }
@@ -368,6 +510,152 @@ mod tests {
         let claimed: HashSet<String> = ["already-owned".to_string()].into();
         let found = find_rollout(tmp.path(), "/proj", launch, &claimed).unwrap();
         assert_eq!(found.thread_id, "free");
+    }
+
+    /// A `codex exec` run by a script in the same repository writes a rollout
+    /// with the same cwd. Being the earliest match is exactly how it would win.
+    #[test]
+    fn a_scripted_codex_run_is_skipped_even_when_it_is_the_earliest_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launch = crate::db::now_unix() - 3600;
+        write_rollout_from(
+            tmp.path(),
+            launch + 5,
+            "from-a-script",
+            "/proj",
+            Some("codex_exec"),
+        );
+        write_rollout(tmp.path(), launch + 60, "from-a-pane", "/proj");
+
+        let found = find_rollout(tmp.path(), "/proj", launch, &HashSet::new()).unwrap();
+        assert_eq!(found.thread_id, "from-a-pane");
+    }
+
+    #[test]
+    fn a_scripted_run_alone_leaves_the_pane_unbound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launch = crate::db::now_unix() - 3600;
+        write_rollout_from(
+            tmp.path(),
+            launch + 5,
+            "from-a-script",
+            "/proj",
+            Some("codex_exec"),
+        );
+
+        assert_eq!(
+            find_rollout(tmp.path(), "/proj", launch, &HashSet::new()),
+            None,
+            "no binding is better than a binding to a conversation no pane ran"
+        );
+    }
+
+    /// Rejecting these would stop every pane from being adopted the day Codex
+    /// renames its interactive originator. See the constant's documentation.
+    #[test]
+    fn an_absent_or_unrecognized_originator_stays_eligible() {
+        for originator in [None, Some("codex-something-new")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let launch = crate::db::now_unix() - 3600;
+            write_rollout_from(tmp.path(), launch + 5, "thread", "/proj", originator);
+
+            let found = find_rollout(tmp.path(), "/proj", launch, &HashSet::new());
+            assert_eq!(
+                found.map(|f| f.thread_id),
+                Some("thread".to_string()),
+                "originator {originator:?} must stay eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rollout_header_carries_both_fields_from_one_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ts = crate::db::now_unix();
+        write_rollout_from(tmp.path(), ts, "thread", "/proj", Some("codex_exec"));
+
+        let path = std::fs::read_dir(tmp.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+            .and_then(|year| walk_to_file(&year))
+            .expect("rollout written");
+
+        let header = rollout_header(&path).unwrap();
+        assert_eq!(header.cwd, "/proj");
+        assert_eq!(header.originator.as_deref(), Some("codex_exec"));
+    }
+
+    fn walk_to_file(dir: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                return Some(path);
+            }
+            if let Some(found) = walk_to_file(&path) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// The claim gate: a capture from before the current process cannot name
+    /// what that process is running, so the pane is claimed for again.
+    #[test]
+    fn a_capture_older_than_the_pane_process_is_superseded() {
+        let launched = 1_000_000;
+
+        assert!(
+            capture_is_superseded(launched - 600, launched, || false),
+            "a capture from before the respawn is superseded"
+        );
+        assert!(
+            !capture_is_superseded(launched + 44, launched, || false),
+            "a live pane's capture is written after its process started"
+        );
+    }
+
+    /// `R` respawns the pane, so a resumed pane's capture necessarily predates
+    /// its process -- while naming exactly the conversation it is running.
+    #[test]
+    fn a_resumed_pane_keeps_its_capture_however_old_it_is() {
+        let launched = 1_000_000;
+
+        assert!(
+            !capture_is_superseded(launched - 86_400, launched, || true),
+            "running that conversation outranks the timestamps"
+        );
+    }
+
+    /// Calling a live capture superseded sends a correctly bound pane looking
+    /// for another conversation; the reverse only defers the fix one tick.
+    #[test]
+    fn a_near_tie_resolves_to_not_superseded() {
+        let launched = 1_000_000;
+        let never_run = || panic!("a near-tie must be decided by the timestamps alone");
+
+        assert!(!capture_is_superseded(launched, launched, never_run));
+        assert!(!capture_is_superseded(launched - 1, launched, never_run));
+        assert!(!capture_is_superseded(
+            launched - LAUNCH_SLACK_SECS,
+            launched,
+            never_run
+        ));
+        assert!(capture_is_superseded(
+            launched - LAUNCH_SLACK_SECS - 1,
+            launched,
+            || false
+        ));
+    }
+
+    #[test]
+    fn an_empty_conversation_id_never_matches_a_process_tree() {
+        assert!(
+            !process_tree_mentions(std::process::id(), ""),
+            "an empty needle would otherwise match every command line"
+        );
     }
 
     #[test]
