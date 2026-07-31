@@ -43,13 +43,20 @@ pub struct RolloutMatch {
     pub cwd: String,
 }
 
-/// Claim a rollout for a Codex instance's primary pane, if one is due.
+/// Claim a rollout for one pane of a managed session, if one is due.
 ///
-/// No-op unless the instance runs stock Codex (a command override is the
-/// user's own program) and the pane has no `pane_live` capture yet. Failures
-/// are swallowed: the next reconcile tick tries again.
-pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str) {
-    if inst.tool != "codex" || inst.has_command_override() {
+/// No-op unless the pane has no `pane_live` capture yet. Failures are
+/// swallowed: the next reconcile tick tries again.
+///
+/// The instance-level conditions -- that its tool is Codex, and that its
+/// command has not been overridden (an override is the user's own program) --
+/// describe the instance's own agent pane, so they gate `is_primary` only. A
+/// pane beside it may run a different agent than the instance's tool, and the
+/// override names what AoE launches for the instance, not what is running
+/// there. Every pane is still judged by the positive evidence below: a process
+/// in its tree invoking Codex.
+pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_primary: bool) {
+    if !instance_permits_claim(inst, is_primary) {
         return;
     }
     match store.read_pane_live(pane_id) {
@@ -94,6 +101,14 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str) {
         ),
         Err(e) => tracing::debug!("codex rollout: claim for {} failed: {}", pane_id, e),
     }
+}
+
+/// Whether the instance-level conditions permit claiming for this pane.
+///
+/// They describe the instance's own agent pane, so they answer for the primary
+/// pane alone. A pane beside it is judged by what is running in it.
+fn instance_permits_claim(inst: &Instance, is_primary: bool) -> bool {
+    !is_primary || (inst.tool == "codex" && !inst.has_command_override())
 }
 
 /// `$CODEX_HOME/sessions`, defaulting the home part to `~/.codex`.
@@ -375,6 +390,60 @@ mod tests {
 
         let found = find_rollout(tmp.path(), "/proj", launch, &HashSet::new()).unwrap();
         assert_eq!(found.thread_id, "mine");
+    }
+
+    #[test]
+    fn two_panes_of_one_session_take_different_conversations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first_launch = crate::db::now_unix() - 3600;
+        let second_launch = first_launch + 120;
+        write_rollout(tmp.path(), first_launch + 5, "primary-thread", "/proj");
+        write_rollout(tmp.path(), second_launch + 5, "extra-thread", "/proj");
+
+        // The reconciler offers panes in creation order, accumulating claims.
+        let mut claimed: HashSet<String> = HashSet::new();
+        let first = find_rollout(tmp.path(), "/proj", first_launch, &claimed).unwrap();
+        claimed.insert(first.thread_id.clone());
+        let second = find_rollout(tmp.path(), "/proj", second_launch, &claimed).unwrap();
+
+        assert_eq!(first.thread_id, "primary-thread");
+        assert_eq!(second.thread_id, "extra-thread");
+    }
+
+    #[test]
+    fn a_later_pane_does_not_take_the_earlier_panes_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first_launch = crate::db::now_unix() - 3600;
+        let second_launch = first_launch + 120;
+        write_rollout(tmp.path(), first_launch + 5, "primary-thread", "/proj");
+
+        let mut claimed: HashSet<String> = HashSet::new();
+        claimed.insert(
+            find_rollout(tmp.path(), "/proj", first_launch, &claimed)
+                .unwrap()
+                .thread_id,
+        );
+
+        assert_eq!(
+            find_rollout(tmp.path(), "/proj", second_launch, &claimed),
+            None
+        );
+    }
+
+    #[test]
+    fn instance_conditions_answer_for_the_primary_pane_only() {
+        let mut inst = Instance::new("test", "/proj");
+        inst.tool = "claude".to_string();
+        assert!(!instance_permits_claim(&inst, true));
+        assert!(instance_permits_claim(&inst, false));
+
+        inst.tool = "codex".to_string();
+        inst.command = "codex --instance-override".to_string();
+        assert!(!instance_permits_claim(&inst, true));
+        assert!(instance_permits_claim(&inst, false));
+
+        inst.command = String::new();
+        assert!(instance_permits_claim(&inst, true));
     }
 
     #[test]

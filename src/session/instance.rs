@@ -826,12 +826,14 @@ impl Instance {
 
     /// The binary a pane's command starts with.
     ///
-    /// The instance's command override describes `self.tool` and nothing else,
-    /// so a pane running a different agent starts from that agent's own binary.
-    /// Reading the override for such a pane produces a command that launches the
-    /// instance's agent under another agent's integration.
-    fn pane_base_command(&self, target_agent: &str) -> String {
-        if self.pane_runs_instance_tool(target_agent) {
+    /// The instance's command override describes the instance's own agent pane
+    /// and nothing else, so a pane running a different agent -- or a second
+    /// pane running the same one -- starts from that agent's own binary.
+    /// Reading the override for such a pane produces a command that launches
+    /// the instance's own program in a pane that is not it, which for Codex
+    /// means bootstrapping the override under a second conversation.
+    fn pane_base_command(&self, target_agent: &str, is_primary: bool) -> String {
+        if is_primary && self.pane_runs_instance_tool(target_agent) {
             self.get_tool_command().to_string()
         } else {
             crate::agents::get_agent(target_agent)
@@ -1135,6 +1137,48 @@ impl Instance {
         self.build_pane_command(&tool, resume_token, true, None)
     }
 
+    /// Build the launch command for an extra agent pane AoE adds beside the
+    /// instance's own agent pane: the new session dialog's right pane, or
+    /// `aoe session add-agent-pane`.
+    ///
+    /// Built as a non-primary pane, which is what keeps the instance's own
+    /// launch context out of it. The command override, pre-allocated session
+    /// id, fork token and identity key each describe one pane; a second live
+    /// pane wearing them would share that pane's conversation and identity, and
+    /// two panes behind one identity is the state the identity design cannot
+    /// recover from. Everything that follows from the session's settings --
+    /// sandboxing, YOLO, Cross Agent Team decoration -- applies exactly as it
+    /// does when AoE relaunches a tracked pane, because this is that builder.
+    ///
+    /// `shell` is built here rather than through it: the registry entry names
+    /// no launchable binary, and a shell pane produces no capture and never
+    /// occupies a slot.
+    pub fn build_extra_pane_command(&self, tool: &str) -> Option<String> {
+        if tool == "shell" {
+            return Some(self.build_extra_shell_pane_command());
+        }
+        self.build_pane_command(tool, None, false, None)
+    }
+
+    /// The user's shell for an extra pane, in the session's working directory.
+    ///
+    /// The `cd` is defense in depth: the split already inherits the directory,
+    /// and a login shell that resets it would otherwise land the pane
+    /// elsewhere.
+    fn build_extra_shell_pane_command(&self) -> String {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let inner = if self.is_sandboxed() && self.sandbox_info.is_some() {
+            let container = DockerContainer::from_session_id(&self.id);
+            let workdir = self.container_workdir();
+            let docker_cmd = container.exec_command(Some(&format!("-w {}", workdir)), &shell);
+            format!("stty susp undef; exec {}", docker_cmd)
+        } else {
+            let escaped_dir = shell_escape(&self.project_path);
+            format!("cd {} && stty susp undef; exec {}", escaped_dir, shell)
+        };
+        format!("bash -lc '{}'", inner.replace('\'', "'\\''"))
+    }
+
     /// Whether a pane running `target_agent` is the pane the instance's own
     /// launch context describes. Agent tracking is observe-first, so a slot can
     /// record an agent the instance never launched; the instance's conversation
@@ -1266,7 +1310,7 @@ impl Instance {
                                 }
                             }
                             "codex" => {
-                                let base = self.pane_base_command(target_agent);
+                                let base = self.pane_base_command(target_agent, is_primary);
                                 cmd = self.codex_xats_bootstrap_command(&cmd, &base);
                             }
                             _ => {}
@@ -1306,7 +1350,7 @@ impl Instance {
                             }
                         }
                         "codex" => {
-                            let base = self.pane_base_command(target_agent);
+                            let base = self.pane_base_command(target_agent, is_primary);
                             cmd = self.codex_xats_bootstrap_command(&cmd, &base);
                         }
                         _ => {}
@@ -3169,6 +3213,120 @@ mod tests {
             !cmd.contains("--dangerously-load-development-channels"),
             "did not expect dev-channels flag, got {cmd}"
         );
+    }
+
+    #[test]
+    fn extra_codex_pane_carries_the_xats_bootstrap() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.cross_agent_team = true;
+
+        let cmd = inst.build_extra_pane_command("codex").unwrap();
+        assert!(
+            cmd.contains("pre-register-codex-pane"),
+            "expected pane pre-registration, got {cmd}"
+        );
+        assert!(
+            cmd.contains("--remote"),
+            "expected the app-server connection, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn extra_claude_pane_carries_the_channel_flag() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+
+        let cmd = inst.build_extra_pane_command("claude").unwrap();
+        assert!(
+            cmd.contains("--dangerously-load-development-channels"),
+            "expected dev-channels flag, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn extra_pane_leaves_the_instance_launch_context_behind() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.cross_agent_team = true;
+        inst.command = "claude --instance-override".to_string();
+        inst.agent_session_id = Some("preallocated-id".to_string());
+        inst.xats_identity_key = Some("instance-key".to_string());
+
+        let cmd = inst.build_extra_pane_command("claude").unwrap();
+        assert!(
+            !cmd.contains("--instance-override"),
+            "override belongs to the instance's own pane, got {cmd}"
+        );
+        assert!(
+            !cmd.contains("preallocated-id"),
+            "session id belongs to the instance's own conversation, got {cmd}"
+        );
+        assert!(
+            !cmd.contains("instance-key") && !cmd.contains(XATS_IDENTITY_KEY_ENV),
+            "two panes must not present one identity, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn extra_codex_pane_is_bootstrapped_from_its_own_binary_not_the_override() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.cross_agent_team = true;
+        inst.command = "codex --instance-override".to_string();
+        inst.xats_identity_key = Some("instance-key".to_string());
+
+        let cmd = inst.build_extra_pane_command("codex").unwrap();
+        assert!(
+            !cmd.contains("--instance-override"),
+            "the bootstrap must not relaunch the instance's own program, got {cmd}"
+        );
+        assert!(
+            !cmd.contains("instance-key"),
+            "two panes must not present one identity, got {cmd}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn extra_shell_pane_adds_cd_defense_in_depth() {
+        let original_shell = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", "/bin/zsh");
+
+        let inst = Instance::new("test", "/tmp/project path/it's here");
+        let command = inst.build_extra_pane_command("shell").unwrap();
+        let escaped_dir = shell_escape(&inst.project_path).replace('\'', "'\\''");
+
+        assert!(command.starts_with("bash -lc '"));
+        assert!(command.contains(&format!(
+            "cd {} && stty susp undef; exec /bin/zsh",
+            escaped_dir
+        )));
+
+        match original_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn extra_agent_pane_keeps_the_tmux_cwd() {
+        let original_shell = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", "/bin/zsh");
+
+        let mut inst = Instance::new("test", "/tmp/project");
+        inst.tool = "claude".to_string();
+        let command = inst.build_extra_pane_command("claude").unwrap();
+
+        assert!(command.contains("stty susp undef; exec env claude"));
+        assert!(!command.contains("cd "));
+
+        match original_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
     }
 
     #[test]

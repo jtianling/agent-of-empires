@@ -180,9 +180,15 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
         }
         let primary = crate::tmux::get_agent_pane_id(&session_name);
         // A Codex pane cannot report itself through hooks, so its capture is
-        // derived from Codex's rollout files before the snapshot below.
-        if let Some(primary) = primary.as_deref() {
-            crate::db::codex_rollout::maybe_claim_for_pane(&store, inst, primary);
+        // derived from Codex's rollout files before the snapshot below. Every
+        // pane is offered, in pane-index (creation) order: a Codex pane AoE
+        // added beside the primary one is invisible to restart and recovery
+        // until it has a capture, and the claim refuses panes not running
+        // Codex. Ordering plus the "a claimed thread is never reassigned"
+        // rule keeps a later pane from taking an earlier pane's conversation.
+        for (_, pane_id) in &panes {
+            let is_primary = primary.as_deref() == Some(pane_id.as_str());
+            crate::db::codex_rollout::maybe_claim_for_pane(&store, inst, pane_id, is_primary);
         }
         if let Err(e) = reconcile_session(&store, inst, &panes, primary.as_deref()) {
             tracing::debug!("reconcile: session {} failed: {}", inst.id, e);

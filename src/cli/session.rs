@@ -194,7 +194,7 @@ async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
     }
 
     let command = inst
-        .build_agent_command(None)
+        .build_extra_pane_command(&inst.tool)
         .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", inst.tool))?;
 
     crate::tmux::split_window_right(

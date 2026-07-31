@@ -51,57 +51,6 @@ where
     Ok(result)
 }
 
-/// Build the tmux command for a right pane tool. Wraps with Ctrl-Z disablement
-/// and container exec for sandboxed sessions, mirroring the main tool's wrapping.
-fn build_right_pane_command(instance: &crate::session::Instance, tool_name: &str) -> String {
-    let agent = crate::agents::get_agent(tool_name);
-
-    // For "shell", use the user's shell; for agents, use the registered binary.
-    let binary = if tool_name == "shell" {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-    } else {
-        agent
-            .map(|a| a.binary.to_string())
-            .unwrap_or_else(|| "bash".to_string())
-    };
-
-    // Apply YOLO mode when the session has yolo enabled
-    let mut cmd = binary.clone();
-    let mut env_prefix = String::new();
-    if instance.is_yolo_mode() && tool_name != "shell" {
-        match agent.and_then(|a| a.yolo.as_ref()) {
-            Some(crate::agents::YoloMode::CliFlag(flag)) => {
-                cmd = format!("{} {}", cmd, flag);
-            }
-            Some(crate::agents::YoloMode::EnvVar(key, value)) => {
-                let escaped_v = value.replace('\'', "'\\''");
-                env_prefix = format!("{}='{}' ", key, escaped_v);
-            }
-            Some(crate::agents::YoloMode::AlwaysYolo) => {}
-            None => {}
-        }
-    }
-
-    let inner_command = if instance.is_sandboxed() && instance.sandbox_info.is_some() {
-        let container = crate::containers::DockerContainer::from_session_id(&instance.id);
-        let workdir = instance.container_workdir();
-        let docker_cmd = container.exec_command(Some(&format!("-w {}", workdir)), &cmd);
-        format!("stty susp undef; exec {}", docker_cmd)
-    } else if tool_name == "shell" {
-        let escaped_dir = crate::session::shell_escape(&instance.project_path);
-        format!("cd {} && stty susp undef; exec {}", escaped_dir, cmd)
-    } else {
-        format!("stty susp undef; exec {}", cmd)
-    };
-
-    let escaped_inner_command = inner_command.replace('\'', "'\\''");
-    let shell_flag = if tool_name == "shell" { "-lc" } else { "-c" };
-    format!(
-        "{}bash {} '{}'",
-        env_prefix, shell_flag, escaped_inner_command
-    )
-}
-
 fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, profile: &str) {
     let _ = tab_title::set_tui_title(terminal.backend_mut(), profile);
 }
@@ -820,14 +769,23 @@ impl App {
 
                 if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
                     let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
-                    let right_cmd = build_right_pane_command(&inst, &right_tool);
-                    if let Err(e) = crate::tmux::split_window_right(
-                        &session_name,
-                        &inst.project_path,
-                        &right_cmd,
-                        right_tool != "shell",
-                    ) {
-                        tracing::warn!("Failed to split right pane: {}", e);
+                    match inst.build_extra_pane_command(&right_tool) {
+                        Some(right_cmd) => {
+                            if let Err(e) = crate::tmux::split_window_right(
+                                &session_name,
+                                &inst.project_path,
+                                &right_cmd,
+                                right_tool != "shell",
+                            ) {
+                                tracing::warn!("Failed to split right pane: {}", e);
+                            }
+                        }
+                        // Splitting anyway would leave an empty pane the user
+                        // has to close, with nothing saying why it is empty.
+                        None => tracing::warn!(
+                            "No launch command for right pane tool '{}'; pane not created",
+                            right_tool
+                        ),
                     }
                 }
             }
@@ -1125,47 +1083,5 @@ mod tests {
         assert!(info.is_some()); // But existing info is preserved
         assert_eq!(info.as_ref().unwrap().latest_version, "0.5.0");
         assert!(rx_out.is_none());
-    }
-
-    #[test]
-    #[serial_test::serial(shell_env)]
-    fn test_build_right_pane_command_shell_adds_cd_defense_in_depth() {
-        let original_shell = std::env::var("SHELL").ok();
-        std::env::set_var("SHELL", "/bin/zsh");
-
-        let instance = crate::session::Instance::new("test", "/tmp/project path/it's here");
-        let command = build_right_pane_command(&instance, "shell");
-        let escaped_dir =
-            crate::session::shell_escape(&instance.project_path).replace('\'', "'\\''");
-
-        assert!(command.starts_with("bash -lc '"));
-        assert!(command.contains(&format!(
-            "cd {} && stty susp undef; exec /bin/zsh",
-            escaped_dir
-        )));
-
-        match original_shell {
-            Some(shell) => std::env::set_var("SHELL", shell),
-            None => std::env::remove_var("SHELL"),
-        }
-    }
-
-    #[test]
-    #[serial_test::serial(shell_env)]
-    fn test_build_right_pane_command_non_shell_keeps_tmux_cwd_path() {
-        let original_shell = std::env::var("SHELL").ok();
-        std::env::set_var("SHELL", "/bin/zsh");
-
-        let instance = crate::session::Instance::new("test", "/tmp/project");
-        let command = build_right_pane_command(&instance, "claude");
-
-        assert!(command.starts_with("bash -c '"));
-        assert!(command.contains("stty susp undef; exec claude"));
-        assert!(!command.contains("cd "));
-
-        match original_shell {
-            Some(shell) => std::env::set_var("SHELL", shell),
-            None => std::env::remove_var("SHELL"),
-        }
     }
 }
