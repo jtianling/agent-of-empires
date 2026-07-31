@@ -413,6 +413,13 @@ const CODEX_XATS_MISSING_UUIDGEN: &str =
 const CODEX_XATS_MISSING_NC: &str = "[xats] Missing nc required to check the Codex app-server.";
 const CODEX_XATS_MISSING_NPX: &str = "[xats] Missing npx required for Codex pre-registration.";
 const CODEX_XATS_INVALID_UUID: &str = "[xats] uuidgen returned an invalid Codex agent UUID.";
+/// Terminal: a failed pre-registration is never retried without the pane's
+/// identity key. The key is the only thing by which the daemon recognizes which
+/// identity a pane belongs to, so a keyless registration produces a pane that
+/// looks healthy and is never prompted to re-register -- and neither observed
+/// failure (npx cannot resolve the package; the daemon refuses to displace a
+/// live keyed row) would clear on an immediate second attempt anyway.
+const CODEX_XATS_PREREGISTER_FAILED: &str = "[xats] Failed to pre-register the Codex pane.";
 fn codex_xats_app_server_unavailable(url: &str) -> String {
     format!("[xats] Codex app-server is not listening on {url}.")
 }
@@ -1061,11 +1068,8 @@ impl Instance {
                      || pre_register_failed=1; \
              fi; \
              if [ -n \"${{pre_register_failed:-}}\" ]; then \
-                 if ! npx --no-install {package} pre-register-codex-pane \
-                     --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"; then \
-                     printf '%s\\n' '[xats] Failed to pre-register the Codex pane.' >&2; \
-                     exit 1; \
-                 fi; \
+                 printf '%s\\n' '{prereg_failed}' >&2; \
+                 exit 1; \
              fi; \
              exec {codex_command}",
             host = shell_escape(&endpoint.host),
@@ -1078,6 +1082,7 @@ impl Instance {
             missing_nc = CODEX_XATS_MISSING_NC,
             missing_npx = CODEX_XATS_MISSING_NPX,
             invalid_uuid = CODEX_XATS_INVALID_UUID,
+            prereg_failed = CODEX_XATS_PREREGISTER_FAILED,
             app_server_unavailable = codex_xats_app_server_unavailable(&endpoint.url),
         );
         format!("sh -c {}", shell_escape(&script))
@@ -4257,21 +4262,26 @@ mod tests {
         assert!(!script.contains("secret-identity-key-value"));
         assert!(cmd.contains("XATS_IDENTITY_KEY='secret-identity-key-value' "));
 
-        // Three pre-registration call sites: the with-key and without-key
-        // branches of the first attempt, then the retry reproducing the exact
-        // pre-change call.
+        // Two pre-registration call sites, and only two: the with-key and
+        // without-key branches of the single attempt. A third would be the
+        // retry that discarded the key -- see `CODEX_XATS_PREREGISTER_FAILED`.
         let calls: Vec<usize> = cmd
             .match_indices("pre-register-codex-pane")
             .map(|(i, _)| i)
             .collect();
         assert_eq!(
             calls.len(),
-            3,
-            "expected key-branch, keyless-branch, and retry calls: {cmd}"
+            2,
+            "expected only the key-branch and keyless-branch calls: {cmd}"
         );
-        let retry_call = &cmd[calls[2]..cmd.rfind(" exec ").unwrap()];
-        assert!(!retry_call.contains("identity-key"));
-        assert!(!retry_call.contains("ttl"));
+        // Every call site carries the TTL, so none of them is the keyless
+        // retry shape.
+        let tail = &cmd[calls[0]..cmd.rfind(" exec ").unwrap()];
+        assert_eq!(
+            tail.matches("--ttl").count(),
+            2,
+            "a pre-registration without a TTL is the retry shape: {cmd}"
+        );
     }
 
     /// How the fake npx behaves across the bootstrap's calls.
@@ -4412,6 +4422,19 @@ mod tests {
         env: &[(&str, Option<&str>)],
         extra_args: &str,
     ) -> (bool, FakeCalls, FakeCalls) {
+        let (ok, npx, codex, _) =
+            run_codex_bootstrap_capturing_stderr(identity_key, npx_mode, env, extra_args);
+        (ok, npx, codex)
+    }
+
+    /// As above, plus the script's stderr, for the cases that assert on which
+    /// diagnostic the pane printed rather than only on whether it failed.
+    fn run_codex_bootstrap_capturing_stderr(
+        identity_key: Option<&str>,
+        npx_mode: FakeNpx,
+        env: &[(&str, Option<&str>)],
+        extra_args: &str,
+    ) -> (bool, FakeCalls, FakeCalls, String) {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -4433,13 +4456,15 @@ mod tests {
         let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base);
 
         let out = execute_bootstrap_script(&script, &bin, identity_key, env);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.status.success() {
-            eprintln!("bootstrap stderr: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!("bootstrap stderr: {stderr}");
         }
         (
             out.status.success(),
             parse_fake_calls(&npx_log),
             parse_fake_calls(&codex_log),
+            stderr,
         )
     }
 
@@ -4506,41 +4531,41 @@ mod tests {
         assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
     }
 
+    /// A keyed pre-registration that fails is not retried without the key. The
+    /// keyless registration such a retry produced looked healthy and left the
+    /// pane permanently unrecognizable to the daemon.
     #[test]
-    fn test_codex_xats_bootstrap_falls_back_to_bare_retry() {
+    fn test_codex_xats_keyed_preregister_failure_is_not_retried_without_the_key() {
         let (ok, npx, codex) =
             run_codex_bootstrap_with_fakes(Some("live-key-123"), FakeNpx::FailFirst, &[], "");
-        assert!(ok, "a successful retry keeps the launch alive");
-        assert_eq!(npx.len(), 2, "first attempt plus bare retry: {npx:?}");
+
+        assert!(!ok, "a failed pre-registration must fail the launch");
+        assert_eq!(npx.len(), 1, "exactly one attempt, no retry: {npx:?}");
         assert!(npx[0].iter().any(|a| a == "--identity-key-env"));
-        // The retry reproduces the exact pre-change argv.
-        let expected_retry = [
-            "--no-install",
-            CODEX_XATS_PACKAGE,
-            "pre-register-codex-pane",
-            "--pane",
-            "%fake",
-            "--agent-id",
-            "12345678-1234-1234-1234-123456789abc",
-        ];
-        assert_eq!(npx[1], expected_retry, "bare retry argv: {npx:?}");
-        assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+        assert!(codex.is_empty(), "codex must not launch: {codex:?}");
     }
 
-    /// The reviewer's reproduction: `sh` imports `SHELLOPTS=errexit` from the
-    /// environment, under which a plain failing command exits the script
-    /// before any `$?` check. The fallback must fire anyway.
+    /// The reviewer's reproduction, kept because the hazard outlived the retry
+    /// it was written for: `sh` imports `SHELLOPTS=errexit` from the
+    /// environment, under which a plain failing command exits the script before
+    /// any `$?` check. The failure must still reach its diagnostic rather than
+    /// dying silently at the failing `npx`.
     #[test]
-    fn test_codex_xats_bootstrap_fallback_survives_inherited_errexit() {
-        let (ok, npx, codex) = run_codex_bootstrap_with_fakes(
+    fn test_codex_xats_preregister_failure_survives_inherited_errexit() {
+        let (ok, npx, codex, stderr) = run_codex_bootstrap_capturing_stderr(
             Some("live-key-123"),
             FakeNpx::FailFirst,
             &[("SHELLOPTS", Some("errexit"))],
             "",
         );
-        assert!(ok, "errexit must not skip the fallback");
-        assert_eq!(npx.len(), 2, "first attempt plus bare retry: {npx:?}");
-        assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+
+        assert!(!ok);
+        assert_eq!(npx.len(), 1, "exactly one attempt, no retry: {npx:?}");
+        assert!(codex.is_empty(), "codex must not launch: {codex:?}");
+        assert!(
+            stderr.contains(CODEX_XATS_PREREGISTER_FAILED),
+            "errexit must not skip the diagnostic: {stderr}"
+        );
     }
 
     /// A user's extra args referencing the positional parameters must expand
@@ -4622,11 +4647,11 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_xats_bootstrap_double_failure_is_fatal_without_codex() {
+    fn test_codex_xats_bootstrap_preregister_failure_is_fatal_without_codex() {
         let (ok, npx, codex) =
             run_codex_bootstrap_with_fakes(Some("live-key-123"), FakeNpx::FailAll, &[], "");
-        assert!(!ok, "both attempts failing must fail the launch");
-        assert_eq!(npx.len(), 2);
+        assert!(!ok, "a failed pre-registration must fail the launch");
+        assert_eq!(npx.len(), 1, "no second attempt: {npx:?}");
         assert!(codex.is_empty(), "codex must not launch: {codex:?}");
     }
 
