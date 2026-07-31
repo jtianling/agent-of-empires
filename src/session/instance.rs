@@ -334,13 +334,26 @@ fn parse_codex_app_server_url(raw: &str) -> Option<CodexAppServerEndpoint> {
 /// debugging that goes looking through AoE's warnings. A pane that refuses to
 /// start is loud; two systems quietly talking to different servers is not.
 fn codex_app_server_endpoint() -> Result<CodexAppServerEndpoint, String> {
-    if let Ok(raw) = std::env::var(CODEX_XATS_APP_SERVER_URL_ENV) {
+    resolve_codex_app_server_endpoint(
+        std::env::var(CODEX_XATS_APP_SERVER_URL_ENV).ok(),
+        std::env::var(CODEX_XATS_APP_SERVER_URLS_ENV).ok(),
+    )
+}
+
+/// Takes the two variables' values rather than reading them, so tests never
+/// mutate the process environment. Setting it there would also change what every
+/// concurrently running test that builds a Codex command sees.
+fn resolve_codex_app_server_endpoint(
+    single: Option<String>,
+    list: Option<String>,
+) -> Result<CodexAppServerEndpoint, String> {
+    if let Some(raw) = single {
         return parse_codex_app_server_url(&raw).ok_or_else(|| {
             format!("[xats] {CODEX_XATS_APP_SERVER_URL_ENV} is not a ws:// or wss:// URL: {raw}")
         });
     }
 
-    if let Ok(raw) = std::env::var(CODEX_XATS_APP_SERVER_URLS_ENV) {
+    if let Some(raw) = list {
         return codex_app_server_endpoint_from_list(&raw);
     }
 
@@ -971,6 +984,18 @@ impl Instance {
     /// Takes the endpoint rather than resolving it, so tests can assert on a
     /// specific one without setting a process-global environment variable that
     /// every other test building a Codex command would also see.
+    ///
+    /// The `exec` in front of the Codex command is part of the contract with
+    /// xats, not a way to save a process. This script runs as a non-interactive
+    /// `sh -c`, so there is no job control and children stay in the shell's own
+    /// process group. `exec` makes Codex replace that shell, so it inherits its
+    /// pid -- which is the pane's process group leader. xats identifies a pane's
+    /// carrier by matching Codex's argv and then folding the npm shim and its
+    /// native child together by taking the group leader; with `exec` the leader
+    /// is one of the matches, and folding succeeds. Wrap the command instead of
+    /// exec-ing it and the leader becomes `sh`, which matches nothing, so xats
+    /// finds no leader among the matches and never binds the pane. It reports
+    /// nothing: the pane registers, and delivery silently never arrives.
     fn codex_xats_bootstrap_command_for(
         &self,
         cmd: &str,
@@ -3660,57 +3685,71 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn codex_app_server_endpoint_follows_the_xats_variable() {
-        let restore_url = std::env::var(CODEX_XATS_APP_SERVER_URL_ENV).ok();
-        let restore_urls = std::env::var(CODEX_XATS_APP_SERVER_URLS_ENV).ok();
-        std::env::remove_var(CODEX_XATS_APP_SERVER_URL_ENV);
-        std::env::remove_var(CODEX_XATS_APP_SERVER_URLS_ENV);
+        let resolve = |single: Option<&str>, list: Option<&str>| {
+            resolve_codex_app_server_endpoint(single.map(str::to_string), list.map(str::to_string))
+        };
 
         assert_eq!(
-            codex_app_server_endpoint().unwrap().url,
+            resolve(None, None).unwrap().url,
             CODEX_XATS_APP_SERVER_DEFAULT_URL,
             "unset means the default"
         );
 
-        std::env::set_var(CODEX_XATS_APP_SERVER_URL_ENV, "ws://127.0.0.1:8899");
-        let configured = codex_app_server_endpoint().unwrap();
+        let configured = resolve(Some("ws://127.0.0.1:8899"), None).unwrap();
         assert_eq!(configured.url, "ws://127.0.0.1:8899");
         assert_eq!(configured.port, 8899, "the gate follows the same endpoint");
 
-        std::env::set_var(CODEX_XATS_APP_SERVER_URL_ENV, "ws://127.0.0.1:nope");
-        let rejected = codex_app_server_endpoint().unwrap_err();
+        let rejected = resolve(Some("ws://127.0.0.1:nope"), None).unwrap_err();
         assert!(
             rejected.contains(CODEX_XATS_APP_SERVER_URL_ENV) && rejected.contains("nope"),
             "the diagnostic must name the variable and the value: {rejected}"
         );
 
-        std::env::remove_var(CODEX_XATS_APP_SERVER_URL_ENV);
-        std::env::set_var(CODEX_XATS_APP_SERVER_URLS_ENV, "[\"ws://127.0.0.1:8899\"]");
         assert_eq!(
-            codex_app_server_endpoint().unwrap().url,
+            resolve(None, Some("[\"ws://127.0.0.1:8899\"]"))
+                .unwrap()
+                .url,
             "ws://127.0.0.1:8899",
             "a list with nothing to pick between leaves nothing to guess at"
         );
 
-        std::env::set_var(
-            CODEX_XATS_APP_SERVER_URLS_ENV,
-            "[\"ws://127.0.0.1:8899\",\"ws://127.0.0.1:8898\"]",
-        );
-        let ambiguous = codex_app_server_endpoint().unwrap_err();
+        let ambiguous = resolve(
+            None,
+            Some("[\"ws://127.0.0.1:8899\",\"ws://127.0.0.1:8898\"]"),
+        )
+        .unwrap_err();
         assert!(
             ambiguous.contains(CODEX_XATS_APP_SERVER_URL_ENV),
             "an ambiguous list must point at the single-endpoint variable: {ambiguous}"
         );
 
-        match restore_url {
-            Some(v) => std::env::set_var(CODEX_XATS_APP_SERVER_URL_ENV, v),
-            None => std::env::remove_var(CODEX_XATS_APP_SERVER_URL_ENV),
-        }
-        match restore_urls {
-            Some(v) => std::env::set_var(CODEX_XATS_APP_SERVER_URLS_ENV, v),
-            None => std::env::remove_var(CODEX_XATS_APP_SERVER_URLS_ENV),
-        }
+        assert_eq!(
+            resolve(
+                Some("ws://127.0.0.1:8899"),
+                Some("[\"ws://127.0.0.1:8898\"]")
+            )
+            .unwrap()
+            .url,
+            "ws://127.0.0.1:8899",
+            "the single-endpoint variable wins, as it does in xats"
+        );
+    }
+
+    /// The bootstrap must `exec` into Codex rather than wrap it. See
+    /// `codex_xats_bootstrap_command_for`: xats folds a pane's carrier matches
+    /// by taking the process group leader, and only `exec` puts Codex at the
+    /// leader's pid. Wrapping it leaves `sh` as the leader, xats finds no leader
+    /// among the matches, and the pane silently never binds. A comment cannot
+    /// stop that edit; this can.
+    #[test]
+    fn codex_bootstrap_execs_into_codex_rather_than_wrapping_it() {
+        let cmd = codex_xats_instance().build_agent_command(None).unwrap();
+
+        assert!(
+            cmd.contains("exec codex --remote"),
+            "Codex must replace the bootstrap shell, not run under it: {cmd}"
+        );
     }
 
     /// The value AoE will not take must stop the pane, not quietly redirect it
