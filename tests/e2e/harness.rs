@@ -322,6 +322,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
             .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
@@ -472,6 +473,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir);
 
         if let Some(tmux_env) = tmux_env {
@@ -600,6 +602,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
             .expect("failed to run aoe CLI")
@@ -616,6 +619,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TMUX", format!("{},1,0", self.socket_path.display()))
             .output()
@@ -631,6 +635,7 @@ last_seen_version = "{}"
             .env("XDG_CONFIG_HOME", self.home_dir.path().join(".config"))
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
+            .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TMUX", tmux_env)
             .output()

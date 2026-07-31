@@ -261,9 +261,115 @@ fn recovery_settle() -> Duration {
     requested
 }
 
-const CODEX_XATS_APP_SERVER_HOST: &str = "127.0.0.1";
-const CODEX_XATS_APP_SERVER_PORT: &str = "8799";
-const CODEX_XATS_APP_SERVER_URL: &str = "ws://127.0.0.1:8799";
+/// Environment variable naming the local Codex app-server. This is xats's own
+/// variable rather than an AoE one: xats resolves its Codex endpoint from it, so
+/// a separate AoE name would let the two be pointed at different servers while
+/// the user believed they had configured one.
+const CODEX_XATS_APP_SERVER_URL_ENV: &str = "CROSS_AGENT_TEAMS_CODEX_WS_URL";
+/// xats also accepts a JSON array of endpoints here and probes them for a given
+/// thread. AoE has to commit to one endpoint at launch, before any thread
+/// exists, so it can only follow a single-element array.
+const CODEX_XATS_APP_SERVER_URLS_ENV: &str = "CROSS_AGENT_TEAMS_CODEX_WS_URLS";
+const CODEX_XATS_APP_SERVER_DEFAULT_URL: &str = "ws://127.0.0.1:8799";
+
+/// A resolved app-server endpoint. The availability gate and the `--remote`
+/// argument both read from one of these so they cannot name different servers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexAppServerEndpoint {
+    url: String,
+    /// Host in the form `nc` wants: an IPv6 literal appears here without the
+    /// brackets the URL form requires.
+    host: String,
+    port: u16,
+}
+
+/// Accept what xats accepts: a URL that parses, over `ws` or `wss`. A path is
+/// allowed and preserved, because xats preserves it too.
+///
+/// Matching xats's acceptance set is the point. A value xats takes and AoE
+/// refuses would put the two on different servers while the user believed they
+/// had configured one -- the same silent split this whole resolution exists to
+/// remove, just entering through a different door.
+///
+/// The URL is kept as written rather than as the parser re-serializes it: a
+/// round trip through `Url` appends a trailing slash to an authority-only URL,
+/// which would silently change the `--remote` argument AoE has always passed.
+///
+/// The host still has to survive a character check, because it is interpolated
+/// into a generated `sh -c` script. That is an injection guard, and it is
+/// deliberately separate from the question of what endpoints are acceptable.
+fn parse_codex_app_server_url(raw: &str) -> Option<CodexAppServerEndpoint> {
+    let raw = raw.trim();
+    let parsed = url::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+    {
+        return None;
+    }
+
+    Some(CodexAppServerEndpoint {
+        url: raw.to_string(),
+        host: host.to_string(),
+        port: parsed.port_or_known_default()?,
+    })
+}
+
+/// Resolve the endpoint, or return the diagnostic explaining why not.
+///
+/// There is no falling back to the default on a bad value. A user who
+/// configured something AoE will not take must find out from the pane, not from
+/// a line in AoE's debug log: the symptom of a silent fallback shows up on the
+/// xats side, as a Codex that connected but cannot be resumed, and nobody
+/// debugging that goes looking through AoE's warnings. A pane that refuses to
+/// start is loud; two systems quietly talking to different servers is not.
+fn codex_app_server_endpoint() -> Result<CodexAppServerEndpoint, String> {
+    if let Ok(raw) = std::env::var(CODEX_XATS_APP_SERVER_URL_ENV) {
+        return parse_codex_app_server_url(&raw).ok_or_else(|| {
+            format!("[xats] {CODEX_XATS_APP_SERVER_URL_ENV} is not a ws:// or wss:// URL: {raw}")
+        });
+    }
+
+    if let Ok(raw) = std::env::var(CODEX_XATS_APP_SERVER_URLS_ENV) {
+        return codex_app_server_endpoint_from_list(&raw);
+    }
+
+    Ok(
+        parse_codex_app_server_url(CODEX_XATS_APP_SERVER_DEFAULT_URL)
+            .expect("the default Codex app-server URL parses"),
+    )
+}
+
+/// xats probes every endpoint in this list to find the one holding a thread.
+/// AoE picks its endpoint before any thread exists, so it can only follow a list
+/// that leaves nothing to pick.
+fn codex_app_server_endpoint_from_list(raw: &str) -> Result<CodexAppServerEndpoint, String> {
+    let ambiguous = || {
+        format!(
+            "[xats] {CODEX_XATS_APP_SERVER_URLS_ENV} must hold exactly one endpoint for AoE \
+             to launch against, or set {CODEX_XATS_APP_SERVER_URL_ENV} instead: {raw}"
+        )
+    };
+
+    let entries: Vec<String> = serde_json::from_str(raw).map_err(|_| ambiguous())?;
+    let [only] = entries.as_slice() else {
+        return Err(ambiguous());
+    };
+
+    parse_codex_app_server_url(only).ok_or_else(|| {
+        format!("[xats] {CODEX_XATS_APP_SERVER_URLS_ENV} is not a ws:// or wss:// URL: {only}")
+    })
+}
 /// The npx spec for the xats pre-registration CLI, `@latest` included.
 ///
 /// The tag is load-bearing, not decoration. `npx --no-install` resolves against
@@ -294,8 +400,17 @@ const CODEX_XATS_MISSING_UUIDGEN: &str =
 const CODEX_XATS_MISSING_NC: &str = "[xats] Missing nc required to check the Codex app-server.";
 const CODEX_XATS_MISSING_NPX: &str = "[xats] Missing npx required for Codex pre-registration.";
 const CODEX_XATS_INVALID_UUID: &str = "[xats] uuidgen returned an invalid Codex agent UUID.";
-const CODEX_XATS_APP_SERVER_UNAVAILABLE: &str =
-    "[xats] Codex app-server is not listening on ws://127.0.0.1:8799.";
+fn codex_xats_app_server_unavailable(url: &str) -> String {
+    format!("[xats] Codex app-server is not listening on {url}.")
+}
+
+/// A pane command that reports why the bootstrap could not be built and exits
+/// non-zero, which is how every other Cross Agent Team precondition in this file
+/// already fails.
+fn codex_xats_aborted_command(diagnostic: &str) -> String {
+    let script = format!("printf '%s\\n' {} >&2; exit 1", shell_escape(diagnostic));
+    format!("sh -c {}", shell_escape(&script))
+}
 
 /// Strip ANSI/CSI escape sequences (e.g. SGR color codes) from captured pane
 /// content. Claude colors the warning title per-word, so `tmux capture-pane -e`
@@ -844,9 +959,27 @@ impl Instance {
     }
 
     fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str) -> String {
+        match codex_app_server_endpoint() {
+            Ok(endpoint) => self.codex_xats_bootstrap_command_for(cmd, base, &endpoint),
+            Err(diagnostic) => {
+                tracing::warn!("{}", diagnostic);
+                codex_xats_aborted_command(&diagnostic)
+            }
+        }
+    }
+
+    /// Takes the endpoint rather than resolving it, so tests can assert on a
+    /// specific one without setting a process-global environment variable that
+    /// every other test building a Codex command would also see.
+    fn codex_xats_bootstrap_command_for(
+        &self,
+        cmd: &str,
+        base: &str,
+        endpoint: &CodexAppServerEndpoint,
+    ) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
         let project_path = shell_escape(&self.project_path);
-        let app_server_url = shell_escape(CODEX_XATS_APP_SERVER_URL);
+        let app_server_url = shell_escape(&endpoint.url);
         let codex_command = format!(
             "{base} --remote {app_server_url} -C {project_path} \
              -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\"{suffix}"
@@ -910,8 +1043,8 @@ impl Instance {
                  fi; \
              fi; \
              exec {codex_command}",
-            host = CODEX_XATS_APP_SERVER_HOST,
-            port = CODEX_XATS_APP_SERVER_PORT,
+            host = shell_escape(&endpoint.host),
+            port = endpoint.port,
             package = CODEX_XATS_PACKAGE,
             identity_env = XATS_IDENTITY_KEY_ENV,
             ttl = CODEX_XATS_PREREGISTER_TTL_SECONDS,
@@ -920,7 +1053,7 @@ impl Instance {
             missing_nc = CODEX_XATS_MISSING_NC,
             missing_npx = CODEX_XATS_MISSING_NPX,
             invalid_uuid = CODEX_XATS_INVALID_UUID,
-            app_server_unavailable = CODEX_XATS_APP_SERVER_UNAVAILABLE,
+            app_server_unavailable = codex_xats_app_server_unavailable(&endpoint.url),
         );
         format!("sh -c {}", shell_escape(&script))
     }
@@ -3454,6 +3587,170 @@ mod tests {
         }
     }
 
+    #[test]
+    fn codex_app_server_url_parses_into_a_gate_and_a_remote_argument() {
+        let default = parse_codex_app_server_url(CODEX_XATS_APP_SERVER_DEFAULT_URL).unwrap();
+        assert_eq!(default.host, "127.0.0.1");
+        assert_eq!(default.port, 8799);
+        assert_eq!(
+            default.url, CODEX_XATS_APP_SERVER_DEFAULT_URL,
+            "the URL is kept as written; a Url round trip would append a slash"
+        );
+
+        let alternate = parse_codex_app_server_url("ws://localhost:8899").unwrap();
+        assert_eq!(alternate.host, "localhost");
+        assert_eq!(alternate.port, 8899);
+
+        let v6 = parse_codex_app_server_url("ws://[::1]:8899").unwrap();
+        assert_eq!(v6.host, "::1", "nc wants the literal without brackets");
+        assert_eq!(v6.url, "ws://[::1]:8899", "the URL keeps them");
+    }
+
+    /// xats takes `wss:` and a path, so AoE has to as well. A value xats accepts
+    /// and AoE refuses is the same silent split this resolution exists to
+    /// remove, entering through a different door.
+    #[test]
+    fn codex_app_server_url_accepts_what_xats_accepts() {
+        let secure = parse_codex_app_server_url("wss://example.test:8899").unwrap();
+        assert_eq!(secure.host, "example.test");
+        assert_eq!(secure.port, 8899);
+
+        let pathed = parse_codex_app_server_url("ws://127.0.0.1:8899/codex").unwrap();
+        assert_eq!(pathed.port, 8899, "the gate ignores the path");
+        assert_eq!(pathed.url, "ws://127.0.0.1:8899/codex", "the path survives");
+
+        assert_eq!(
+            parse_codex_app_server_url("wss://example.test")
+                .unwrap()
+                .port,
+            443,
+            "a scheme's default port is known"
+        );
+        assert_eq!(
+            parse_codex_app_server_url("  ws://127.0.0.1:8899  ")
+                .unwrap()
+                .url,
+            "ws://127.0.0.1:8899",
+            "surrounding whitespace is trimmed, as xats trims it"
+        );
+    }
+
+    /// The host reaches a generated `sh -c` script, so this is the guard against
+    /// injecting into a command AoE runs, not a formatting preference.
+    #[test]
+    fn codex_app_server_url_rejects_non_websocket_and_unsafe_hosts() {
+        for rejected in [
+            "http://127.0.0.1:8799",
+            "file:///etc/passwd",
+            "127.0.0.1:8799",
+            "ws://",
+            "ws://:8799",
+            "ws://127.0.0.1:port",
+            "ws://127.0.0.1:70000",
+            "ws://127.0.0.1;touch /tmp/pwned:8799",
+            "ws://$(id)",
+            "ws://127.0.0.1 -e sh",
+            "",
+        ] {
+            assert!(
+                parse_codex_app_server_url(rejected).is_none(),
+                "must reject {rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_app_server_endpoint_follows_the_xats_variable() {
+        let restore_url = std::env::var(CODEX_XATS_APP_SERVER_URL_ENV).ok();
+        let restore_urls = std::env::var(CODEX_XATS_APP_SERVER_URLS_ENV).ok();
+        std::env::remove_var(CODEX_XATS_APP_SERVER_URL_ENV);
+        std::env::remove_var(CODEX_XATS_APP_SERVER_URLS_ENV);
+
+        assert_eq!(
+            codex_app_server_endpoint().unwrap().url,
+            CODEX_XATS_APP_SERVER_DEFAULT_URL,
+            "unset means the default"
+        );
+
+        std::env::set_var(CODEX_XATS_APP_SERVER_URL_ENV, "ws://127.0.0.1:8899");
+        let configured = codex_app_server_endpoint().unwrap();
+        assert_eq!(configured.url, "ws://127.0.0.1:8899");
+        assert_eq!(configured.port, 8899, "the gate follows the same endpoint");
+
+        std::env::set_var(CODEX_XATS_APP_SERVER_URL_ENV, "ws://127.0.0.1:nope");
+        let rejected = codex_app_server_endpoint().unwrap_err();
+        assert!(
+            rejected.contains(CODEX_XATS_APP_SERVER_URL_ENV) && rejected.contains("nope"),
+            "the diagnostic must name the variable and the value: {rejected}"
+        );
+
+        std::env::remove_var(CODEX_XATS_APP_SERVER_URL_ENV);
+        std::env::set_var(CODEX_XATS_APP_SERVER_URLS_ENV, "[\"ws://127.0.0.1:8899\"]");
+        assert_eq!(
+            codex_app_server_endpoint().unwrap().url,
+            "ws://127.0.0.1:8899",
+            "a list with nothing to pick between leaves nothing to guess at"
+        );
+
+        std::env::set_var(
+            CODEX_XATS_APP_SERVER_URLS_ENV,
+            "[\"ws://127.0.0.1:8899\",\"ws://127.0.0.1:8898\"]",
+        );
+        let ambiguous = codex_app_server_endpoint().unwrap_err();
+        assert!(
+            ambiguous.contains(CODEX_XATS_APP_SERVER_URL_ENV),
+            "an ambiguous list must point at the single-endpoint variable: {ambiguous}"
+        );
+
+        match restore_url {
+            Some(v) => std::env::set_var(CODEX_XATS_APP_SERVER_URL_ENV, v),
+            None => std::env::remove_var(CODEX_XATS_APP_SERVER_URL_ENV),
+        }
+        match restore_urls {
+            Some(v) => std::env::set_var(CODEX_XATS_APP_SERVER_URLS_ENV, v),
+            None => std::env::remove_var(CODEX_XATS_APP_SERVER_URLS_ENV),
+        }
+    }
+
+    /// The value AoE will not take must stop the pane, not quietly redirect it
+    /// to a different server than the one xats is using.
+    #[test]
+    fn a_rejected_endpoint_aborts_the_pane_instead_of_falling_back() {
+        let aborted = codex_xats_aborted_command("[xats] bad endpoint: ws://nope:nope");
+
+        assert!(aborted.contains("exit 1"));
+        assert!(aborted.contains("bad endpoint"));
+        assert!(
+            !aborted.contains("--remote") && !aborted.contains("8799"),
+            "an aborted pane must not launch Codex against the default: {aborted}"
+        );
+    }
+
+    /// Uses a host and port that both differ from the default, so the default
+    /// leaking through anywhere is a visible absence rather than a coincidence.
+    #[test]
+    fn codex_bootstrap_names_the_configured_endpoint_everywhere() {
+        let inst = codex_xats_instance();
+        let endpoint = parse_codex_app_server_url("ws://localhost:8899").unwrap();
+        let cmd = inst.codex_xats_bootstrap_command_for("codex", "codex", &endpoint);
+
+        assert!(
+            cmd.contains("ws://localhost:8899"),
+            "remote argument: {cmd}"
+        );
+        assert!(cmd.contains("localhost"), "gate host: {cmd}");
+        assert!(cmd.contains(" 8899 >/dev/null"), "gate port: {cmd}");
+        assert!(
+            cmd.contains(&codex_xats_app_server_unavailable("ws://localhost:8899")),
+            "the diagnostic must name the endpoint that was probed: {cmd}"
+        );
+        assert!(
+            !cmd.contains("8799") && !cmd.contains("127.0.0.1"),
+            "no part of the default may survive a configured endpoint: {cmd}"
+        );
+    }
+
     /// The screen a question is drawn on changes while the question is still up
     /// -- a spinner tick, a status line, a partial redraw. Answering must key on
     /// the question, so a redraw is not a second question.
@@ -3806,7 +4103,7 @@ mod tests {
 
         assert!(cmd.contains("pre-register-codex-pane"));
         assert!(cmd.contains("--remote"));
-        assert!(cmd.contains(CODEX_XATS_APP_SERVER_URL));
+        assert!(cmd.contains(CODEX_XATS_APP_SERVER_DEFAULT_URL));
         assert!(cmd.contains("xats.agent_id="));
         assert!(cmd.contains("/tmp/project path"));
         assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
@@ -4320,7 +4617,7 @@ mod tests {
             CODEX_XATS_MISSING_NC,
             CODEX_XATS_MISSING_NPX,
             CODEX_XATS_INVALID_UUID,
-            CODEX_XATS_APP_SERVER_UNAVAILABLE,
+            &codex_xats_app_server_unavailable(CODEX_XATS_APP_SERVER_DEFAULT_URL),
             "[xats] Failed to pre-register the Codex pane.",
         ] {
             assert!(

@@ -42,6 +42,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "unicode-width",
+ "url",
  "uuid",
 ]
 
