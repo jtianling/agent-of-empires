@@ -943,6 +943,25 @@ impl HomeView {
         }
     }
 
+    /// Copy back the xats identity key a launch minted on a cloned instance.
+    /// The key is the handle xats uses to recognize "this seat's agent
+    /// restarted", so losing it here would make every later restart mint a new
+    /// one and look like a brand new identity.
+    pub fn adopt_xats_identity_key(&mut self, id: &str, key: &str) {
+        let mut changed = false;
+        self.mutate_instance(id, |inst| {
+            if inst.xats_identity_key.as_deref() != Some(key) {
+                inst.xats_identity_key = Some(key.to_string());
+                changed = true;
+            }
+        });
+        if changed {
+            if let Err(err) = self.save() {
+                tracing::error!("Failed to persist the xats identity key: {}", err);
+            }
+        }
+    }
+
     pub fn select_session_by_id(&mut self, session_id: &str) {
         for (idx, item) in self.flat_items.iter().enumerate() {
             if let Item::Session { id, .. } = item {

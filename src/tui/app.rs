@@ -810,6 +810,13 @@ impl App {
                 if inst.fork_pending.is_none() {
                     self.home.clear_fork_pending(session_id);
                 }
+                // The launch mints the xats identity key on the clone, so it has
+                // to travel back too: without it the record stays keyless and
+                // every restart hands xats a different key, which reads as a new
+                // identity instead of a restarted one.
+                if let Some(key) = inst.xats_identity_key.as_deref() {
+                    self.home.adopt_xats_identity_key(session_id, key);
+                }
 
                 if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
                     let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);

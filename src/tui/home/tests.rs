@@ -2238,3 +2238,40 @@ fn test_status_bar_sort_label_updates_after_cycling() {
         "got: {status:?}"
     );
 }
+
+#[test]
+#[serial]
+fn adopt_xats_identity_key_persists_the_launch_minted_key() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    assert!(env.view.instances[0].xats_identity_key.is_none());
+
+    env.view.adopt_xats_identity_key(&id, "seat-key");
+
+    assert_eq!(
+        env.view.instances[0].xats_identity_key.as_deref(),
+        Some("seat-key")
+    );
+    let reloaded = Storage::new("test").unwrap().load().unwrap();
+    let stored = reloaded.iter().find(|i| i.id == id).unwrap();
+    assert_eq!(
+        stored.xats_identity_key.as_deref(),
+        Some("seat-key"),
+        "a restart reads the record back, so the key has to survive on disk"
+    );
+}
+
+#[test]
+#[serial]
+fn adopt_xats_identity_key_keeps_the_existing_key() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    env.view.adopt_xats_identity_key(&id, "first-key");
+
+    env.view.adopt_xats_identity_key(&id, "first-key");
+
+    assert_eq!(
+        env.view.instances[0].xats_identity_key.as_deref(),
+        Some("first-key")
+    );
+}

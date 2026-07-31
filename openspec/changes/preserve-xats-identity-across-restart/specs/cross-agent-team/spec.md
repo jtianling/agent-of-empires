@@ -92,6 +92,14 @@ A pane's identity key SHALL be minted once and reused on every subsequent launch
 - **WHEN** an identity key has been persisted for a slot and AoE is closed and reopened
 - **THEN** the same key SHALL be injected on the next launch of that slot
 
+#### Scenario: The launch that mints the key persists it
+
+- **WHEN** a Cross Agent Team session is launched and that launch mints the instance's identity key
+- **THEN** the minted key SHALL be stored on the session record as part of that launch
+- **AND** the next restart SHALL inject the stored key rather than minting a new one
+
+Minting the key on a working copy of the instance and discarding it leaves the record keyless, so the first restart mints a second key. The daemon then finds no holder for the new key and treats the restarted pane as a new identity instead of a recovering one, while the old key stays bound to the dead pane.
+
 ### Requirement: Cloned and forked sessions receive a fresh identity key
 
 When a session is created from an existing session through new-from-selection, or when a pane is forked, AoE SHALL mint a new identity key for the resulting pane and SHALL NOT copy the source pane's key.
