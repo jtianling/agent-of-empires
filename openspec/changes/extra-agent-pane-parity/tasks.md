@@ -22,4 +22,8 @@
 ## 4. Verification
 
 - [x] 4.1 `cargo fmt`, `cargo clippy --all-targets`, `cargo check --all-targets` clean. Unit tests run name-filtered only (`extra_*`, `codex_xats`, `cat_integration`, `identity_key`, `db::reconcile`, `db::codex_rollout`): 9 new pass, 67 related existing pass. The full suite and all e2e tests were NOT run: this machine hosts live AoE tmux sessions.
-- [ ] 4.2 Hand off to jt for real-machine acceptance: create a Cross Agent Team session with a Codex right pane, confirm both panes pre-register with xats, then `Shift+C` and confirm both panes restart.
+- [x] 4.2 Verified in the isolated lab (private root, daemon 9198 / app-server 8898), for both Codex and Claude:
+  - **Launch**: both panes carry the full decoration and each pane's `xats.agent_id` matches its own pre-registration row byte for byte. A Claude extra pane does not inherit the instance's pre-allocated `--session-id`.
+  - **Capture**: both panes reach `pane_live` and `agent_slot` (slot0 primary, slot1 extra), each claiming its own conversation.
+  - **Restart**: after `Shift+C` the primary carries back the same identity key while the extra pane mints a new one that matches `agent_slot.slot1.xats_identity_key`. The two keys differ. The extra pane being keyless on its first launch and keyed from the first restart is the documented two-round behavior.
+- [ ] 4.3 jt's real-machine acceptance.

@@ -21,5 +21,5 @@
 ## 3. Verification
 
 - [x] 3.1 `cargo fmt`, `cargo clippy --all-targets`, `cargo check --all-targets` clean. Unit tests run name-filtered only (193 pass in `session::instance::tests`); the full suite and e2e are NOT run, because this machine hosts live AoE tmux sessions.
-- [ ] 3.2 tester: point the lab fixture at its private app-server through `CROSS_AGENT_TEAMS_CODEX_WS_URL` and confirm a lab Codex pane no longer probes or connects to the production app-server.
+- [x] 3.2 tester: lab fixture pointed at its private app-server through `CROSS_AGENT_TEAMS_CODEX_WS_URL`. Both panes' actual argv carry `--remote ws://127.0.0.1:8898`, the `nc -z` gate follows, and the run makes no contact with the production app-server. The lab guard also asserts the endpoint is `ws`/`wss`, is not `:8799`, and has something listening, so a misconfiguration cannot be mistaken for another failure.
 - [ ] 3.3 jt's real-machine acceptance.
