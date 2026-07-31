@@ -26,4 +26,4 @@
   - **Launch**: both panes carry the full decoration and each pane's `xats.agent_id` matches its own pre-registration row byte for byte. A Claude extra pane does not inherit the instance's pre-allocated `--session-id`.
   - **Capture**: both panes reach `pane_live` and `agent_slot` (slot0 primary, slot1 extra), each claiming its own conversation.
   - **Restart**: after `Shift+C` the primary carries back the same identity key while the extra pane mints a new one that matches `agent_slot.slot1.xats_identity_key`. The two keys differ. The extra pane being keyless on its first launch and keyed from the first restart is the documented two-round behavior.
-- [ ] 4.3 jt's real-machine acceptance.
+- [x] 4.3 Accepted by jt.

@@ -23,5 +23,9 @@
 ## 4. Verification
 
 - [x] 4.1 `cargo fmt`, `cargo clippy --all-targets`, `cargo check --all-targets` clean. Name-filtered unit tests: 17 in `db::codex_rollout` (8 new), 49 in `db`, 194 in `session::instance`, all passing. The full suite and e2e were NOT run, because this machine hosts live AoE tmux sessions.
-- [ ] 4.2 tester: run the existing RED script `discuss/xats-codex-lab/s-stale-pane-live.sh`, whose invariant is that every slot's recorded conversation equals the one running in that slot's pane. It is red today and must go green, with its phase 1 (the same assertion before any restart) still passing. Add a resume case: after `R`, the pane must keep its conversation rather than be rebound.
-- [ ] 4.3 jt's real-machine acceptance.
+- [x] 4.3 Accepted by jt on the code and the reasoning, ahead of 4.2.
+
+## 5. Outstanding after archive
+
+- [ ] 5.1 tester: run the existing RED script `discuss/xats-codex-lab/s-stale-pane-live.sh`, whose invariant is that every slot's recorded conversation equals the one running in that slot's pane. It is red before this change and must go green, with its phase 1 (the same assertion before any restart) still passing.
+- [ ] 5.2 tester: add a resume case, written independently of this change's own tests. After `R` the pane must keep its conversation rather than be rebound. The exemption in task 1.3 and the unit tests covering it come from one person's reading of the resume path; a test written from the same reading would fail in the same direction.
