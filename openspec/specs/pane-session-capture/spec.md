@@ -25,40 +25,26 @@ The installed agent status hook SHALL, in addition to its existing status-file w
 - **AND** the hook SHALL exit successfully without error
 
 ### Requirement: Reconciler snapshots pane captures into durable slots
-The system SHALL run a reconciler that snapshots pane captures into durable slots, driven from at least two attach-independent sources: the existing TUI status-poller tick AND the long-lived notification-monitor process (`aoe tmux monitor-notifications`). The reconciler SHALL continue to advance `agent_slot` while the TUI is attached to a session -- that is, while the status poller is not ticking because the main loop is blocked on `tmux attach-session`. For each managed session, the reconciler SHALL enumerate the session's tmux panes, resolve each pane's capture via `pane_live` keyed by `$TMUX_PANE`, and upsert a durable `agent_slot` record `(instance_id, slot, agent, native_session_id, cwd, tmux_pane, last_seen_at)`. The primary `@aoe_agent_pane` SHALL be slot 0. Assignment SHALL be sticky: a pane that already owns a slot keeps it, so a newly appearing pane SHALL NOT evict an already-tracked pane. New panes SHALL fill remaining free slots in ascending pane-index order, capped at 4 panes per session. The reconciler is idempotent, so running it from multiple drivers SHALL NOT create duplicate or conflicting rows. The notification-monitor driver SHALL be throttled by a minimum interval so it does not query tmux on every short poll cycle.
+The reconciler SHALL, per managed session, enumerate the session's tmux panes, resolve each pane's capture from `pane_live`, assign a deterministic slot, and upsert an `agent_slot` row.
 
-#### Scenario: Reconcile continues while attached to a session
-- **WHEN** the TUI is attached to a managed session (the status poller is not ticking)
-- **AND** a pane in that session produces a new `pane_live` capture with a `native_session_id`
-- **THEN** the reconciler SHALL still run from the notification-monitor process
-- **AND** an `agent_slot` row SHALL reflect that capture within a bounded time, without the user returning to the home view
+It SHALL append an `adopt` event the first time a slot is recorded for a session, and a `capture` event only when the pane's captured native session id differs from the one already recorded on that slot. An unchanged capture SHALL still refresh the durable row, so liveness stays observable through `last_seen_at`, but SHALL NOT append an event. The reconciler runs on the poll cadence, so appending per tick would record that polling happened rather than that anything occurred.
 
-#### Scenario: Already-tracked pane keeps its slot when a new pane appears
-- **WHEN** a session already has four panes recorded in `agent_slot` (slots 0..3)
-- **AND** a new pane appears, even with a lower pane index than an existing pane
-- **AND** the reconciler runs
-- **THEN** each already-tracked pane SHALL retain its original slot
-- **AND** the new pane SHALL NOT be recorded (no fifth slot, no eviction)
+#### Scenario: Pane capture is snapshotted into a slot
+- **WHEN** a managed session has a pane with a recorded capture
+- **THEN** the reconciler SHALL upsert an `agent_slot` row for that pane's slot
 
-#### Scenario: Managed session pane snapshotted to a slot
-- **WHEN** a managed session has a pane whose `pane_live` capture has a `native_session_id`
-- **AND** the reconciler runs
-- **THEN** an `agent_slot` row SHALL exist for that `(instance_id, slot)` with the captured `native_session_id`
-- **AND** `last_seen_at` SHALL be updated to the reconcile time
+#### Scenario: First recording of a slot appends adopt
+- **WHEN** a pane is assigned a slot that was not previously recorded for the session
+- **THEN** the reconciler SHALL append an `adopt` event for that slot
 
-#### Scenario: At most four slots per session
-- **WHEN** a managed session has more than four panes running agents
-- **THEN** the reconciler SHALL record at most four `agent_slot` rows for that session
+#### Scenario: Changed capture appends one event
+- **WHEN** a tracked slot's pane reports a native session id different from the one recorded
+- **THEN** the reconciler SHALL append a `capture` event for that slot
 
-#### Scenario: Orphan captures are garbage-collected
-- **WHEN** `pane_live` holds a row whose `tmux_pane` does not belong to any currently managed session
-- **AND** the reconciler runs
-- **THEN** that orphan `pane_live` row SHALL be removed
-
-#### Scenario: Snapshot occurs while tmux is alive
-- **WHEN** a managed session's agent has an active capture
-- **THEN** the reconciler SHALL snapshot it into `agent_slot` during normal runs (before any teardown)
-- **AND** the durable record SHALL therefore be available even after the tmux session no longer exists
+#### Scenario: Unchanged capture appends nothing
+- **WHEN** a tracked slot's pane reports the same native session id already recorded
+- **THEN** the reconciler SHALL NOT append an event
+- **AND** the durable row's `last_seen_at` SHALL still be refreshed
 
 ### Requirement: Codex conversation binding covers every pane of a managed session
 

@@ -150,30 +150,29 @@ the pane pre-registration and remote app-server bootstrap.
 When Cross Agent Team is enabled for a non-sandboxed `codex` session, AoE SHALL
 launch Codex through a pane-local xats bootstrap. The bootstrap MUST pre-register
 the current `TMUX_PANE` with a fresh UUID before executing Codex, then connect the
-Codex TUI to the configured local app-server with that UUID supplied as
-`xats.agent_id` and the session project path supplied as the Codex working
-directory.
+Codex TUI to the local app-server with that UUID supplied as `xats.agent_id` and
+the session project path supplied as the Codex working directory.
 
-The configured local app-server endpoint SHALL be read from the
-`CROSS_AGENT_TEAMS_CODEX_WS_URL` environment variable, which is the same variable
-xats resolves its own Codex endpoint from, and SHALL default to
-`ws://127.0.0.1:8799` when that variable is unset. When only
-`CROSS_AGENT_TEAMS_CODEX_WS_URLS` is set, AoE SHALL use its sole entry if it has
-exactly one, because AoE commits to an endpoint before any thread exists and
-cannot probe several the way xats does. The availability gate and the Codex
-remote argument SHALL both derive from that single endpoint, so they cannot name
-different servers.
+When the pane's environment carries a non-empty `XATS_IDENTITY_KEY`, the
+bootstrap SHALL tell the pre-registration call to read it, by naming the
+variable via `--identity-key-env`; the CLI reads the value from its own
+environment. The key's value SHALL NOT appear on the argv of any process the
+bootstrap script starts -- not the executed Codex command line and not the
+pre-registration call's own -- because argv is readable by every process on
+the machine. (The value does reach the pane through AoE's pre-existing
+env-injection prefix, which transits the tmux launch argv; that mechanism
+predates this change, is shared with Claude panes, and is out of scope here.
+What this change adds on top is masking the value in AoE's own debug logs of
+launch commands.) The pre-registration call SHALL also carry a lengthened row
+TTL (`--ttl`, the flag the CLI parses) so the daemon's poke-back window covers
+a Codex cold start.
 
-AoE SHALL accept the endpoints xats accepts: any URL whose scheme is `ws` or
-`wss`, with any path preserved. AoE SHALL NOT be stricter than xats about which
-endpoints are legitimate, because a value xats uses and AoE refuses puts the two
-on different servers. The URL SHALL be carried as written rather than
-re-serialized, so an authority-only URL does not acquire a trailing path.
-
-The host AoE interpolates into the generated pane command SHALL be restricted to
-ASCII alphanumerics, `.`, `-`, and `:`, and SHALL be shell-escaped. This
-constrains what reaches a generated shell command and is independent of which
-endpoints are accepted.
+If a pre-registration call carrying the new flags fails, the bootstrap SHALL
+retry it once as the exact pre-change call (no identity-key flag, no TTL), so
+a daemon that predates the flags cannot fail a Codex launch. The retry
+decision SHALL rest on the exit code alone, not on the CLI's error text, and
+SHALL survive shell options inherited from the environment (`SHELLOPTS`
+carrying `errexit` reaches the bootstrap's `sh`).
 
 The bootstrap SHALL NOT read, inject, print, or persist the xats authentication
 token value. It SHALL rely on the already-configured local xats environment.
@@ -182,43 +181,32 @@ token value. It SHALL rely on the already-configured local xats environment.
 
 - **WHEN** a user creates a non-sandboxed Codex session with Cross Agent Team enabled
 - **THEN** the target pane is pre-registered with a fresh UUID
-- **AND** Codex starts in remote mode against the configured local app-server
+- **AND** Codex starts in remote mode against the local app-server
 - **AND** Codex receives the project path and the same UUID as `xats.agent_id`
 
-#### Scenario: Configured endpoint replaces the default
+#### Scenario: Identity key rides the pre-registration environment, not any argv
 
-- **WHEN** `CROSS_AGENT_TEAMS_CODEX_WS_URL` is set to `ws://localhost:8899`
-- **AND** a Cross Agent Team Codex pane command is built
-- **THEN** the Codex remote argument names `ws://localhost:8899`
-- **AND** the availability gate probes port `8899` on `localhost`
-- **AND** no part of the default endpoint appears in the command
+- **WHEN** a Codex Cross Agent Team pane launches with `XATS_IDENTITY_KEY` in its environment
+- **THEN** the pre-registration call carries `--identity-key-env` naming the variable
+- **AND** neither the pre-registration argv nor the executed Codex command line contains the key's value
 
-#### Scenario: Unset endpoint keeps the default
+#### Scenario: Debug logs of launch commands mask the key's value
 
-- **WHEN** `CROSS_AGENT_TEAMS_CODEX_WS_URL` is unset
-- **AND** a Cross Agent Team Codex pane command is built
-- **THEN** the Codex remote argument names `ws://127.0.0.1:8799`
-- **AND** the availability gate probes port `8799` on `127.0.0.1`
+- **WHEN** AoE logs a pane launch command or its tmux argv at debug level
+- **THEN** the logged text carries the identity-key env prefix with its value struck out
 
-#### Scenario: A secure or path-bearing endpoint is accepted
+#### Scenario: A pane without an identity key pre-registers without the flag
 
-- **WHEN** `CROSS_AGENT_TEAMS_CODEX_WS_URL` names a `wss` endpoint, or a `ws` endpoint carrying a path
-- **THEN** AoE accepts it, because xats accepts it
-- **AND** the availability gate probes the endpoint's host and port, ignoring the path
-- **AND** the path is preserved in the Codex remote argument
+- **WHEN** a Codex Cross Agent Team pane launches with no `XATS_IDENTITY_KEY` in its environment
+- **THEN** the pre-registration call carries no identity-key flag
+- **AND** the launch proceeds as before
 
-#### Scenario: Single-entry multi-endpoint form is honored
+#### Scenario: An old daemon that rejects the new flags does not fail the launch
 
-- **WHEN** `CROSS_AGENT_TEAMS_CODEX_WS_URLS` holds exactly one endpoint and `CROSS_AGENT_TEAMS_CODEX_WS_URL` is unset
-- **THEN** AoE uses that endpoint
-- **AND** the default endpoint appears nowhere in the command
-
-#### Scenario: Ambiguous multi-endpoint form aborts rather than guessing
-
-- **WHEN** `CROSS_AGENT_TEAMS_CODEX_WS_URLS` holds more than one endpoint and `CROSS_AGENT_TEAMS_CODEX_WS_URL` is unset
-- **THEN** the pane command reports that AoE needs a single endpoint and names `CROSS_AGENT_TEAMS_CODEX_WS_URL`
-- **AND** the pane command terminates with a non-zero status
-- **AND** Codex is not launched against the default endpoint
+- **WHEN** the pre-registration call carrying the new flags exits non-zero
+- **THEN** the bootstrap retries the pre-registration without the new flags
+- **AND** a successful retry launches Codex normally
+- **AND** the retry fires even under shell options inherited from the environment
 
 #### Scenario: YOLO disabled remains non-YOLO
 
@@ -236,39 +224,27 @@ token value. It SHALL rely on the already-configured local xats environment.
 
 - **WHEN** a Cross Agent Team Codex session is forked from a captured native session id
 - **THEN** the fork pane is pre-registered with a fresh xats claim
-- **AND** the Codex fork command connects to the configured local app-server
+- **AND** the Codex fork command connects to the local app-server
 - **AND** the parent native session id is preserved as the fork source
 
 ### Requirement: Codex xats bootstrap failure is explicit
 
 When the user requests a Codex Cross Agent Team session, AoE MUST NOT silently
-fall back to a normal local Codex launch, nor to a different app-server than the
-one the user configured. Missing pane identity, UUID generation, local
-app-server availability, xats pre-registration, or an app-server endpoint AoE
-will not accept SHALL produce a specific diagnostic and terminate the pane
-command with a non-zero status.
-
-Substituting the default endpoint for a rejected one is a prohibited silent
-fallback. Its symptom appears on the xats side, as a Codex that connected but
-cannot be resumed, so a diagnostic AoE only writes to its own log does not reach
-the person debugging it.
+fall back to a normal local Codex launch. Missing pane identity, UUID generation,
+local app-server availability, or xats pre-registration SHALL produce a specific
+diagnostic and terminate the pane command with a non-zero status. The
+identity-key fallback retry is the one sanctioned second attempt: only after
+both pre-registration calls fail does the launch terminate.
 
 #### Scenario: Local app-server unavailable
 
 - **WHEN** a Codex Cross Agent Team pane starts and the configured local app-server is unavailable
-- **THEN** the pane prints an app-server availability diagnostic naming that endpoint
+- **THEN** the pane prints an app-server availability diagnostic
 - **AND** Codex is not launched without remote mode
-
-#### Scenario: Rejected endpoint aborts the pane
-
-- **WHEN** `CROSS_AGENT_TEAMS_CODEX_WS_URL` holds a value AoE does not accept
-- **THEN** the pane command prints a diagnostic naming the variable and the rejected value
-- **AND** the pane command terminates with a non-zero status
-- **AND** Codex is not launched against the default endpoint
 
 #### Scenario: Pane pre-registration fails
 
-- **WHEN** a Codex Cross Agent Team pane cannot pre-register its pane and UUID
+- **WHEN** both pre-registration attempts of a Codex Cross Agent Team pane fail
 - **THEN** the pane prints a pre-registration diagnostic
 - **AND** Codex is not launched without a valid xats pane claim
 
@@ -304,4 +280,184 @@ override merge logic.
   `cross_agent_team_channel`
 - **THEN** sessions created under that profile use the overridden value
 - **AND** clearing the override falls back to the global value
+
+### Requirement: Cross Agent Team panes carry a durable identity key
+
+When Cross Agent Team is enabled for a pane, AoE SHALL associate that pane with an opaque identity key and SHALL inject it into the launched pane as the `XATS_IDENTITY_KEY` environment variable. The key SHALL be minted by AoE, SHALL be treated as an opaque value that AoE never interprets, and SHALL be injected on every launch of that pane regardless of restart mode, including the pane's first launch.
+
+AoE SHALL NOT read, store, display, or configure a xats team or agent name.
+
+#### Scenario: Key injected on first launch
+
+- **WHEN** a Cross Agent Team pane is launched for the first time
+- **THEN** AoE SHALL mint an identity key for it
+- **AND** the launched pane's environment SHALL contain that key as `XATS_IDENTITY_KEY`
+
+#### Scenario: Key injected for both supported tools
+
+- **WHEN** a Cross Agent Team pane is launched for `claude` or for `codex`
+- **THEN** the launched pane's environment SHALL contain the pane's identity key
+
+#### Scenario: Key is distinct from the codex pane pre-registration nonce
+
+- **WHEN** a Cross Agent Team `codex` pane is launched
+- **THEN** the pane SHALL carry both its durable identity key and a freshly generated single-use pane pre-registration nonce
+- **AND** the two values SHALL be different
+
+#### Scenario: No key when the feature is disabled
+
+- **WHEN** a session is launched with Cross Agent Team disabled
+- **THEN** AoE SHALL NOT mint or inject an identity key
+
+#### Scenario: Key is not exposed through command arguments
+
+- **WHEN** a Cross Agent Team pane is launched
+- **THEN** the identity key SHALL NOT appear in the launch command's arguments
+- **AND** it SHALL NOT be written to logs
+
+### Requirement: Identity key storage follows the pane's role
+
+The primary pane's identity key SHALL be stored on the instance record, alongside the other state describing that same agent (its pre-allocated session id, resume token, and pending fork). An adopted pane's identity key SHALL be stored on its durable slot record.
+
+#### Scenario: Primary key survives with the instance record
+
+- **WHEN** a Cross Agent Team session's primary pane has an identity key and AoE is closed and reopened
+- **THEN** the instance record SHALL still carry that key
+
+#### Scenario: Adopted slot key survives with the slot record
+
+- **WHEN** an adopted pane's slot has an identity key and AoE is closed and reopened
+- **THEN** the durable slot record SHALL still carry that key
+
+### Requirement: Panes AoE never launched receive a key at their first relaunch
+
+Agent panes are adopted observe-first: a user may split a pane and start an agent in it by hand, and AoE never builds that pane's launch command. AoE SHALL NOT attempt to inject a key into such a pane while it is running. It SHALL mint and inject one the first time it launches that pane's slot itself, after which the key is stable like any other.
+
+The consequence is bounded rather than permanent: the key is bound to the identity during the registration that follows its first injection, so such a pane costs one extra manual registration and recovers normally from then on.
+
+#### Scenario: Hand-started pane has no key until AoE relaunches it
+
+- **WHEN** a user starts an agent by hand in a split pane of a Cross Agent Team session
+- **AND** the reconciler adopts that pane into a slot
+- **THEN** the slot SHALL carry no identity key
+- **AND** AoE SHALL NOT alter the running pane
+
+#### Scenario: First AoE relaunch mints the slot's key
+
+- **WHEN** AoE launches an adopted slot that has no identity key
+- **THEN** AoE SHALL mint one, persist it on the slot, and inject it into the launched pane
+- **AND** subsequent launches of that slot SHALL reuse it
+
+#### Scenario: Key that is not yet bound does not fail the launch
+
+- **WHEN** a pane is launched with a freshly minted identity key that no identity has been registered against yet
+- **THEN** AoE SHALL treat the launch as successful
+- **AND** SHALL retain the key so the registration that follows can bind it
+
+### Requirement: Identity key is stable across relaunch, restart, and recovery
+
+A pane's identity key SHALL be minted once and reused on every subsequent launch of that pane's slot. Resume restart, clean restart, resume recovery, and clean recovery SHALL all inject the slot's existing key rather than minting a new one.
+
+#### Scenario: Clean restart reuses the key
+
+- **WHEN** a Cross Agent Team session is restarted clean
+- **THEN** each relaunched pane's environment SHALL contain the same identity key it carried before the restart
+
+#### Scenario: Clean recovery reuses the key
+
+- **WHEN** a recoverable Cross Agent Team instance is recovered in fresh mode
+- **THEN** each recovered pane SHALL be launched with the identity key stored on its durable slot record
+
+#### Scenario: Key survives AoE restart
+
+- **WHEN** an identity key has been persisted for a slot and AoE is closed and reopened
+- **THEN** the same key SHALL be injected on the next launch of that slot
+
+#### Scenario: The launch that mints the key persists it
+
+- **WHEN** a Cross Agent Team session is launched and that launch mints the instance's identity key
+- **THEN** the minted key SHALL be stored on the session record as part of that launch
+- **AND** the next restart SHALL inject the stored key rather than minting a new one
+
+Minting the key on a working copy of the instance and discarding it leaves the record keyless, so the first restart mints a second key. The daemon then finds no holder for the new key and treats the restarted pane as a new identity instead of a recovering one, while the old key stays bound to the dead pane.
+
+### Requirement: Cloned and forked sessions receive a fresh identity key
+
+When a session is created from an existing session through new-from-selection, or when a pane is forked, AoE SHALL mint a new identity key for the resulting pane and SHALL NOT copy the source pane's key.
+
+This is the only point at which two panes claiming one identity can be prevented. Once a copied key has been bound, the daemon cannot distinguish a pane recovering its own identity from a pane presenting a copied key.
+
+#### Scenario: New-from-selection does not inherit the key
+
+- **WHEN** a Cross Agent Team session is created from an existing session through new-from-selection
+- **THEN** the new session's pane SHALL carry an identity key different from the source pane's key
+
+#### Scenario: Fork does not inherit the key
+
+- **WHEN** a Cross Agent Team pane is forked
+- **THEN** the forked pane SHALL carry an identity key different from its parent's key
+
+### Requirement: Unresolvable identity key degrades to normal registration
+
+An identity key that no longer corresponds to a known identity SHALL be treated as a normal state. AoE SHALL NOT report an error, SHALL NOT clear the stored key, and SHALL leave the pane usable so the user can register it the same way they do without a key.
+
+#### Scenario: Key no longer resolves
+
+- **WHEN** a pane is launched with a stored identity key that no longer corresponds to a known identity
+- **THEN** AoE SHALL NOT surface an error for the session
+- **AND** AoE SHALL retain the stored key for future launches
+- **AND** the pane SHALL remain usable for manual registration
+
+### Requirement: Extra agent panes AoE launches carry an identity key from their first launch
+
+When AoE launches an additional agent pane for a Cross Agent Team session, it SHALL mint an identity key for that pane at launch, persist it on the pane's durable slot record, and inject it into the launched process as `XATS_IDENTITY_KEY`. This covers both launch entry points: the right pane of a new session, and `aoe session add-agent-pane`.
+
+The key SHALL be freshly minted for that pane. AoE SHALL NOT reuse the instance's own key for it: two live panes presenting one identity is the state the recovery design cannot resolve, and it is preventable only at the moment the second pane is launched.
+
+An extra pane is not a pane AoE never launched. AoE builds its command and knows its slot, so the allowance that a pane may run keyless until its first relaunch applies only to panes a user started by hand.
+
+The key travels the same route as the primary pane's: an environment assignment prefixing the pane's start command, which the pane's shell consumes before the agent runs. The agent process therefore never carries it in its arguments. It does remain readable from the pane's recorded start command by anything that can talk to the same tmux server, which is a property of the existing injection route rather than of this change, and is not addressed here.
+
+#### Scenario: Right pane of a new session is launched with a key
+
+- **WHEN** a Cross Agent Team session is created with a right pane agent tool
+- **THEN** the right pane process environment SHALL contain `XATS_IDENTITY_KEY`
+- **AND** the key SHALL be recorded on that pane's durable slot record
+
+#### Scenario: A pane added through the CLI is launched with a key
+
+- **WHEN** `aoe session add-agent-pane` launches an agent pane into a Cross Agent Team session
+- **THEN** the launched pane's environment SHALL contain `XATS_IDENTITY_KEY`
+
+#### Scenario: The extra pane's key is not the primary pane's key
+
+- **WHEN** a Cross Agent Team session is created with a right pane agent tool
+- **THEN** the right pane's identity key SHALL differ from the key injected into the primary pane
+
+#### Scenario: The extra pane's key is reused rather than reminted on restart
+
+- **WHEN** a session whose extra pane was launched with a key is restarted
+- **THEN** the relaunched extra pane SHALL carry the same identity key it carried before the restart
+
+#### Scenario: No key when Cross Agent Team is disabled
+
+- **WHEN** an extra agent pane is launched for a session that does not have Cross Agent Team enabled
+- **THEN** no identity key SHALL be minted and no `XATS_IDENTITY_KEY` SHALL be injected
+
+#### Scenario: A shell extra pane receives no key
+
+- **WHEN** an extra pane is launched with the `shell` tool
+- **THEN** no identity key SHALL be minted for it
+
+#### Scenario: Failing to record the key is reported, not swallowed
+
+- **WHEN** an extra agent pane is launched but its identity key cannot be persisted
+- **THEN** the failure SHALL be surfaced to the user rather than only logged
+- **AND** the pane SHALL be left running, because it is usable and relaunching it would not repair the record
+
+#### Scenario: Key reaches the agent through the environment, not its arguments
+
+- **WHEN** an extra agent pane is launched with an identity key
+- **THEN** the key SHALL be passed as an environment assignment that the pane's shell consumes
+- **AND** the key value SHALL NOT appear in the arguments of the agent process itself
 

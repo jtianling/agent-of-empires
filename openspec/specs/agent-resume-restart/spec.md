@@ -7,68 +7,30 @@
 ## Purpose
 
 Supports graceful agent restart with session resumption. When an agent supports resume (e.g., Claude, Codex), the restart flow sends exit keys, captures the resume token from pane output, and respawns the agent with the token so conversation context is preserved. The flow is tick-driven to keep the TUI responsive.
-
 ## Requirements
-
 ### Requirement: Graceful restart captures resume token from agent output
-When an agent supports resume and the instance uses a standard (non-custom) command, the restart flow SHALL attempt a graceful exit sequence: send configured exit keys to the agent pane, wait for the process to exit, capture pane output, and extract a resume token via regex. The captured token SHALL be passed to the new agent command so the conversation context is preserved.
+When the user presses `R`, the restart is handled by the multi-pane store-based flow specified in `multi-pane-resume-restart`. For each tracked agent pane that supports resume, the resume token SHALL be sourced from the persisted `agent_slot.native_session_id` and inserted into the agent command directly. The system SHALL NOT send exit keys to the pane nor scrape a resume token from pane output for the `R` keybinding. A pane with no persisted `native_session_id` or no `ResumeConfig` SHALL restart fresh (no resume token). The resume decision is per tracked pane based on its recorded `agent_slot.agent`, independent of the instance's configured `command`: a pane that ran a resumable agent and recorded a session id resumes even when `instance.command` is a custom command.
 
-If the agent pane is already dead at restart time, the system SHALL check for a stored resume token on the Instance. If a valid stored token exists, the system SHALL use it directly for respawn without attempting the exit-key/wait/capture cycle.
-
-#### Scenario: Successful graceful restart with resume token
+#### Scenario: R delegates to per-pane store-based resume
 - **WHEN** the user presses R on a session whose agent has a `ResumeConfig`
-- **AND** the instance does not use a custom command
-- **AND** the agent pane is alive
-- **THEN** the system SHALL send the configured exit key sequence to the agent pane
-- **AND** wait for the pane process to exit (up to the configured timeout)
-- **AND** capture the pane output and extract the resume token using the configured regex pattern
-- **AND** respawn the agent pane with the resume token inserted into the command
+- **AND** the pane has a persisted `agent_slot.native_session_id`
+- **THEN** the system SHALL respawn the pane with `resume_flag` filled from `native_session_id`
+- **AND** the system SHALL NOT send exit keys to the pane
+- **AND** the system SHALL NOT capture or regex-scrape a resume token from pane output
 
-#### Scenario: Dead pane restart with stored resume token
-- **WHEN** the user presses R on a session whose agent has a `ResumeConfig`
-- **AND** the instance does not use a custom command
-- **AND** the agent pane is already dead
-- **AND** the Instance has a stored `resume_token`
-- **THEN** the system SHALL respawn the agent pane using the stored resume token
-- **AND** clear the stored `resume_token` after successful respawn
+#### Scenario: Pane without persisted session id restarts fresh
+- **WHEN** the user presses R
+- **AND** a tracked pane's agent has a `ResumeConfig` but no persisted `native_session_id`
+- **THEN** the system SHALL respawn that pane with a fresh command (no resume token)
 
-#### Scenario: Dead pane restart without stored resume token falls back to fresh start
-- **WHEN** the user presses R on a session whose agent has a `ResumeConfig`
-- **AND** the agent pane is already dead
-- **AND** the Instance has no stored `resume_token`
-- **THEN** the system SHALL respawn the agent pane with a fresh command (no resume token)
+#### Scenario: Resume is decided per recorded pane agent, not the instance command
+- **WHEN** the user presses R on a session whose `instance.command` is a custom command
+- **AND** a tracked pane recorded a resumable agent (`agent_slot.agent` with a `ResumeConfig`) and a non-empty `native_session_id`
+- **THEN** the system SHALL respawn that pane with `resume_flag` filled from its `native_session_id`
 
-#### Scenario: Resume token not found in output falls back to fresh restart
-- **WHEN** the graceful exit completes (pane process exits)
-- **AND** the resume token regex does not match any content in the captured pane output
-- **THEN** the system SHALL respawn the agent pane with a fresh command (no resume token)
-
-#### Scenario: Graceful exit timeout falls back to fresh restart
-- **WHEN** the exit key sequence has been sent
-- **AND** the agent process does not exit within the configured timeout
-- **THEN** the system SHALL kill the agent pane process tree
-- **AND** respawn the agent pane with a fresh command (no resume token)
-
-#### Scenario: Custom command instances skip resume
-- **WHEN** the user presses R on a session that uses a custom command (`instance.command` is non-empty)
-- **THEN** the system SHALL use the current kill-and-fresh-start behavior regardless of agent `ResumeConfig`
-
-#### Scenario: Agent without ResumeConfig uses current behavior
-- **WHEN** the user presses R on a session whose agent has no `ResumeConfig` (resume is `None`)
-- **THEN** the system SHALL use the current kill-and-fresh-start behavior
-
-### Requirement: Resume restart state machine is tick-driven
-The graceful restart flow SHALL be modeled as a state machine on the Instance, driven by the TUI tick loop. The TUI SHALL remain responsive throughout the graceful exit wait.
-
-#### Scenario: Exit keys sent in steps across ticks
-- **WHEN** a graceful restart is initiated
-- **THEN** the system SHALL send one group of exit keys per tick
-- **AND** after all groups are sent, transition to waiting for process exit
-
-#### Scenario: Duplicate R press during pending restart is ignored
-- **WHEN** a graceful restart is already in progress for an instance
-- **AND** the user presses R again on the same instance
-- **THEN** the system SHALL ignore the second press
+#### Scenario: Agent without ResumeConfig restarts fresh
+- **WHEN** the user presses R on a pane whose agent has no `ResumeConfig` (resume is `None`)
+- **THEN** the system SHALL respawn that pane with a fresh command (no resume token)
 
 ### Requirement: Restarting status provides user feedback
 The system SHALL set the instance status to `Restarting` during the graceful exit flow so the UI can display appropriate feedback.
@@ -127,3 +89,79 @@ After a resume token is used to restart an agent (whether from stored token or l
 #### Scenario: Token cleared when new agent session starts
 - **WHEN** an Instance transitions to `Starting` status via a new `start()` call
 - **THEN** any previously stored `resume_token` SHALL be cleared
+
+### Requirement: Slot-based multi-pane resume preserves full launch context
+
+When the `R` restart resumes tracked panes from the persisted `agent_slot` store (the multi-pane path through `resume_all_tracked_panes`), each pane's launch command SHALL be built through the instance's shared launch-context command builder with the slot's `native_session_id` injected as the resume token. The resumed command SHALL carry the same launch context that initial start and single-pane respawn apply: YOLO mode (CliFlag, EnvVar, and AlwaysYolo variants), required env vars (including `AOE_INSTANCE_ID` for hook-config agents), sandbox/Docker `exec` wrapping, the cross-agent-team flag, custom instruction, and command override. The slot path SHALL NOT rebuild a stripped command from only the binary name and resume flag.
+
+For an instance whose panes run different agents, the instance-level YOLO decision SHALL be applied per pane using that pane's own agent `YoloMode` variant. A pane with no usable resume token (empty/invalid `native_session_id`, or an agent without a `ResumeConfig`) SHALL still launch fresh **with** the full launch context rather than a bare binary. The cold-start recovery path (`recover_from_slots`) shares this per-pane resume core and SHALL apply the same launch context.
+
+The existing command-injection safeguards SHALL be preserved: a slot whose recorded agent is unknown and not a safe command token, or whose `native_session_id` is not a valid resume token, SHALL be handled by the existing validation (refuse to build / degrade to fresh) and never interpolate unvalidated text into a shell command.
+
+#### Scenario: YOLO CliFlag agent keeps its flag on slot resume
+- **WHEN** the user presses `R` on a running YOLO-mode instance whose agent uses a `CliFlag` YOLO variant (e.g. Claude `--dangerously-skip-permissions`)
+- **AND** the instance has a tracked `agent_slot` with a valid `native_session_id`
+- **THEN** the resumed pane command SHALL include the agent's YOLO `CliFlag`
+- **AND** SHALL include the resume flag built from the slot's `native_session_id`
+
+#### Scenario: YOLO EnvVar agent keeps its env var on slot resume
+- **WHEN** the user presses `R` on a running YOLO-mode instance whose agent uses an `EnvVar` YOLO variant (e.g. opencode `OPENCODE_PERMISSION`)
+- **THEN** the resumed pane SHALL be launched with that YOLO env var set
+
+#### Scenario: Hook-config agent keeps AOE_INSTANCE_ID on slot resume
+- **WHEN** the user presses `R` on an instance whose agent has a hook config (requires `AOE_INSTANCE_ID`)
+- **THEN** the resumed pane SHALL be launched with `AOE_INSTANCE_ID` set to the instance id
+
+#### Scenario: Sandboxed instance stays Docker-wrapped on slot resume
+- **WHEN** the user presses `R` on a sandboxed instance with a tracked slot
+- **THEN** the resumed pane command SHALL be wrapped to run inside the instance's Docker container (`docker exec ...`) rather than executing the agent binary directly on the host
+
+#### Scenario: Non-YOLO instance gains no YOLO flag on slot resume
+- **WHEN** the user presses `R` on a running non-YOLO instance with a tracked slot
+- **THEN** the resumed pane command SHALL NOT include any YOLO flag or YOLO env var
+
+#### Scenario: Heterogeneous panes apply per-agent YOLO variant
+- **WHEN** the user presses `R` on a YOLO-mode instance whose tracked slots record different agents
+- **THEN** each resumed pane SHALL apply the YOLO treatment of its own slot agent's `YoloMode` variant
+
+#### Scenario: Degraded-fresh pane still carries launch context
+- **WHEN** a tracked slot has no usable resume token (empty/invalid `native_session_id` or an agent without `ResumeConfig`)
+- **THEN** that pane SHALL launch fresh with the instance's full launch context (YOLO, env vars, sandbox wrapping, cross-agent-team flag, custom instruction) applied
+- **AND** SHALL NOT be launched as a bare binary
+
+#### Scenario: Command-injection validation preserved
+- **WHEN** a tracked slot records an agent name that is unknown and not a safe command token, or a `native_session_id` that is not a valid resume token
+- **THEN** the system SHALL apply the existing validation (refuse to build the pane command or degrade to fresh) and SHALL NOT interpolate the unvalidated value into the shell command
+
+#### Scenario: Cold-start recovery applies the same launch context
+- **WHEN** an instance is recovered from persisted slots via `recover_from_slots`
+- **THEN** each rebuilt pane SHALL apply the same full launch context as the `R` slot-resume path
+
+### Requirement: Fan-out resume restart falls back to the instance's stored resume token
+
+When a resume restart fans out across an instance's tracked panes, and slot 0's durable record carries no native session id, AoE SHALL resume that pane from the instance's stored resume token.
+
+The instance's stored resume token is scraped from the primary pane's own output and is the only resume source available before a capture exists. A restart with no tracked panes already consults it; once every launched pane has a slot record from launch, the fan-out path becomes the one that runs in that window too, and without this fallback a restart that used to reattach the conversation would silently start a fresh one.
+
+The fallback applies to slot 0 alone, which is the pane the instance's resume token describes.
+
+#### Scenario: Slot 0 with no native session id resumes from the stored token
+
+- **WHEN** an instance is restarted in resume mode
+- **AND** slot 0's record carries no native session id
+- **AND** the instance has a stored resume token
+- **THEN** slot 0's pane SHALL be relaunched with that resume token
+
+#### Scenario: A recorded native session id takes precedence
+
+- **WHEN** an instance is restarted in resume mode
+- **AND** slot 0's record carries a native session id
+- **THEN** slot 0's pane SHALL resume from that native session id
+- **AND** the instance's stored resume token SHALL NOT override it
+
+#### Scenario: A fresh restart ignores the stored token
+
+- **WHEN** an instance is restarted clean
+- **AND** slot 0's record carries no native session id
+- **THEN** the pane SHALL be launched with no resume token
+
