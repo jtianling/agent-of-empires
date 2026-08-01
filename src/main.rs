@@ -71,6 +71,13 @@ async fn main() -> Result<()> {
         // opens the store with a defensive schema apply and always exits 0.
         Some(Commands::RecordPane(args)) => {
             let profile = session::resolve_profile(cli.profile);
+            // This path returns before the socket binding below, so it binds its
+            // own. The capture's pane-ownership check would otherwise fall back
+            // to a bare client, which reads `$TMUX` and answers about a pane on
+            // the surrounding terminal's server instead of AoE's.
+            agent_of_empires::tmux::init_tmux_socket_name(Some(
+                agent_of_empires::tmux::socket_name_for_profile(&profile),
+            ));
             cli::record_pane::run(&profile, args);
             return Ok(());
         }

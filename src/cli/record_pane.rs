@@ -46,30 +46,54 @@ struct HookStdin {
 /// root process is not among this process's ancestors. `None` when the
 /// question cannot be answered (tmux unreachable, pane unknown, ps failure),
 /// which callers treat as "no evidence against".
+///
+/// The answer is derived from the server's own pane list rather than by asking
+/// it to resolve `$TMUX_PANE`. Resolving the id assumes the server being asked
+/// is the one hosting this pane, and nothing establishes that: the socket comes
+/// from a profile that may be inherited or derived from the working directory,
+/// while pane ids are small integers that repeat across servers. A server that
+/// merely happens to have an id by that name answers confidently about someone
+/// else's pane, and the capture is dropped.
+///
+/// Searching this process's ancestry in the pane list inverts that. A server
+/// hosting none of this process's ancestors says nothing about it, so it yields
+/// `None` rather than a verdict. Only the server that does host this process can
+/// produce a mismatch, which is the case the check exists to catch.
+///
+/// The consequence is a coverage limit worth naming: the socket is always
+/// derived from a profile, and with none in the environment that profile comes
+/// from the working directory, which practically never names the server hosting
+/// this process. Such a call is therefore always unanswerable, so the check is
+/// in force only for a capture that carries a profile. It fails open, not shut,
+/// but it does not guard a hand-started agent that inherited no profile.
 fn pane_hosts_this_process(pane: &str) -> Option<bool> {
-    let output = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "-t", pane, "#{pane_pid}"])
+    let output = crate::tmux::tmux_command()
+        .args(["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let pane_pid: u32 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .ok()?;
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let panes: Vec<(&str, u32)> = listing
+        .lines()
+        .filter_map(|line| {
+            let (id, pid) = line.split_once(' ')?;
+            Some((id, pid.trim().parse().ok()?))
+        })
+        .collect();
 
     let mut pid = std::process::id();
     for _ in 0..64 {
-        if pid == pane_pid {
-            return Some(true);
+        if let Some((id, _)) = panes.iter().find(|(_, pane_pid)| *pane_pid == pid) {
+            return Some(*id == pane);
         }
         if pid <= 1 {
             break;
         }
         pid = parent_pid(pid)?;
     }
-    Some(false)
+    None
 }
 
 fn parent_pid(pid: u32) -> Option<u32> {

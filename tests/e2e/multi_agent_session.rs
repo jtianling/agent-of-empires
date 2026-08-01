@@ -78,8 +78,18 @@ fn run_record_pane(
     let stdin_json = format!(
         "{{\"session_id\":\"{session_id}\",\"cwd\":\"/work\",\"hook_event_name\":\"SessionStart\"}}"
     );
+    // This simulates a hook from outside the pane, so keep the capture's
+    // pane-ownership check unanswerable rather than answerably wrong: the dir
+    // MUST exist -- tmux silently falls back to the real default socket when
+    // $TMUX_TMPDIR does not. Without this the check reaches whichever server the
+    // developer's own terminal belongs to, and the result depends on whether a
+    // server happens to be running there.
+    let no_server = h.home_path().join("no-tmux-server");
+    std::fs::create_dir_all(&no_server).expect("create serverless tmpdir");
     let mut child = Command::new(h.binary_path())
         .arg("__record-pane")
+        .env_remove("TMUX")
+        .env("TMUX_TMPDIR", &no_server)
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")
