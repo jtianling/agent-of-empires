@@ -36,7 +36,7 @@
 - [x] 6.3 Give a Codex launch `shell_environment_policy.set` overrides for its pane and instance id, expanding `$TMUX_PANE` in the pane's own shell. Not applied to a command override, which is the user's own program.
 - [x] 6.4 Cover that a Codex launch carries both overrides and that an agent whose hooks run in its own process does not.
 - [x] 6.5 On the real machine, confirm the hook reaches the status file. It does: a Codex session AoE launched wrote `/tmp/aoe-hooks/<instance>/status` on its first turn. That is what disproved "the hook never runs" and, by elimination, located the failure in the session-id source (section 7).
-- [ ] 6.6 Delete the `pane_live` row 5.3 wrote against the unrelated shell pane.
+- [x] 6.6 Nothing left to delete, verified on 2026-08-02 rather than assumed: every `pane_live` row in the profile names a pane that is currently alive (39 live panes, zero rows without one), so the row 5.3 wrote against the app-server's pane was already collected by orphan collection in the days since.
 
 ## 7. Correct the Session-Id Source (Decision 1, revised)
 
@@ -50,5 +50,5 @@
 - [x] 8.2 Bind a Codex instance's primary pane to the earliest unclaimed rollout created after the pane's process started in the instance's project directory, from the reconciler tick, writing the `pane_live` row the snapshot path already consumes.
 - [x] 8.3 Guard the capture subcommand against a `$TMUX_PANE` that names a pane whose root process is not among its ancestors, so a stale hook in a shared daemon skips rather than claims another session's pane. Positive-only: an unanswerable check is accepted.
 - [x] 8.4 Coverage: rollout parsing and claim ordering (unit); a Codex pane reaching a durable slot through a rollout file with no hook involved, a foreign pane refused, and an own-pane capture accepted (e2e). Test helpers that simulate hooks from outside a pane point `$TMUX_TMPDIR` at an existing empty directory -- tmux silently falls back to the real default socket when the directory does not exist.
-- [ ] 8.5 On the real machine: install, restart the TUI, start a Codex session, and confirm its pane and slot rows carry its own pane id and thread id.
-- [ ] 8.6 Clean up the poisoned rows the hook era left behind (`pane_live` and `agent_slot` rows claiming the daemon's panes), and remove `~/.codex/hooks.json`, which nothing reads on AoE's behalf anymore.
+- [x] 8.5 Held on the real machine on 2026-08-02. Codex sessions launched through the TUI produced `pane_live` rows against their own panes (`%92`, `%93`, `%94`) carrying their own thread ids, and the durable slot rows agree. The failure this section exists to prevent, a row claiming the app-server's pane, did not recur: no row in either table names it.
+- [x] 8.6 Nothing to clean, verified on 2026-08-02. No row in `pane_live` or `agent_slot` names the app-server's pane, and `~/.codex/hooks.json` no longer exists. The one durable slot row whose pane is gone belongs to a stopped session and carries its conversation id, which is the record cold-start recovery rebuilds that session from: it is durable state, not hook-era residue, and deleting it would destroy that session's ability to come back.

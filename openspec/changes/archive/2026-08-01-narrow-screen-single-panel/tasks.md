@@ -9,4 +9,4 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure no regressions
+- [x] 3.1 Run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure no regressions. Clean on 2026-08-02: `cargo fmt --check` and `cargo clippy --all-targets` report nothing, and all 1350 unit tests pass. The E2E suites were not run here because this machine hosts live AoE tmux sessions; the suites covering the areas this change touches were run separately under an isolated socket and were green.

@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 The Agent Registry is a centralized static table (`AGENTS` in `src/agents.rs`) that declares
 every supported AI coding agent. All per-agent behavior -- binary name, status detection,
@@ -73,8 +73,7 @@ Given a command string (e.g. `"claude --resume xyz"` or `"open-code"`):
 Agents may declare env vars that are always injected into container sessions:
 - `claude`: `CLAUDE_CONFIG_DIR=/root/.claude`
 - `cursor`: `CURSOR_CONFIG_DIR=/root/.cursor`
-
-## Functional Requirements
+## Requirements
 
 - **FR-001**: All agents MUST have a `yolo` mode configured, except for non-agent tools (e.g., shell) where `yolo: None` is permitted.
 - **FR-002**: Status detection functions MUST accept raw (non-lowercased) pane content.
@@ -146,6 +145,24 @@ The agent registry SHALL include a `shell` entry with `name: "shell"`, positione
 - **WHEN** a `ResumeConfig` is defined for an agent
 - **THEN** it SHALL have all four fields: `exit_sequence`, `resume_pattern`, `resume_flag`, `timeout_secs`
 - **AND** `resume_pattern` SHALL contain exactly one capture group for the token
+
+### Requirement: Codex is a tracked agent, without hooks
+
+The `codex` registry entry SHALL NOT carry a hook configuration. Codex executes hooks inside a shared `--remote` app-server whose environment is frozen at daemon start, so a hook there cannot name the pane its session runs in, and any value it read would be another pane's. A hook configuration in the registry asserts that the agent's hooks run in the agent's own process; Codex cannot make that assertion.
+
+Codex panes SHALL instead be bound to their conversations from Codex's own rollout files (see `pane-session-capture`), and Codex status SHALL come from pane-content detection.
+
+AoE SHALL NOT write anything under `~/.codex/`.
+
+#### Scenario: Codex panes can occupy durable slots
+- **WHEN** an AoE-launched Codex agent runs in the primary pane of a managed session
+- **AND** its rollout file exists
+- **THEN** the reconciler SHALL be able to snapshot that pane into an `agent_slot`
+- **AND** the slot's recorded agent SHALL be `codex`
+
+#### Scenario: The user's Codex configuration is not written
+- **WHEN** a Codex session is started, restarted, or reconciled
+- **THEN** no file under `~/.codex/` SHALL be created or modified by AoE
 
 ## Settings Index Convention
 

@@ -15,4 +15,4 @@
 ## 3. Verification
 
 - [x] 3.1 `cargo fmt`, `cargo clippy --all-targets` clean. Name-filtered unit tests: 16 in `session::instance::tests::test_codex_xats`, 194 in `session::instance::tests`, all passing. No e2e assertion referenced the retry. The full suite and e2e were NOT run, because this machine hosts live AoE tmux sessions.
-- [ ] 3.2 jt's acceptance.
+- [x] 3.2 jt's acceptance. Given on 2026-08-02.

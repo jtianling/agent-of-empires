@@ -28,8 +28,8 @@
 ## 6. Tests
 
 - [x] 6.1 Unit-test recoverable detection (3 cases). (The slot->pane zip is now built at creation time and no longer has a separate count-guard to test.)
-- [ ] 6.2 e2e: seed an instance with N persisted `agent_slot` rows (via `aoe __record-pane` + reconcile), kill its tmux session, trigger recovery, and assert: tmux session recreated with N panes, each pane's launch command contains the right `--resume <native_session_id>`, and each slot's `agent_slot.tmux_pane` updated to the new pane id. (deferred to acceptance tester)
-- [ ] 6.3 e2e: a slot with an empty/invalid `native_session_id` degrades to a fresh launch for that pane while the others resume; one pane failure does not abort the rest. (deferred to acceptance tester)
+- [x] 6.2 Accepted by jt on 2026-08-02 without this test being written. Recorded plainly rather than marked as covered: the behavior it describes has been exercised repeatedly against real sessions, but no automated test asserts it, so a regression here would not be caught. Left as a gap worth closing on its own. Original scope: e2e: seed an instance with N persisted `agent_slot` rows (via `aoe __record-pane` + reconcile), kill its tmux session, trigger recovery, and assert: tmux session recreated with N panes, each pane's launch command contains the right `--resume <native_session_id>`, and each slot's `agent_slot.tmux_pane` updated to the new pane id. (deferred to acceptance tester)
+- [x] 6.3 Accepted by jt on 2026-08-02. Partly covered after all: `empty_native_session_id_restarts_pane_fresh` asserts the degrade-to-fresh half under an isolated socket. The other half, that one pane's failure does not abort the rest, has no automated assertion. Original scope: e2e: a slot with an empty/invalid `native_session_id` degrades to a fresh launch for that pane while the others resume; one pane failure does not abort the rest. (deferred to acceptance tester)
 
 ## 7. Verification
 

@@ -1,5 +1,8 @@
-## ADDED Requirements
+# cold-start-recovery Specification
 
+## Purpose
+TBD - created by archiving change cold-start-session-recovery. Update Purpose after archive.
+## Requirements
 ### Requirement: Recoverable instance detection
 
 The system SHALL classify an instance as **recoverable** when it has one or more
@@ -86,9 +89,9 @@ working directory SHALL be its `agent_slot.cwd`.
 
 ### Requirement: Per-pane degrade and isolation on recovery
 
-A slot whose `native_session_id` is empty or invalid, or whose agent has no resume
-support, SHALL be relaunched fresh for that pane only. A per-pane failure SHALL NOT
-abort recovery of the remaining panes.
+A slot SHALL be relaunched fresh for that pane alone when its `native_session_id` is
+empty or invalid, or when its agent has no resume support. A per-pane failure SHALL
+NOT abort recovery of the remaining panes.
 
 #### Scenario: Invalid id degrades that pane to fresh
 
@@ -116,3 +119,4 @@ operate on the rebuilt session.
 
 - **WHEN** an instance has been recovered
 - **THEN** `@aoe_agent_pane` points at the rebuilt slot-0 pane so subsequent reconcile ticks keep the slots current
+
