@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 Hooks are shell commands that run automatically at specific points in the session lifecycle.
 They allow users to automate setup tasks (installing dependencies, setting env vars, running
@@ -100,3 +100,22 @@ double execution. Subsequent re-attaches/restarts run hooks normally.
 - **SC-003**: A failing `on_create` hook prevents the session from appearing in the session list.
 - **SC-004**: Repo hooks show a trust dialog on first use and remember the decision.
 - **SC-005**: Hooks inside sandboxed sessions have access to the container filesystem, not the host.
+
+## Requirements
+
+### Requirement: Hook failure semantics follow the hook's point in the lifecycle
+
+A hook that runs while a session is being created SHALL be fatal: its failure aborts the
+creation and the partial session is cleaned up. A hook that runs after the session exists
+SHALL NOT abort it, because there is nothing left to unwind and the session is usable
+without the hook having succeeded.
+
+#### Scenario: A creation hook fails
+
+- **WHEN** an `on_create` hook exits non-zero
+- **THEN** session creation SHALL be aborted and its partial state cleaned up
+
+#### Scenario: A later hook fails
+
+- **WHEN** a hook that runs after creation exits non-zero
+- **THEN** the session SHALL remain usable

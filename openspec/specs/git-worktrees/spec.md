@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 Git worktree integration allows multiple agent sessions to work on different branches of the
 same repository in parallel, each in an isolated working directory. AoE can create, track, and
@@ -90,9 +90,9 @@ Session Delete (when managed_by_aoe=true and cleanup_on_delete=true):
 ## Requirements
 
 ### Requirement: Worktree reuse on session creation
-When creating a session with a worktree branch and the computed worktree path already exists on
-disk, the system SHALL allow reusing the existing worktree instead of failing. Reused worktrees
-MUST be marked with `managed_by_aoe: false` and `cleanup_on_delete: false`.
+The system SHALL allow reusing an existing worktree instead of failing when a session is created
+with a worktree branch whose computed path already exists on disk. Reused worktrees MUST be
+marked with `managed_by_aoe: false` and `cleanup_on_delete: false`.
 
 #### Scenario: TUI first submit with existing worktree shows warning
 - **WHEN** user fills in a worktree branch in the new session dialog and presses Enter, and the

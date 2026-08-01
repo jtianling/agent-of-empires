@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 The `aoe` binary provides a full-featured CLI for managing sessions, profiles, groups,
 worktrees, and configuration. All session lifecycle operations are available without
@@ -88,7 +88,7 @@ This enables the tmux status bar integration showing active session counts and s
 Creates `.aoe/config.toml` in the current directory with a commented template showing
 all available repo-level config options.
 
-## Functional Requirements
+## Requirements
 
 - **FR-001**: All session lifecycle operations (create, start, stop, restart, delete) MUST be available via CLI.
 - **FR-002**: `aoe add` MUST create the session and start it immediately.

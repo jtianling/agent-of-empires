@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 Status detection polls the tmux pane content of each agent session to determine its current
 state (Running, Waiting, Idle, Error, etc.). Each agent has a dedicated detection function

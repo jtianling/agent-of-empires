@@ -1,4 +1,12 @@
-## ADDED Requirements
+# Capability Spec: Notification Bar
+
+## Purpose
+
+The tmux status bar of every managed session carries a live summary of the
+other sessions, so an agent that needs attention in one pane is visible from
+any other.
+
+## Requirements
 
 ### Requirement: Notification bar displays in tmux status-left
 The tmux status bar for each AoE-managed session SHALL display a notification section after the "Ctrl+b d detach" hint, showing other sessions that are Waiting, Running, or Idle.

@@ -4,7 +4,7 @@
 **Created**: 2026-03-12
 **Status**: Stable
 
-## Overview
+## Purpose
 
 AoE manages the outer terminal title with a stable AoE title while the TUI is active, restores the
 pre-launch title when AoE exits, and configures AoE-managed tmux sessions so attached agent panes

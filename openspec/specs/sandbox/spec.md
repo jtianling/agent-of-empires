@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 The sandbox subsystem isolates AI agent sessions inside containers (Docker or Apple Container).
 Each sandboxed session gets its own container with the project directory bind-mounted. Containers
@@ -106,3 +106,16 @@ named volumes mapped to agent-specific config directories:
 - **SC-003**: Port mappings allow web apps running in the container to be accessed on the host.
 - **SC-004**: `volume_ignores` prevents large build artifact directories from being bind-mounted into the container.
 - **SC-005**: Auth credentials are available inside the container without manual copying.
+
+## Requirements
+
+### Requirement: A sandboxed session's container outlives the session's stop
+
+Stopping a sandboxed session SHALL stop its container rather than remove it, and re-attaching
+SHALL restart that same container. Work an agent did inside the container therefore survives a
+stop, which is the point of giving it a writable filesystem of its own.
+
+#### Scenario: Stop and re-attach
+
+- **WHEN** a sandboxed session is stopped and later attached again
+- **THEN** the session SHALL resume in the container it had before, with its filesystem intact

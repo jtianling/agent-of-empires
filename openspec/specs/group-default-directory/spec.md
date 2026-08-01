@@ -4,7 +4,7 @@
 **Created**: 2026-03-17
 **Status**: Draft
 
-## Overview
+## Purpose
 
 Groups can capture and remember a default project directory based on the first session created
 within them. When creating new sessions, the dialog pre-fills the path field from the group's

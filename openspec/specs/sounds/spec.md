@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 AoE can play sound effects when agent status transitions occur (e.g., when an agent
 finishes a task and becomes Idle/Waiting). This provides audible feedback so users
@@ -57,3 +57,21 @@ aoe sounds preview <name> -- play a sound for preview
 - **SC-001**: Users receive audible feedback when an agent needs input without watching the screen.
 - **SC-002**: Sound playback does not introduce latency or freezing in the TUI.
 - **SC-003**: Users can disable or adjust sounds without restarting AoE.
+
+## Requirements
+
+### Requirement: Sounds mark the transitions a user would otherwise have to watch for
+
+A sound SHALL be played when an agent transitions into a state that wants the user back:
+finishing its work, or stopping to ask something. No sound SHALL be played for a transition
+the user is not waiting on.
+
+#### Scenario: An agent stops for input
+
+- **WHEN** an agent transitions to Waiting
+- **THEN** the configured waiting sound SHALL be played
+
+#### Scenario: An agent finishes
+
+- **WHEN** an agent transitions to Idle
+- **THEN** the configured idle sound SHALL be played

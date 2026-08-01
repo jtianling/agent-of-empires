@@ -4,7 +4,7 @@
 **Created**: 2026-03-11
 **Status**: Draft
 
-## Overview
+## Purpose
 
 The shell category allows users to launch plain shell sessions (non-agent) through the same
 session management interface used for AI coding agents. Shell sessions use the user's default

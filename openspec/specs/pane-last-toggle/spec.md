@@ -1,4 +1,12 @@
-## ADDED Requirements
+# Capability Spec: Pane Last Toggle
+
+## Purpose
+
+A managed session's panes can be alternated with a single key, so moving
+between an agent and the pane beside it does not require directional
+navigation.
+
+## Requirements
 
 ### Requirement: Ctrl+Tab switches to last-active pane
 When a user is in an AoE-managed tmux session with multiple panes, pressing `Ctrl+b` followed by `Ctrl+Tab` SHALL execute tmux `last-pane`, switching focus to the previously active pane in the current window.

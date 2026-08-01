@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 Profiles are isolated workspaces within AoE. Each profile has its own session list, group
 structure, and configuration overrides. Profiles allow users to separate work by context
@@ -80,7 +80,7 @@ aoe profile rename <old> <new>
 
 Profiles can be created, renamed, deleted, and switched from the TUI home screen.
 
-## Functional Requirements
+## Requirements
 
 - **FR-001**: Any profile MAY be deleted, including `"default"`. There are no undeletable profiles.
 - **FR-002**: Profile names MUST NOT contain `/` or `\`.

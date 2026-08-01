@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 Groups organize sessions into a hierarchical tree in the TUI. They use slash-delimited paths
 (e.g., `work/clients/acme`) and support collapsing/expanding to keep the session list manageable.
@@ -62,7 +62,7 @@ Item::Session(...)               ← ungrouped session (top level)
 ## Requirements
 
 ### Requirement: Group entity has default_directory field
-The Group entity includes an optional `default_directory` field that stores the default project directory for new sessions in this group.
+The Group entity SHALL include an optional `default_directory` field that stores the default project directory for new sessions in this group.
 
 #### Scenario: Group with default_directory serializes and deserializes
 - **WHEN** a group has `default_directory` set to `/home/user/project`

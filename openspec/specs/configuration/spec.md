@@ -4,7 +4,7 @@
 **Created**: 2026-03-06
 **Status**: Stable
 
-## Overview
+## Purpose
 
 AoE uses a three-level hierarchical configuration system. Each level can override the previous:
 
@@ -172,3 +172,21 @@ Every configurable field MUST be editable in the Settings TUI. Adding a new fiel
 - **SC-002**: Profile-level overrides apply only to sessions under that profile.
 - **SC-003**: Repo-level config overrides profile and global for sessions in that project.
 - **SC-004**: All settings are accessible and editable through the TUI without manual file editing.
+
+## Requirements
+
+### Requirement: Configuration resolves through a three-level hierarchy
+
+Configuration SHALL resolve through global, profile and repo levels in that order, with each
+level overriding the one before it. A level that sets no value SHALL leave the value it
+inherited untouched rather than replacing it with a default.
+
+#### Scenario: A repo level overrides a global value
+
+- **WHEN** a value is set in the global config and set again in the project's repo config
+- **THEN** the repo config's value SHALL apply to sessions in that project
+
+#### Scenario: An unset level does not erase an inherited value
+
+- **WHEN** a value is set at the global level and left unset at the profile and repo levels
+- **THEN** the global value SHALL still apply

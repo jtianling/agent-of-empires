@@ -4,14 +4,14 @@
 **Created**: 2026-03-12
 **Status**: Draft
 
-## Overview
+## Purpose
 
 Environment scoping automatically isolates AoE profiles based on execution context. Instead
 of always defaulting to the `"default"` profile, the system derives an environment key from
 the current working directory. This means separate project directories each get their own
 isolated set of sessions and groups without manual profile switching.
 
-## Functional Requirements
+## Requirements
 
 ### Requirement: Environment key derivation
 The system SHALL derive an environment key from the current execution context to determine which profile to use. The derivation follows this priority:
