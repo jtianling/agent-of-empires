@@ -699,6 +699,12 @@ impl App {
                     return Ok(());
                 }
                 self.home.set_instance_error(session_id, None);
+                // The respawn mints the key on the clone just like a full launch
+                // does, so it has to travel back here too (see the single-pane
+                // branch below).
+                if let Some(key) = inst.xats_identity_key.as_deref() {
+                    self.home.adopt_xats_identity_key(session_id, key);
+                }
                 self.home.take_pending_right_pane_tool();
             } else {
                 // Single-pane or non-existent session: kill and recreate from scratch
