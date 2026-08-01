@@ -7,7 +7,7 @@ use tui_input::Input;
 use super::HomeView;
 use crate::session::config::{load_config, save_config, SortOrder};
 use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
-use crate::tui::app::Action;
+use crate::tui::app::{Action, PostRestart};
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, ForkSessionData, ForkSessionDialog,
     GroupDeleteOptionsDialog, GroupRenameDialog, HookTrustAction, InfoDialog, NewSessionData,
@@ -778,44 +778,22 @@ impl HomeView {
                 }
             }
             KeyCode::Char('R') => {
-                if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.get_instance(id) {
-                        if inst.status == Status::Deleting {
-                            return None;
-                        }
-                    }
-                    if self.is_recoverable(id) {
-                        return Some(Action::RecoverInstance(
-                            id.to_string(),
-                            crate::session::RestartMode::Resume,
-                        ));
-                    }
-                    return Some(Action::RespawnAgentPane(
-                        id.to_string(),
-                        crate::session::RestartMode::Resume,
-                    ));
-                }
+                return self
+                    .restart_action(crate::session::RestartMode::Resume, PostRestart::Attach);
+            }
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
+                return self
+                    .restart_action(crate::session::RestartMode::Resume, PostRestart::StayOnHome);
             }
             KeyCode::Char('C')
                 if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
             {
-                if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.get_instance(id) {
-                        if inst.status == Status::Deleting {
-                            return None;
-                        }
-                    }
-                    if self.is_recoverable(id) {
-                        return Some(Action::RecoverInstance(
-                            id.to_string(),
-                            crate::session::RestartMode::Fresh,
-                        ));
-                    }
-                    return Some(Action::RespawnAgentPane(
-                        id.to_string(),
-                        crate::session::RestartMode::Fresh,
-                    ));
-                }
+                return self
+                    .restart_action(crate::session::RestartMode::Fresh, PostRestart::Attach);
+            }
+            KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
+                return self
+                    .restart_action(crate::session::RestartMode::Fresh, PostRestart::StayOnHome);
             }
             KeyCode::Char('e') => {
                 if let Some(id) = &self.selected_session {
@@ -946,6 +924,26 @@ impl HomeView {
         }
 
         None
+    }
+
+    /// The restart action for the selected session: cold recovery when its tmux
+    /// session is gone but durable slots remain, otherwise an in-place respawn.
+    /// `post` decides whether the caller lands in the session or stays here.
+    fn restart_action(
+        &self,
+        mode: crate::session::RestartMode,
+        post: PostRestart,
+    ) -> Option<Action> {
+        let id = self.selected_session.as_ref()?;
+        if let Some(inst) = self.get_instance(id) {
+            if inst.status == Status::Deleting {
+                return None;
+            }
+        }
+        if self.is_recoverable(id) {
+            return Some(Action::RecoverInstance(id.to_string(), mode, post));
+        }
+        Some(Action::RespawnAgentPane(id.to_string(), mode, post))
     }
 
     fn execute_jump(&mut self, index: usize) -> Option<Action> {

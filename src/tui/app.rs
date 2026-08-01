@@ -414,7 +414,7 @@ impl App {
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
             }
-            Action::RespawnAgentPane(id, mode) => {
+            Action::RespawnAgentPane(id, mode, post) => {
                 if let Some(inst) = self.home.get_instance(&id).cloned() {
                     // Ignore a second R/r while a multi-pane restart is in flight.
                     if inst.restart_in_flight {
@@ -430,7 +430,12 @@ impl App {
                     };
 
                     if !tmux_session.exists() {
-                        return self.attach_session(&id, terminal);
+                        return match post {
+                            PostRestart::Attach => self.attach_session(&id, terminal),
+                            // Nothing to respawn: bring the session up the normal
+                            // way, but leave the user on the list.
+                            PostRestart::StayOnHome => self.start_session(&id, post, terminal),
+                        };
                     }
 
                     let profile = self.home.storage.profile().to_string();
@@ -520,12 +525,15 @@ impl App {
                     }
                     crate::tmux::refresh_session_cache();
 
-                    // Auto-attach so the user sees the restarted agent immediately
-                    self.attach_session(&id, terminal)?;
+                    match post {
+                        // Auto-attach so the user sees the restarted agent immediately
+                        PostRestart::Attach => self.attach_session(&id, terminal)?,
+                        PostRestart::StayOnHome => self.needs_redraw = true,
+                    }
                 }
             }
-            Action::RecoverInstance(id, mode) => {
-                self.recover_instance(&id, mode, terminal)?;
+            Action::RecoverInstance(id, mode, post) => {
+                self.recover_instance(&id, mode, post, terminal)?;
             }
             Action::StopSession(id) => {
                 if let Some(inst) = self.home.get_instance(&id) {
@@ -569,6 +577,7 @@ impl App {
         &mut self,
         id: &str,
         mode: crate::session::RestartMode,
+        post: PostRestart,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         let Some(inst) = self.home.get_instance(id).cloned() else {
@@ -644,12 +653,29 @@ impl App {
         crate::tmux::refresh_session_cache();
         self.home.refresh_recoverable_cache();
 
-        self.attach_session(id, terminal)
+        match post {
+            PostRestart::Attach => self.attach_session(id, terminal),
+            PostRestart::StayOnHome => {
+                self.needs_redraw = true;
+                Ok(())
+            }
+        }
     }
 
     fn attach_session(
         &mut self,
         session_id: &str,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        self.start_session(session_id, PostRestart::Attach, terminal)
+    }
+
+    /// Bring a session's panes up if they are not already, then either attach to
+    /// it or leave the user on the home list, depending on `post`.
+    fn start_session(
+        &mut self,
+        session_id: &str,
+        post: PostRestart,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         let instance = match self.home.get_instance(session_id) {
@@ -659,10 +685,12 @@ impl App {
 
         // Refuse to attach to the session AoE is itself running inside: tmux
         // would nest a client into our own pane (the infinite re-enter loop).
-        if crate::tmux::is_host_session(&crate::tmux::Session::generate_name(
-            &instance.id,
-            &instance.title,
-        )) {
+        if post == PostRestart::Attach
+            && crate::tmux::is_host_session(&crate::tmux::Session::generate_name(
+                &instance.id,
+                &instance.title,
+            ))
+        {
             self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
                 "Already in this session",
                 "AoE is running inside this tmux session, so it can't attach to itself. \
@@ -711,8 +739,10 @@ impl App {
                 if session_exists {
                     let _ = tmux_session.kill();
                 }
-                // Show warning (once) if custom instruction is configured for an unsupported agent
-                if instance.is_sandboxed() {
+                // Show warning (once) if custom instruction is configured for an
+                // unsupported agent. Only on the attach path: the dialog resumes
+                // by attaching, which is exactly what StayOnHome asked not to do.
+                if instance.is_sandboxed() && post == PostRestart::Attach {
                     let has_instruction = instance
                         .sandbox_info
                         .as_ref()
@@ -830,6 +860,12 @@ impl App {
         } else {
             // Session already running -- discard any pending right pane request
             self.home.take_pending_right_pane_tool();
+        }
+
+        if post == PostRestart::StayOnHome {
+            crate::tmux::refresh_session_cache();
+            self.needs_redraw = true;
+            return Ok(());
         }
 
         let attach_client_name = crate::tmux::get_tty_name();
@@ -1026,12 +1062,20 @@ impl App {
     }
 }
 
+/// What to do once a restart or recovery finishes: follow the session into tmux,
+/// or stay on the home list so several sessions can be restarted in a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostRestart {
+    Attach,
+    StayOnHome,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Quit,
     AttachSession(String),
-    RespawnAgentPane(String, crate::session::RestartMode),
-    RecoverInstance(String, crate::session::RestartMode),
+    RespawnAgentPane(String, crate::session::RestartMode, PostRestart),
+    RecoverInstance(String, crate::session::RestartMode, PostRestart),
     SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),

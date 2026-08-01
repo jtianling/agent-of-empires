@@ -8,7 +8,7 @@ use tui_input::Input;
 use super::HomeView;
 use crate::session::{Instance, Item, Storage};
 use crate::tmux::AvailableTools;
-use crate::tui::app::Action;
+use crate::tui::app::{Action, PostRestart};
 use crate::tui::dialogs::{InfoDialog, NewSessionDialog};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -784,20 +784,99 @@ fn test_r_does_not_open_group_rename_dialog() {
 
 #[test]
 #[serial]
-fn test_c_triggers_clean_restart_action_and_lowercase_r_is_removed() {
+fn test_c_triggers_clean_restart_action() {
     let mut env = create_test_env_with_sessions(3);
     env.view.update_selected();
     let id = env.view.selected_session.clone().unwrap();
-    assert_eq!(env.view.handle_key(key(KeyCode::Char('r'))), None);
     let action = env.view.handle_key(key(KeyCode::Char('C')));
     assert_eq!(
         action,
         Some(Action::RespawnAgentPane(
             id,
-            crate::session::RestartMode::Fresh
+            crate::session::RestartMode::Fresh,
+            PostRestart::Attach
         ))
     );
     assert!(env.view.rename_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn test_lowercase_r_and_c_restart_without_attaching() {
+    let mut env = create_test_env_with_sessions(3);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('r'))),
+        Some(Action::RespawnAgentPane(
+            id.clone(),
+            crate::session::RestartMode::Resume,
+            PostRestart::StayOnHome
+        )),
+        "lowercase r must resume in place without attaching"
+    );
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('c'))),
+        Some(Action::RespawnAgentPane(
+            id,
+            crate::session::RestartMode::Fresh,
+            PostRestart::StayOnHome
+        )),
+        "lowercase c must clean restart in place without attaching"
+    );
+    assert!(env.view.rename_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn test_lowercase_r_and_c_recover_without_attaching() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    env.view.recoverable_ids.insert(id.clone());
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('r'))),
+        Some(Action::RecoverInstance(
+            id.clone(),
+            crate::session::RestartMode::Resume,
+            PostRestart::StayOnHome
+        ))
+    );
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('c'))),
+        Some(Action::RecoverInstance(
+            id,
+            crate::session::RestartMode::Fresh,
+            PostRestart::StayOnHome
+        ))
+    );
+}
+
+#[test]
+#[serial]
+fn test_lowercase_r_and_c_on_deleting_session_are_noops() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    env.view
+        .set_instance_status(&id, crate::session::Status::Deleting);
+    assert_eq!(env.view.handle_key(key(KeyCode::Char('r'))), None);
+    assert_eq!(env.view.handle_key(key(KeyCode::Char('c'))), None);
+}
+
+#[test]
+#[serial]
+fn test_modified_lowercase_c_does_not_trigger_clean_restart() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+    for modifier in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        assert_eq!(
+            env.view
+                .handle_key(KeyEvent::new(KeyCode::Char('c'), modifier)),
+            None,
+            "modifier {modifier:?} + c must not trigger a clean restart"
+        );
+    }
 }
 
 #[test]
@@ -811,7 +890,8 @@ fn test_shift_r_triggers_resume_action() {
         action,
         Some(Action::RespawnAgentPane(
             id,
-            crate::session::RestartMode::Resume
+            crate::session::RestartMode::Resume,
+            PostRestart::Attach
         ))
     );
 }
@@ -834,7 +914,8 @@ fn test_modified_c_does_not_trigger_clean_restart() {
             action,
             Some(Action::RespawnAgentPane(
                 env.view.selected_session.clone().unwrap(),
-                crate::session::RestartMode::Fresh
+                crate::session::RestartMode::Fresh,
+                PostRestart::Attach
             )),
             "modifier {modifier:?} + c must not trigger a clean restart"
         );
@@ -853,7 +934,8 @@ fn test_shift_r_recovers_recoverable_session_and_v_is_removed() {
         env.view.handle_key(key(KeyCode::Char('R'))),
         Some(Action::RecoverInstance(
             id.clone(),
-            crate::session::RestartMode::Resume
+            crate::session::RestartMode::Resume,
+            PostRestart::Attach
         ))
     );
     assert_eq!(env.view.handle_key(key(KeyCode::Char('V'))), None);
@@ -861,7 +943,8 @@ fn test_shift_r_recovers_recoverable_session_and_v_is_removed() {
         env.view.handle_key(key(KeyCode::Char('C'))),
         Some(Action::RecoverInstance(
             id,
-            crate::session::RestartMode::Fresh
+            crate::session::RestartMode::Fresh,
+            PostRestart::Attach
         )),
         "clean restart must recover a cold session instead of doing nothing"
     );
@@ -877,7 +960,8 @@ fn test_shift_c_clean_restarts_live_session() {
         env.view.handle_key(key(KeyCode::Char('C'))),
         Some(Action::RespawnAgentPane(
             id,
-            crate::session::RestartMode::Fresh
+            crate::session::RestartMode::Fresh,
+            PostRestart::Attach
         )),
         "a live session must clean restart in place, not recover"
     );

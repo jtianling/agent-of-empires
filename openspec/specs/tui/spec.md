@@ -51,8 +51,10 @@ operations available via CLI are also available in the TUI, plus additional view
 | `Enter` | Attach to selected agent session |
 | `D` | Open diff view for selected session |
 | `d` | Delete selected session |
-| `R` | Resume a live session or recover a persisted session |
-| `C` | Clean-restart agent panes in a live session |
+| `R` | Resume a live session or recover a persisted session, then attach |
+| `C` | Clean-restart agent panes in a live session, then attach |
+| `r` | Same as `R`, but stay on the home list instead of attaching |
+| `c` | Same as `C`, but stay on the home list instead of attaching |
 | `s` | Open settings |
 | `?` | Show help |
 | `q` | Quit (only plain `q` with no modifiers; `Ctrl+Q` is ignored to prevent accidental quit after tmux detach) |
@@ -221,6 +223,43 @@ The TUI home screen SHALL support the `C` (Shift+C) keybinding as the state-awar
 - **WHEN** the user opens the help overlay or views the home status bar for a selected session
 - **THEN** the TUI SHALL list `C` as the clean restart action
 - **AND** the contextual status hint SHALL indicate clean recovery when the selected instance is recoverable
+
+### Requirement: Lowercase r and c restart without attaching
+The TUI home screen SHALL support lowercase `r` and `c` as no-attach counterparts of `R` and `C`. They SHALL resolve to the same state-aware action as their uppercase form -- cold recovery when the instance has durable slots and no live tmux session, an in-place respawn otherwise -- with `r` using resume mode and `c` using fresh mode. After the restart or recovery completes, the TUI SHALL remain on the home list instead of attaching to the session, so several sessions can be restarted in a row.
+
+#### Scenario: r resumes a live session in place
+- **WHEN** the user presses `r` on a selected session whose tmux session exists
+- **THEN** the system SHALL restart every tracked agent pane in resume mode
+- **AND** the TUI SHALL stay on the home list without attaching
+
+#### Scenario: c clean-restarts a live session in place
+- **WHEN** the user presses `c` on a selected session whose tmux session exists
+- **THEN** the system SHALL restart every tracked agent pane in fresh mode
+- **AND** the TUI SHALL stay on the home list without attaching
+
+#### Scenario: r and c recover a cold session without attaching
+- **WHEN** the user presses `r` or `c` on a selected instance with durable slots whose tmux session does not exist
+- **THEN** the system SHALL invoke cold recovery for that instance in resume mode for `r` and fresh mode for `c`
+- **AND** the TUI SHALL stay on the home list without attaching
+
+#### Scenario: r and c on a missing non-recoverable session
+- **WHEN** the user presses `r` or `c` on a selected instance whose tmux session does not exist
+- **AND** the instance has no durable slots
+- **THEN** the system SHALL start the session through the normal start path
+- **AND** the TUI SHALL stay on the home list without attaching
+
+#### Scenario: r and c on a session being deleted are no-ops
+- **WHEN** the user presses `r` or `c` on a session with status `Deleting`
+- **THEN** the keybinding SHALL be a no-op
+
+#### Scenario: Modified lowercase keys do not restart
+- **WHEN** the user presses `r` or `c` with any modifier held
+- **THEN** the keybinding SHALL NOT trigger a restart or recovery
+
+#### Scenario: r and c are shown in help and status hints
+- **WHEN** the user opens the help overlay
+- **THEN** the TUI SHALL list `r` and `c` as the stay-in-list restart actions
+- **AND** the home status bar SHALL label the restart hints `R/r` and `C/c`
 
 ### Requirement: Session list displays numeric indices
 The TUI session list SHALL display a right-aligned numeric index (1-99) as a fixed-width prefix before the status icon for each visible session. Group headers SHALL show blank space in the index column to maintain alignment.

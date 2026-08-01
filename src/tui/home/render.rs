@@ -492,7 +492,7 @@ impl HomeView {
             let recoverable = self.is_recoverable(id);
             spans.extend([
                 Span::styled("│", sep_style),
-                Span::styled(" R", key_style),
+                Span::styled(" R/r", key_style),
                 Span::styled(
                     if recoverable { " Recover " } else { " Resume " },
                     desc_style,
@@ -500,7 +500,7 @@ impl HomeView {
             ]);
             spans.extend([
                 Span::styled("│", sep_style),
-                Span::styled(" C", key_style),
+                Span::styled(" C/c", key_style),
                 Span::styled(
                     if recoverable {
                         " Clean Rec "
