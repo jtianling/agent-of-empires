@@ -191,6 +191,27 @@ impl Store {
         Ok(out)
     }
 
+    /// Return `tmux_pane` keys captured strictly before `cutoff`.
+    ///
+    /// Used by orphan collection, which decides what is dead from a pane list
+    /// read before it runs. A capture written after that read describes a pane
+    /// the list could not have contained, so judging it against that list would
+    /// delete a live pane's capture. Restricting collection to captures older
+    /// than the read makes the two agree about the same moment. Seconds are the
+    /// stored resolution, so the comparison is strict: a capture written in the
+    /// same second as the read is treated as concurrent and left alone.
+    pub fn pane_live_keys_before(&self, cutoff: i64) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tmux_pane FROM pane_live WHERE updated_at < ?1")?;
+        let rows = stmt.query_map([cutoff], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Delete a `pane_live` capture by tmux pane id.
     pub fn delete_pane_live(&self, tmux_pane: &str) -> Result<()> {
         self.conn

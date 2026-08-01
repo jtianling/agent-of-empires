@@ -236,6 +236,14 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
         }
     };
 
+    // Stamped before the first pane list is read, and handed to orphan
+    // collection at the end. Everything between the two is slow -- a rollout
+    // claim per pane shells out, and it runs for every instance -- so a pane
+    // created in that span is absent from a list read before it existed. Its
+    // capture would then be collected as an orphan while the pane is alive, and
+    // for an agent whose captures come from hooks nothing writes it again until
+    // the next hook event fires.
+    let listed_at = crate::db::now_unix();
     let mut live_panes: HashSet<String> = HashSet::new();
 
     for inst in instances {
@@ -265,7 +273,7 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
         capture_coherent_layout(&store, &inst.id, &session_name, &panes);
     }
 
-    gc_orphan_pane_live(&store, &live_panes);
+    gc_orphan_pane_live(&store, &live_panes, listed_at);
 }
 
 fn capture_coherent_layout(
@@ -378,8 +386,8 @@ fn reconcile_session(
 }
 
 /// Delete `pane_live` rows whose pane is not in any managed session.
-fn gc_orphan_pane_live(store: &Store, live_panes: &HashSet<String>) {
-    let keys = match store.all_pane_live_keys() {
+fn gc_orphan_pane_live(store: &Store, live_panes: &HashSet<String>, listed_at: i64) {
+    let keys = match store.pane_live_keys_before(listed_at) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!("reconcile gc: cannot list pane_live: {}", e);
@@ -589,6 +597,52 @@ mod identity_key_tests {
         let store = Store::open_at(&tmp.path().join("aoe.db")).unwrap();
         ensure_schema(&store.conn).unwrap();
         (tmp, store)
+    }
+
+    /// Orphan collection judges captures against a pane list read before the
+    /// slow part of a reconcile pass. A pane created in that span is missing
+    /// from the list through no fault of its own, and deleting its capture
+    /// leaves a live pane untracked until something writes another one, which
+    /// for a hook-driven agent may be a long time.
+    #[test]
+    fn orphan_collection_spares_a_capture_written_after_the_pane_list_was_read() {
+        let (_tmp, store) = store();
+        let listed_at = 100;
+
+        // Present in the list that was read, and still alive.
+        store
+            .upsert_pane_live("%1", "claude", "sess-1", "/tmp", 90)
+            .unwrap();
+        // Absent from that list and older than it: a real orphan.
+        store
+            .upsert_pane_live("%2", "claude", "sess-2", "/tmp", 90)
+            .unwrap();
+        // Absent from that list because it did not exist when the list was read.
+        store
+            .upsert_pane_live("%3", "claude", "sess-3", "/tmp", 110)
+            .unwrap();
+
+        let live: HashSet<String> = ["%1".to_string()].into_iter().collect();
+        gc_orphan_pane_live(&store, &live, listed_at);
+
+        let mut left = store.all_pane_live_keys().unwrap();
+        left.sort();
+        assert_eq!(left, vec!["%1".to_string(), "%3".to_string()]);
+    }
+
+    /// A capture stamped in the same second as the read is concurrent with it at
+    /// the stored resolution, so it is left alone rather than guessed about.
+    #[test]
+    fn orphan_collection_spares_a_capture_from_the_same_second_as_the_read() {
+        let (_tmp, store) = store();
+
+        store
+            .upsert_pane_live("%4", "claude", "sess-4", "/tmp", 100)
+            .unwrap();
+
+        gc_orphan_pane_live(&store, &HashSet::new(), 100);
+
+        assert_eq!(store.all_pane_live_keys().unwrap(), vec!["%4".to_string()]);
     }
 
     /// A pane capture carries no identity key, so the reconcile upsert would
