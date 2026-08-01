@@ -114,6 +114,75 @@ pub fn assign_slots(
     assigned
 }
 
+/// An agent pane AoE has just launched, before any capture exists for it.
+pub struct LaunchedPane<'a> {
+    pub pane_id: &'a str,
+    pub agent: &'a str,
+    /// The identity key minted for this pane, empty when it gets none.
+    pub identity_key: &'a str,
+}
+
+/// Record the durable slots of an extra agent pane AoE has just launched and of
+/// the primary pane beside it, so the key the launch minted has a home and both
+/// panes are restartable before either has been captured.
+///
+/// Slots come from the same assignment the reconciler uses, so a launch-time row
+/// lands in the slot the first capture would have written and is sticky from
+/// then on. The extra pane's row is always written: its slot is by construction
+/// free or held by a pane that is gone. The primary pane's row is written only
+/// when it has none, because an existing one carries a captured conversation
+/// that a launch-time row would blank. Its key stays on the instance record.
+pub fn record_launched_extra_pane(
+    store: &Store,
+    instance_id: &str,
+    session_name: &str,
+    cwd: &str,
+    primary_agent: &str,
+    pane: &LaunchedPane<'_>,
+) -> Result<()> {
+    let panes = list_session_panes(session_name);
+    let existing_rows = store.read_slots_for_instance(instance_id)?;
+    let existing_map: Vec<(i64, String)> = existing_rows
+        .iter()
+        .map(|s| (s.slot, s.tmux_pane.clone()))
+        .collect();
+    let primary_pane = crate::tmux::get_agent_pane_id(session_name);
+    let assigned = assign_slots(&panes, primary_pane.as_deref(), &existing_map);
+    let now = crate::db::now_unix();
+
+    // The fan-out restart reads only the slots that exist, so recording the
+    // extra pane alone would take the primary pane out of it. The write is
+    // insert-if-absent rather than guarded by the read above: an existing row
+    // carries a captured conversation, and a capture landing between the read
+    // and the write would otherwise be blanked.
+    if let Some(primary) = primary_pane.as_deref() {
+        if assigned.iter().any(|a| a.slot == 0 && a.pane_id == primary) {
+            store.record_launched_slot_if_absent(
+                instance_id,
+                0,
+                primary_agent,
+                cwd,
+                primary,
+                "",
+                now,
+            )?;
+        }
+    }
+
+    let Some(assignment) = assigned.iter().find(|a| a.pane_id == pane.pane_id) else {
+        anyhow::bail!("pane {} was assigned no slot", pane.pane_id);
+    };
+    store.record_launched_slot(
+        instance_id,
+        assignment.slot,
+        pane.agent,
+        cwd,
+        pane.pane_id,
+        pane.identity_key,
+        now,
+    )
+}
+
 /// List a tmux session's pane ids (e.g. `%42`). Used by the delete path to
 /// purge `pane_live` rows before the session is killed.
 pub fn session_pane_ids(session_name: &str) -> Vec<String> {
@@ -245,7 +314,9 @@ fn reconcile_session(
         .map(|s| (s.slot, s.tmux_pane.clone()))
         .collect();
     // A pane capture carries no identity key, so the upsert below would blank it.
-    // Carry the slot's current key forward instead.
+    // Carry the slot's current key forward instead. This read is advisory: the
+    // write keeps a key already stored over the one passed here, so a launch that
+    // mints one between this read and that write is not undone by it.
     let existing_keys: HashMap<i64, String> = existing_rows
         .iter()
         .map(|s| (s.slot, s.xats_identity_key.clone()))
@@ -271,7 +342,7 @@ fn reconcile_session(
             continue;
         }
         let now = crate::db::now_unix();
-        store.upsert_agent_slot(
+        store.upsert_agent_slot_capture(
             &inst.id,
             pane.slot,
             &capture.agent,
@@ -604,6 +675,70 @@ mod identity_key_tests {
         reconcile_session(&store, &inst, &panes, Some("%1")).unwrap();
 
         assert_eq!(event_kinds(&store, &inst.id), vec!["adopt", "capture"]);
+    }
+
+    /// A launch-time record starts with no conversation. The first capture must
+    /// complete it in place: a record that were replaced instead would change the
+    /// pane's identity at the moment it is adopted.
+    #[test]
+    fn a_capture_completes_a_launch_time_record_without_replacing_its_key() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+
+        store
+            .record_launched_slot(&inst.id, 1, "codex", "/tmp/recon", "%2", "launched-key", 1)
+            .unwrap();
+        store
+            .upsert_pane_live("%2", "codex", "first-capture", "/tmp/recon", 2)
+            .unwrap();
+
+        reconcile_session(
+            &store,
+            &inst,
+            &[(0, "%1".to_string()), (1, "%2".to_string())],
+            Some("%1"),
+        )
+        .unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        let launched = slots.iter().find(|s| s.slot == 1).expect("launched slot");
+        assert_eq!(launched.native_session_id, "first-capture");
+        assert_eq!(launched.xats_identity_key, "launched-key");
+        assert_eq!(launched.tmux_pane, "%2");
+    }
+
+    /// Slot assignment is sticky on the pane id, which the launch-time record
+    /// already carries. A record with no capture yet must not drift.
+    #[test]
+    fn a_launch_time_record_keeps_its_slot_while_its_pane_is_live() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+
+        store
+            .record_launched_slot(&inst.id, 1, "codex", "/tmp/recon", "%2", "launched-key", 1)
+            .unwrap();
+        // A third pane appears and is captured first; it must not take slot 1.
+        store
+            .upsert_pane_live("%3", "claude", "other-capture", "/tmp/recon", 2)
+            .unwrap();
+
+        let panes = [
+            (0, "%1".to_string()),
+            (1, "%2".to_string()),
+            (2, "%3".to_string()),
+        ];
+        reconcile_session(&store, &inst, &panes, Some("%1")).unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        let launched = slots.iter().find(|s| s.slot == 1).expect("launched slot");
+        assert_eq!(launched.tmux_pane, "%2");
+        assert_eq!(
+            launched.native_session_id, "",
+            "no capture has arrived for this pane yet"
+        );
+        assert_eq!(launched.xats_identity_key, "launched-key");
+        let other = slots.iter().find(|s| s.slot == 2).expect("other slot");
+        assert_eq!(other.tmux_pane, "%3");
     }
 
     #[test]

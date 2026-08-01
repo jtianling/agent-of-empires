@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1316,11 +1316,77 @@ impl Instance {
     /// `shell` is built here rather than through it: the registry entry names
     /// no launchable binary, and a shell pane produces no capture and never
     /// occupies a slot.
-    pub fn build_extra_pane_command(&self, tool: &str) -> Option<String> {
+    ///
+    /// The identity key is minted here rather than supplied by the caller. AoE
+    /// builds this pane's command and so is the only party that can bind an
+    /// identity to it before it first registers; a pane that reaches the daemon
+    /// keyless is what the daemon's seat matching treats as claimable. The key
+    /// is freshly minted and never the instance's own: two live panes behind one
+    /// identity is the state the recovery design cannot resolve, and launch is
+    /// the only moment at which it is preventable.
+    pub fn build_extra_pane_command(&self, tool: &str) -> Option<ExtraPaneLaunch> {
         if tool == "shell" {
-            return Some(self.build_extra_shell_pane_command());
+            return Some(ExtraPaneLaunch {
+                command: self.build_extra_shell_pane_command(),
+                identity_key: String::new(),
+            });
         }
-        self.build_pane_command(tool, None, false, None)
+        let identity_key = if self.is_cross_agent_team() {
+            Uuid::new_v4().to_string()
+        } else {
+            String::new()
+        };
+        let command = self.build_pane_command(
+            tool,
+            None,
+            false,
+            Some(identity_key.as_str()).filter(|k| !k.is_empty()),
+        )?;
+        Some(ExtraPaneLaunch {
+            command,
+            identity_key,
+        })
+    }
+
+    /// Record the durable slot of an extra pane this instance has just launched,
+    /// so the key minted for it survives into every later relaunch and the pane
+    /// is inside the restart fan-out before its first capture.
+    ///
+    /// A shell pane is not recorded: it runs no agent, holds no identity and
+    /// produces no capture, so a slot would only cost the session one of four.
+    ///
+    /// A failure here is reported rather than logged. The pane is already
+    /// running under the key it was launched with, but nothing holds that key,
+    /// so the next relaunch mints a different one and the identity the pane just
+    /// registered becomes unrecoverable. That outcome is invisible from the pane
+    /// itself, which is why the caller has to hear about it.
+    pub fn record_launched_extra_pane(
+        &self,
+        profile: &str,
+        session_name: &str,
+        pane: &crate::db::reconcile::LaunchedPane<'_>,
+    ) -> Result<()> {
+        if pane_agent_is_shell(pane.agent) {
+            return Ok(());
+        }
+        crate::db::Store::open_with_schema(profile)
+            .and_then(|store| {
+                crate::db::reconcile::record_launched_extra_pane(
+                    &store,
+                    &self.id,
+                    session_name,
+                    &self.project_path,
+                    &self.tool,
+                    pane,
+                )
+            })
+            .with_context(|| {
+                format!(
+                    "pane {} of '{}' is running but its identity key was not recorded; \
+                     it will not survive a restart",
+                    pane.pane_id, self.title
+                )
+            })
     }
 
     /// The user's shell for an extra pane, in the session's working directory.
@@ -2003,9 +2069,10 @@ impl Instance {
         let mut primary_respawned = false;
         let mut confirmable_panes: Vec<String> = Vec::new();
         for slot in slots {
+            let native_session_id = self.slot_resume_source(slot, mode);
             let outcome = self.resume_launch_pane(
                 &slot.agent,
-                &slot.native_session_id,
+                &native_session_id,
                 &slot.tmux_pane,
                 &slot.cwd,
                 slot.slot == 0,
@@ -2290,6 +2357,31 @@ impl Instance {
         resume_token
             .map(std::string::ToString::to_string)
             .or_else(|| self.resume_token.clone())
+    }
+
+    /// The conversation a slot resumes from during the fan-out restart.
+    ///
+    /// A slot record written at launch carries no native session id until the
+    /// pane's first capture. For slot 0 the instance's stored resume token
+    /// describes that same pane and is the only source in that window: it is
+    /// scraped from the primary pane's own output when the agent exits and
+    /// prints a resume hint, which happens before any capture exists. A restart
+    /// with no tracked panes already consults it, and once every launched pane
+    /// has a record from launch this is the path that runs in that window
+    /// instead.
+    ///
+    /// Slot 0 alone, and only while it runs the instance's own tool: the token
+    /// names that agent's conversation and nothing else. `Fresh` resumes
+    /// nothing.
+    fn slot_resume_source(&self, slot: &crate::db::AgentSlot, mode: RestartMode) -> String {
+        let stands_in = mode == RestartMode::Resume
+            && slot.slot == 0
+            && slot.native_session_id.is_empty()
+            && self.pane_runs_instance_tool(&slot.agent);
+        if stands_in {
+            return self.resume_token.clone().unwrap_or_default();
+        }
+        slot.native_session_id.clone()
     }
 
     fn apply_tmux_options(&self, profile: &str) {
@@ -2824,6 +2916,20 @@ pub enum RestartMode {
 /// (`agent_session_id`, `fork_pending`), captured so the restart can roll them
 /// back if the respawn never actually starts a new conversation.
 type FreshIdentitySnapshot = (Option<String>, Option<String>);
+
+/// The launch command of an extra agent pane and the identity key minted for it.
+///
+/// The two travel together because the key has to be persisted on the pane's
+/// slot record as well as injected into its process: a key that only reaches the
+/// environment is minted afresh on every relaunch, which reads to the daemon as
+/// a new agent rather than a returning one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraPaneLaunch {
+    pub command: String,
+    /// Empty when the pane gets no identity: Cross Agent Team is off, or the
+    /// pane runs a shell, which registers no identity at all.
+    pub identity_key: String,
+}
 
 /// Outcome of resuming a single tracked pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3384,7 +3490,7 @@ mod tests {
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
 
-        let cmd = inst.build_extra_pane_command("codex").unwrap();
+        let cmd = inst.build_extra_pane_command("codex").unwrap().command;
         assert!(
             cmd.contains("pre-register-codex-pane"),
             "expected pane pre-registration, got {cmd}"
@@ -3401,7 +3507,7 @@ mod tests {
         inst.tool = "claude".to_string();
         inst.cross_agent_team = true;
 
-        let cmd = inst.build_extra_pane_command("claude").unwrap();
+        let cmd = inst.build_extra_pane_command("claude").unwrap().command;
         assert!(
             cmd.contains("--dangerously-load-development-channels"),
             "expected dev-channels flag, got {cmd}"
@@ -3417,7 +3523,7 @@ mod tests {
         inst.agent_session_id = Some("preallocated-id".to_string());
         inst.xats_identity_key = Some("instance-key".to_string());
 
-        let cmd = inst.build_extra_pane_command("claude").unwrap();
+        let cmd = inst.build_extra_pane_command("claude").unwrap().command;
         assert!(
             !cmd.contains("--instance-override"),
             "override belongs to the instance's own pane, got {cmd}"
@@ -3427,7 +3533,7 @@ mod tests {
             "session id belongs to the instance's own conversation, got {cmd}"
         );
         assert!(
-            !cmd.contains("instance-key") && !cmd.contains(XATS_IDENTITY_KEY_ENV),
+            !cmd.contains("instance-key"),
             "two panes must not present one identity, got {cmd}"
         );
     }
@@ -3440,7 +3546,7 @@ mod tests {
         inst.command = "codex --instance-override".to_string();
         inst.xats_identity_key = Some("instance-key".to_string());
 
-        let cmd = inst.build_extra_pane_command("codex").unwrap();
+        let cmd = inst.build_extra_pane_command("codex").unwrap().command;
         assert!(
             !cmd.contains("--instance-override"),
             "the bootstrap must not relaunch the instance's own program, got {cmd}"
@@ -3458,7 +3564,7 @@ mod tests {
         std::env::set_var("SHELL", "/bin/zsh");
 
         let inst = Instance::new("test", "/tmp/project path/it's here");
-        let command = inst.build_extra_pane_command("shell").unwrap();
+        let command = inst.build_extra_pane_command("shell").unwrap().command;
         let escaped_dir = shell_escape(&inst.project_path).replace('\'', "'\\''");
 
         assert!(command.starts_with("bash -lc '"));
@@ -3481,7 +3587,7 @@ mod tests {
 
         let mut inst = Instance::new("test", "/tmp/project");
         inst.tool = "claude".to_string();
-        let command = inst.build_extra_pane_command("claude").unwrap();
+        let command = inst.build_extra_pane_command("claude").unwrap().command;
 
         assert!(command.contains("stty susp undef; exec env claude"));
         assert!(!command.contains("cd "));
@@ -4062,6 +4168,168 @@ mod tests {
         assert!(
             !cmd.contains("primary-key"),
             "an adopted pane must not inherit the primary pane's identity, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn extra_pane_is_launched_with_a_freshly_minted_key() {
+        let mut inst = claude_xats_instance();
+        inst.ensure_xats_identity_key();
+        let instance_key = inst.xats_identity_key.clone().unwrap();
+
+        let launch = inst.build_extra_pane_command("claude").unwrap();
+
+        assert!(
+            !launch.identity_key.is_empty(),
+            "a pane AoE launches is never keyless"
+        );
+        assert!(
+            launch
+                .command
+                .contains(&format!("XATS_IDENTITY_KEY='{}'", launch.identity_key)),
+            "the minted key must reach the process, got: {}",
+            launch.command
+        );
+        assert_ne!(
+            launch.identity_key, instance_key,
+            "two live panes behind one identity is the state recovery cannot resolve"
+        );
+        assert!(
+            !launch.command.contains(&instance_key),
+            "got: {}",
+            launch.command
+        );
+    }
+
+    #[test]
+    fn each_extra_pane_gets_its_own_key() {
+        // Launch is the only moment at which a second pane sharing an identity is
+        // preventable, so the freshness is asserted rather than assumed.
+        let inst = claude_xats_instance();
+
+        let first = inst.build_extra_pane_command("claude").unwrap();
+        let second = inst.build_extra_pane_command("claude").unwrap();
+
+        assert_ne!(first.identity_key, second.identity_key);
+    }
+
+    #[test]
+    fn extra_pane_key_is_injected_as_env_not_argv() {
+        // The key is an environment assignment the pane's shell consumes, so the
+        // agent process never carries it in argv. It is still readable from the
+        // pane's recorded start command, which is a property of this injection
+        // route for every pane, primary included, and is out of scope here.
+        let inst = codex_xats_instance();
+        let launch = inst.build_extra_pane_command("codex").unwrap();
+        let marker = format!("XATS_IDENTITY_KEY='{}'", launch.identity_key);
+
+        let argv = launch
+            .command
+            .split_once(&marker)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("key was not injected: {}", launch.command));
+        assert!(
+            !argv.contains(&launch.identity_key),
+            "identity key must not also appear in the command arguments, got: {}",
+            launch.command
+        );
+    }
+
+    #[test]
+    fn extra_pane_gets_no_key_without_cross_agent_team() {
+        let mut inst = claude_xats_instance();
+        inst.cross_agent_team = false;
+
+        let launch = inst.build_extra_pane_command("claude").unwrap();
+
+        assert!(launch.identity_key.is_empty());
+        assert!(
+            !launch.command.contains("XATS_IDENTITY_KEY"),
+            "got: {}",
+            launch.command
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn extra_shell_pane_gets_no_key() {
+        // A shell runs no agent and registers no identity, so there is nothing to
+        // mint a key for.
+        let inst = claude_xats_instance();
+
+        let launch = inst.build_extra_pane_command("shell").unwrap();
+
+        assert!(launch.identity_key.is_empty());
+        assert!(
+            !launch.command.contains("XATS_IDENTITY_KEY"),
+            "got: {}",
+            launch.command
+        );
+    }
+
+    fn launched_slot(slot: i64, agent: &str, native_session_id: &str) -> crate::db::AgentSlot {
+        crate::db::AgentSlot {
+            instance_id: "test".to_string(),
+            slot,
+            agent: agent.to_string(),
+            native_session_id: native_session_id.to_string(),
+            cwd: "/tmp/project".to_string(),
+            tmux_pane: "%1".to_string(),
+            xats_identity_key: String::new(),
+            last_seen_at: 1,
+        }
+    }
+
+    #[test]
+    fn slot_zero_without_a_native_session_id_resumes_from_the_stored_token() {
+        // The launch-time record has no conversation until the first capture, and
+        // the instance's scraped token is the only resume source in that window.
+        let mut inst = claude_xats_instance();
+        inst.resume_token = Some("stored-token".to_string());
+
+        assert_eq!(
+            inst.slot_resume_source(&launched_slot(0, "claude", ""), RestartMode::Resume),
+            "stored-token"
+        );
+    }
+
+    #[test]
+    fn a_recorded_native_session_id_beats_the_stored_token() {
+        let mut inst = claude_xats_instance();
+        inst.resume_token = Some("stored-token".to_string());
+
+        assert_eq!(
+            inst.slot_resume_source(&launched_slot(0, "claude", "captured"), RestartMode::Resume),
+            "captured"
+        );
+    }
+
+    #[test]
+    fn a_fresh_restart_ignores_the_stored_token() {
+        let mut inst = claude_xats_instance();
+        inst.resume_token = Some("stored-token".to_string());
+
+        assert_eq!(
+            inst.slot_resume_source(&launched_slot(0, "claude", ""), RestartMode::Fresh),
+            ""
+        );
+    }
+
+    #[test]
+    fn no_other_slot_consults_the_instance_resume_token() {
+        // The instance's token describes the instance's own pane. A second pane
+        // resumed from it would land in the primary pane's conversation.
+        let mut inst = claude_xats_instance();
+        inst.resume_token = Some("stored-token".to_string());
+
+        assert_eq!(
+            inst.slot_resume_source(&launched_slot(1, "claude", ""), RestartMode::Resume),
+            ""
+        );
+        assert_eq!(
+            inst.slot_resume_source(&launched_slot(0, "codex", ""), RestartMode::Resume),
+            "",
+            "slot 0 running another agent is not the pane the token describes"
         );
     }
 

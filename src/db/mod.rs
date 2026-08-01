@@ -242,6 +242,155 @@ impl Store {
         Ok(())
     }
 
+    /// Write the durable slot record of a pane AoE has just launched, before any
+    /// capture exists for it.
+    ///
+    /// The native session id is empty because the pane has not reported a
+    /// conversation yet; the reconciler fills it in from the first capture and
+    /// carries this row's identity key forward. An empty native session id is a
+    /// valid state, not an error: it degrades a relaunch of that pane to fresh.
+    ///
+    /// The conversation is always cleared, never carried over from whatever the
+    /// slot held. The pane being recorded was created moments ago and cannot own
+    /// a conversation yet, and a pane id is not a pane identity: tmux numbers
+    /// panes from zero again after its server restarts, so a row naming `%1` may
+    /// describe a pane from a previous server rather than this one. Matching on
+    /// the id would hand this pane a dead pane's conversation.
+    ///
+    /// Clearing costs nothing that is not recoverable. The capture itself lives
+    /// in `pane_live`, which a launch write never touches, so a capture that did
+    /// land in the gap is written back by the next reconcile pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_launched_slot(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        agent: &str,
+        cwd: &str,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        self.conn.execute(
+            "INSERT INTO agent_slot \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              last_seen_at) \
+             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7) \
+             ON CONFLICT(instance_id, slot) DO UPDATE SET \
+             agent = excluded.agent, \
+             native_session_id = excluded.native_session_id, \
+             cwd = excluded.cwd, \
+             tmux_pane = excluded.tmux_pane, \
+             xats_identity_key = excluded.xats_identity_key, \
+             last_seen_at = excluded.last_seen_at",
+            rusqlite::params![
+                instance_id,
+                slot,
+                agent,
+                cwd,
+                tmux_pane,
+                xats_identity_key,
+                last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Snapshot a pane capture into its slot without disturbing the slot's
+    /// identity key: a key already stored wins over the one passed in.
+    ///
+    /// A capture carries no key, so the caller has to supply one, and the only
+    /// one it can supply is what it read before the write. Between that read and
+    /// this write a launch can mint and store the pane's real key, and writing
+    /// the read value back would erase it -- silently, and in the one direction
+    /// nothing else repairs, because the pane is already running under the key
+    /// that was erased. Letting the stored key win makes the read advisory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_agent_slot_capture(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        agent: &str,
+        native_session_id: &str,
+        cwd: &str,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        self.conn.execute(
+            "INSERT INTO agent_slot \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(instance_id, slot) DO UPDATE SET \
+             agent = excluded.agent, \
+             native_session_id = excluded.native_session_id, \
+             cwd = excluded.cwd, \
+             tmux_pane = excluded.tmux_pane, \
+             xats_identity_key = CASE \
+               WHEN agent_slot.xats_identity_key != '' \
+               THEN agent_slot.xats_identity_key \
+               ELSE excluded.xats_identity_key END, \
+             last_seen_at = excluded.last_seen_at",
+            rusqlite::params![
+                instance_id,
+                slot,
+                agent,
+                native_session_id,
+                cwd,
+                tmux_pane,
+                xats_identity_key,
+                last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Write a launch-time slot record only when the slot has none.
+    ///
+    /// Used for the primary pane, whose record is written as a side effect of
+    /// launching a pane beside it. Reading the slot first and writing only when
+    /// the read came back empty leaves a window in which a capture lands between
+    /// the two and is then blanked; letting the conflict clause decide closes it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_launched_slot_if_absent(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        agent: &str,
+        cwd: &str,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        self.conn.execute(
+            "INSERT INTO agent_slot \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              last_seen_at) \
+             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7) \
+             ON CONFLICT(instance_id, slot) DO NOTHING",
+            rusqlite::params![
+                instance_id,
+                slot,
+                agent,
+                cwd,
+                tmux_pane,
+                xats_identity_key,
+                last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Read all durable slots for an instance, ordered by slot.
     pub fn read_slots_for_instance(&self, instance_id: &str) -> Result<Vec<AgentSlot>> {
         let mut stmt = self.conn.prepare(
@@ -995,6 +1144,126 @@ mod tests {
             second.is_none(),
             "reopening a healthy store changes nothing"
         );
+    }
+
+    #[test]
+    fn a_launched_slot_round_trips_with_an_empty_native_session_id() {
+        // The pane has not reported a conversation yet. An empty native session
+        // id is a valid state, and the key it carries is the point of the row.
+        let (_tmp, store) = temp_store();
+
+        store
+            .record_launched_slot("inst", 1, "codex", "/tmp", "%7", "launched-key", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].native_session_id, "");
+        assert_eq!(slots[0].tmux_pane, "%7");
+        assert_eq!(slots[0].agent, "codex");
+        assert_eq!(slots[0].xats_identity_key, "launched-key");
+    }
+
+    #[test]
+    fn a_launched_slot_write_never_carries_a_conversation_over() {
+        // Even when the row names the same pane id. tmux numbers panes from zero
+        // again after its server restarts, so id equality does not establish that
+        // the recorded conversation belongs to the pane being launched, and the
+        // capture is re-applied from `pane_live` by the next reconcile anyway.
+        let (_tmp, store) = temp_store();
+
+        store
+            .upsert_agent_slot("inst", 1, "codex", "conv-old", "/tmp", "%7", "key-old", 1)
+            .unwrap();
+        store
+            .record_launched_slot("inst", 1, "codex", "/tmp", "%7", "key-new", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].native_session_id, "");
+        assert_eq!(slots[0].xats_identity_key, "key-new");
+    }
+
+    #[test]
+    fn a_launched_slot_write_drops_a_dead_pane_s_conversation_and_key() {
+        // Reclaiming the slot for a different pane must not hand the new pane the
+        // old pane's conversation or its identity.
+        let (_tmp, store) = temp_store();
+
+        store
+            .upsert_agent_slot("inst", 1, "codex", "conv-old", "/tmp", "%7", "key-old", 1)
+            .unwrap();
+        store
+            .record_launched_slot("inst", 1, "codex", "/tmp", "%9", "key-new", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].tmux_pane, "%9");
+        assert_eq!(slots[0].native_session_id, "");
+        assert_eq!(slots[0].xats_identity_key, "key-new");
+    }
+
+    #[test]
+    fn a_capture_write_keeps_a_key_stored_after_its_caller_read() {
+        // The caller can only pass the key it read before writing. A launch that
+        // stores the pane's real key in that gap must not be undone by the
+        // write-back of that stale read.
+        let (_tmp, store) = temp_store();
+
+        store
+            .record_launched_slot("inst", 1, "codex", "/tmp", "%7", "minted-key", 5)
+            .unwrap();
+        store
+            .upsert_agent_slot_capture("inst", 1, "codex", "conv-1", "/tmp", "%7", "", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].native_session_id, "conv-1");
+        assert_eq!(slots[0].xats_identity_key, "minted-key");
+    }
+
+    #[test]
+    fn a_capture_write_supplies_the_key_when_the_slot_has_none() {
+        let (_tmp, store) = temp_store();
+
+        store
+            .upsert_agent_slot_capture("inst", 1, "codex", "conv-1", "/tmp", "%7", "carried", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].xats_identity_key, "carried");
+    }
+
+    #[test]
+    fn recording_a_slot_if_absent_leaves_an_existing_row_alone() {
+        // The primary pane's row is written as a side effect of launching a pane
+        // beside it, so it must never overwrite a row that already carries one.
+        let (_tmp, store) = temp_store();
+
+        store
+            .upsert_agent_slot("inst", 0, "claude", "conv-0", "/tmp", "%1", "key-0", 1)
+            .unwrap();
+        store
+            .record_launched_slot_if_absent("inst", 0, "claude", "/tmp", "%1", "", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].native_session_id, "conv-0");
+        assert_eq!(slots[0].xats_identity_key, "key-0");
+    }
+
+    #[test]
+    fn recording_a_slot_if_absent_writes_when_the_slot_is_empty() {
+        let (_tmp, store) = temp_store();
+
+        store
+            .record_launched_slot_if_absent("inst", 0, "claude", "/tmp", "%1", "", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].tmux_pane, "%1");
+        assert_eq!(slots[0].native_session_id, "");
     }
 
     #[test]

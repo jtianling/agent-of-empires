@@ -193,16 +193,28 @@ async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
         );
     }
 
-    let command = inst
+    let launch = inst
         .build_extra_pane_command(&inst.tool)
         .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", inst.tool))?;
 
-    crate::tmux::split_window_right(
+    let pane_id = crate::tmux::split_window_right(
         &session_name,
         &inst.project_path,
-        &command,
+        &launch.command,
         !inst.expects_shell(),
     )?;
+
+    // The key the launch minted lives on the pane's slot record, so every later
+    // relaunch reuses it instead of handing xats a key no identity holds.
+    let recorded = inst.record_launched_extra_pane(
+        profile,
+        &session_name,
+        &crate::db::reconcile::LaunchedPane {
+            pane_id: &pane_id,
+            agent: &inst.tool,
+            identity_key: &launch.identity_key,
+        },
+    );
 
     println!(
         "✓ Added agent pane to session: {} (pane {} of {})",
@@ -210,6 +222,12 @@ async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
         pane_count + 1,
         MAX_AGENT_PANES
     );
+    // The pane is up, so this is not a failed command, but it is degraded in a
+    // way nothing else will report. Re-running would add a second pane rather
+    // than repair this one, which is why it warns instead of failing.
+    if let Err(e) = recorded {
+        eprintln!("! {:#}", e);
+    }
     Ok(())
 }
 

@@ -526,18 +526,25 @@ pub fn send_keys_to_pane_target(pane: &str, keys: &[&str]) -> Result<()> {
 }
 
 /// Split an existing session's window horizontally and run a command in the new
-/// right pane. When `remain_on_exit` is set, the new pane stays alive if the
-/// command exits (letting the pane-died hook drop it into a shell); pass
-/// `false` for panes that already run a shell.
+/// right pane, returning that pane's id. When `remain_on_exit` is set, the new
+/// pane stays alive if the command exits (letting the pane-died hook drop it
+/// into a shell); pass `false` for panes that already run a shell.
+///
+/// The id is reported by `split-window` itself rather than read back
+/// afterwards: the caller records the pane's durable slot, and by the time it
+/// could ask the session which pane is active the user may have moved.
 pub fn split_window_right(
     session_name: &str,
     working_dir: &str,
     command: &str,
     remain_on_exit: bool,
-) -> Result<()> {
+) -> Result<String> {
     let mut args = vec![
         "split-window".to_string(),
         "-h".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{pane_id}".to_string(),
         "-t".to_string(),
         session_name.to_string(),
         "-c".to_string(),
@@ -571,7 +578,17 @@ pub fn split_window_right(
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("Failed to split window: {}", stderr);
     }
-    Ok(())
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(pane_id) => Ok(pane_id.to_string()),
+        None => bail!("split-window did not report a pane id"),
+    }
 }
 
 /// Split the target pane horizontally and return the new pane's id.

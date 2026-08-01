@@ -770,14 +770,46 @@ impl App {
                 if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
                     let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
                     match inst.build_extra_pane_command(&right_tool) {
-                        Some(right_cmd) => {
-                            if let Err(e) = crate::tmux::split_window_right(
+                        Some(launch) => {
+                            match crate::tmux::split_window_right(
                                 &session_name,
                                 &inst.project_path,
-                                &right_cmd,
+                                &launch.command,
                                 right_tool != "shell",
                             ) {
-                                tracing::warn!("Failed to split right pane: {}", e);
+                                // The key the launch minted lives on the pane's
+                                // slot record, so every later relaunch reuses it
+                                // instead of handing xats a key no identity holds.
+                                Ok(pane_id) => {
+                                    let profile = self.home.storage.profile().to_string();
+                                    let recorded = inst.record_launched_extra_pane(
+                                        &profile,
+                                        &session_name,
+                                        &crate::db::reconcile::LaunchedPane {
+                                            pane_id: &pane_id,
+                                            agent: &right_tool,
+                                            identity_key: &launch.identity_key,
+                                        },
+                                    );
+                                    // The pane is up either way; surface the loss
+                                    // rather than leaving the session looking
+                                    // healthy while its identity cannot survive.
+                                    //
+                                    // A dialog rather than the session's error
+                                    // field: that field is overwritten by the
+                                    // next status poll, whose update carries the
+                                    // value read before this ran, so the warning
+                                    // could disappear before it was ever drawn.
+                                    if let Err(e) = recorded {
+                                        tracing::error!("{:#}", e);
+                                        self.home.info_dialog =
+                                            Some(crate::tui::dialogs::InfoDialog::new(
+                                                "Identity key not recorded",
+                                                &format!("{e:#}"),
+                                            ));
+                                    }
+                                }
+                                Err(e) => tracing::warn!("Failed to split right pane: {}", e),
                             }
                         }
                         // Splitting anyway would leave an empty pane the user
