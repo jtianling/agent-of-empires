@@ -489,6 +489,9 @@ impl HomeView {
                 Span::styled("│", sep_style),
                 Span::styled(" m", key_style),
                 Span::styled(" Msg ", desc_style),
+                Span::styled("│", sep_style),
+                Span::styled(" f", key_style),
+                Span::styled(" Fork ", desc_style),
             ]);
         }
 

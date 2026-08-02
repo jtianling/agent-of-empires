@@ -2251,6 +2251,35 @@ fn render_status_bar_text(view: &mut HomeView) -> String {
         .collect::<String>()
 }
 
+/// Fork is reachable from the home screen but was only documented in the help
+/// overlay, which is one keypress further away than the bar that is always on
+/// screen.
+#[test]
+#[serial]
+fn test_status_bar_shows_the_fork_hint_for_a_selected_session() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.update_selected();
+
+    let status = render_status_bar_text(&mut env.view);
+    assert!(
+        status.contains("f Fork"),
+        "status bar should hint the fork key, got: {status:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_bar_omits_the_fork_hint_without_a_selection() {
+    let mut env = create_test_env_with_sessions(0);
+    env.view.selected_session = None;
+
+    let status = render_status_bar_text(&mut env.view);
+    assert!(
+        !status.contains("f Fork"),
+        "nothing to fork without a selected session, got: {status:?}"
+    );
+}
+
 #[test]
 #[serial]
 fn test_status_bar_shows_sort_label_for_non_manual_order() {
