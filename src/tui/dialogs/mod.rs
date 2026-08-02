@@ -2,6 +2,7 @@
 
 use ratatui::layout::Rect;
 
+mod add_pane;
 mod changelog;
 mod confirm;
 mod custom_instruction;
@@ -18,6 +19,7 @@ mod rename;
 mod send_message;
 mod welcome;
 
+pub use add_pane::{AddPaneData, AddPaneDialog};
 pub use changelog::ChangelogDialog;
 pub use confirm::ConfirmDialog;
 pub use custom_instruction::CustomInstructionDialog;

@@ -1,9 +1,10 @@
 //! `agent-of-empires session` subcommands implementation
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use crate::db::reconcile::MAX_AGENT_PANES;
 use crate::session::{GroupTree, Storage};
 
 #[derive(Subcommand)]
@@ -42,16 +43,33 @@ pub enum SessionCommands {
 
     /// Add an agent pane to a running session.
     ///
-    /// Splits the session's tmux window and launches the session's agent in the
-    /// new pane. The agent is adopted into a slot by the reconciler. Respects
-    /// the four-slot (four-pane) cap and refuses when the session is full.
-    AddAgentPane(SessionIdArgs),
+    /// Splits the session's tmux window and launches an agent in the new pane.
+    /// The agent defaults to the session's own tool and the working directory to
+    /// the session's own; both can be named instead. The pane is adopted into a
+    /// slot by the reconciler. Respects the four-slot (four-pane) cap and
+    /// refuses when the session is full, and refuses a session that is not
+    /// running rather than starting it.
+    AddAgentPane(AddAgentPaneArgs),
 }
 
 #[derive(Args)]
 pub struct SessionIdArgs {
     /// Session ID or title
     identifier: String,
+}
+
+#[derive(Args)]
+pub struct AddAgentPaneArgs {
+    /// Session ID or title
+    identifier: String,
+
+    /// Agent to launch in the new pane (defaults to the session's own tool)
+    #[arg(long)]
+    tool: Option<String>,
+
+    /// Working directory for the new pane (defaults to the session's own)
+    #[arg(long)]
+    path: Option<String>,
 }
 
 #[derive(Args)]
@@ -164,10 +182,23 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
     }
 }
 
-/// Maximum number of agent panes tracked per session (slots 0..3).
-const MAX_AGENT_PANES: usize = 4;
+/// The directory a new agent pane starts in. An unnamed one is the session's
+/// own; a named one must already exist, because a pane split into a missing
+/// directory fails with nothing on screen to explain it.
+fn resolve_pane_working_dir(path: Option<&str>, session_path: &str) -> Result<String> {
+    let Some(path) = path else {
+        return Ok(session_path.to_string());
+    };
+    let resolved = std::path::Path::new(path)
+        .canonicalize()
+        .with_context(|| format!("Working directory not found: {}", path))?;
+    if !resolved.is_dir() {
+        bail!("Path is not a directory: {}", resolved.display());
+    }
+    Ok(resolved.to_string_lossy().to_string())
+}
 
-async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
+async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
     let (instances, _) = storage.load_with_groups()?;
 
@@ -193,16 +224,39 @@ async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
         );
     }
 
-    let launch = inst
-        .build_extra_pane_command(&inst.tool)
-        .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", inst.tool))?;
+    // Built as a non-primary pane whatever the tool is, so a named tool cannot
+    // pick up the instance's command override, pre-allocated session id, fork
+    // token or identity key: those describe the instance's own agent pane.
+    //
+    // The name is checked against the registry here rather than left to the
+    // command builder: a sandboxed session's extra pane falls back to a plain
+    // shell for an agent it does not recognize, so a typo would launch bash and
+    // then persist the typo as the slot's agent, taking every later restart of
+    // that pane with it.
+    let tool = match args.tool.as_deref() {
+        None => inst.tool.clone(),
+        Some(name) => crate::agents::get_agent(name)
+            .map(|a| a.name.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Unknown agent: {}", name))?,
+    };
 
-    let pane_id = crate::tmux::split_window_right(
-        &session_name,
-        &inst.project_path,
-        &launch.command,
-        !inst.expects_shell(),
-    )?;
+    // A sandboxed session runs its panes through `docker exec -w`, so a host
+    // directory would be recorded on the slot and then ignored by the process.
+    if args.path.is_some() && inst.is_sandboxed() {
+        bail!(
+            "Session '{}' is sandboxed; its panes use the container working directory, \
+             so --path cannot apply.",
+            inst.title
+        );
+    }
+    let cwd = resolve_pane_working_dir(args.path.as_deref(), &inst.project_path)?;
+
+    let launch = inst
+        .build_extra_pane_command(&tool, &cwd)
+        .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", tool))?;
+
+    let pane_id =
+        crate::tmux::split_window_right(&session_name, &cwd, &launch.command, tool != "shell")?;
 
     // The key the launch minted lives on the pane's slot record, so every later
     // relaunch reuses it instead of handing xats a key no identity holds.
@@ -211,7 +265,8 @@ async fn add_agent_pane(profile: &str, args: SessionIdArgs) -> Result<()> {
         &session_name,
         &crate::db::reconcile::LaunchedPane {
             pane_id: &pane_id,
-            agent: &inst.tool,
+            agent: &tool,
+            cwd: &cwd,
             identity_key: &launch.identity_key,
         },
     );

@@ -63,7 +63,7 @@ impl NewSessionDialog {
         }
         let group_value = self.group.value().to_string();
         if let Some(dir) = self.group_directories.get(&group_value) {
-            self.path = Input::new(dir.clone());
+            self.path.set_value(dir.clone());
         }
     }
 }

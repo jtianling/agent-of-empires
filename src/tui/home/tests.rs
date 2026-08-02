@@ -2359,3 +2359,158 @@ fn adopt_xats_identity_key_keeps_the_existing_key() {
         Some("first-key")
     );
 }
+
+// --- % adds a managed agent pane ---
+//
+// These drive `tmux list-panes` against a private socket, so they cannot see
+// or disturb a real session.
+
+#[test]
+#[serial]
+fn percent_on_a_session_that_is_not_running_is_reported_not_started() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    env.view.handle_key(key(KeyCode::Char('%')));
+
+    assert!(
+        env.view.add_pane_dialog.is_none(),
+        "no dialog for a session with no panes"
+    );
+    assert!(env.view.info_dialog.is_some(), "the refusal is surfaced");
+    assert_ne!(
+        env.view.instances[0].status,
+        crate::session::Status::Starting,
+        "the session is not started as a side effect"
+    );
+}
+
+#[test]
+#[serial]
+fn percent_on_a_group_row_is_a_no_op() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_groups();
+    let group_index = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { .. }))
+        .expect("a group row");
+    env.view.cursor = group_index;
+    env.view.update_selected();
+
+    env.view.handle_key(key(KeyCode::Char('%')));
+
+    assert!(env.view.add_pane_dialog.is_none());
+    assert!(env.view.info_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn percent_on_a_session_being_deleted_is_a_no_op() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    env.view.cursor = 0;
+    env.view.update_selected();
+    let id = env.view.instances[0].id.clone();
+    env.view
+        .set_instance_status(&id, crate::session::Status::Deleting);
+
+    env.view.handle_key(key(KeyCode::Char('%')));
+
+    assert!(env.view.add_pane_dialog.is_none());
+    assert!(env.view.info_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn cancelling_the_add_pane_dialog_creates_nothing() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    let title = env.view.instances[0].title.clone();
+    let tool = env.view.instances[0].tool.clone();
+    env.view.add_pane_dialog = Some(crate::tui::dialogs::AddPaneDialog::new(
+        &id,
+        &title,
+        &tool,
+        vec!["claude"],
+        false,
+    ));
+
+    let action = env.view.handle_key(key(KeyCode::Esc));
+
+    assert!(action.is_none(), "cancelling does not attach");
+    assert!(env.view.add_pane_dialog.is_none());
+    assert!(env.view.pending_right_pane.is_none(), "nothing staged");
+}
+
+#[test]
+#[serial]
+fn submitting_the_add_pane_dialog_stages_the_pane_and_attaches() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    let title = env.view.instances[0].title.clone();
+    env.view.add_pane_dialog = Some(crate::tui::dialogs::AddPaneDialog::new(
+        &id,
+        &title,
+        "claude",
+        vec!["claude"],
+        false,
+    ));
+
+    let action = env.view.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(action, Some(Action::AddAgentPane(id)));
+    let pending = env.view.pending_right_pane.as_ref().expect("staged pane");
+    assert_eq!(pending.tool, "claude");
+    assert_eq!(
+        pending.path, None,
+        "an unset directory follows the session, resolved at the split"
+    );
+}
+
+// --- A right pane's working directory is resolved at the split ---
+
+#[test]
+fn an_unset_right_pane_directory_follows_the_session() {
+    let pending = crate::tui::home::PendingRightPane {
+        tool: "shell".to_string(),
+        path: None,
+    };
+
+    assert_eq!(pending.working_dir("/tmp/project"), "/tmp/project");
+}
+
+#[test]
+fn an_unset_right_pane_directory_follows_a_resolved_worktree() {
+    // The session's directory is replaced by the resolved worktree path during
+    // creation, after the dialog was submitted. A value snapshotted at submit
+    // would still say `/tmp/repo` here.
+    let pending = crate::tui::home::PendingRightPane {
+        tool: "shell".to_string(),
+        path: None,
+    };
+
+    assert_eq!(
+        pending.working_dir("/tmp/worktrees/repo-feature"),
+        "/tmp/worktrees/repo-feature"
+    );
+}
+
+#[test]
+fn a_named_right_pane_directory_is_used_as_given() {
+    let pending = crate::tui::home::PendingRightPane {
+        tool: "shell".to_string(),
+        path: Some("/tmp/elsewhere".to_string()),
+    };
+
+    assert_eq!(
+        pending.working_dir("/tmp/worktrees/repo-feature"),
+        "/tmp/elsewhere",
+        "a named directory is not worktree-resolved: it is not the session's repo"
+    );
+}

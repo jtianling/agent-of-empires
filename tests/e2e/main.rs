@@ -31,6 +31,7 @@ mod new_session;
 mod pane_cwd;
 mod pane_session_capture;
 mod profile_picker;
+mod right_pane_cwd;
 mod sandbox;
 mod session_rename;
 mod tui_launch;

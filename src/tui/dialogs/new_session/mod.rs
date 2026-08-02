@@ -1,6 +1,7 @@
 //! New session dialog
 
 mod group_input;
+mod layout;
 mod path_input;
 mod render;
 
@@ -9,11 +10,12 @@ mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
-use std::time::Instant;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::DialogResult;
+use layout::ABSENT;
+
 use crate::containers::{self, ContainerRuntimeInterface};
 use crate::session::config::SandboxConfig;
 use crate::session::repo_config::HookProgress;
@@ -22,13 +24,32 @@ use crate::session::Config;
 use crate::session::{civilizations, resolve_config};
 use crate::tmux::AvailableTools;
 use crate::tui::components::{
-    expand_tilde, DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult,
+    DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult, PathField,
     PathGhostCompletion,
 };
+
+/// What makes a help entry visible. Naming the condition on the entry keeps the
+/// help overlay from re-deriving it as a positional index, which silently
+/// mismatches the moment an entry is inserted anywhere but the end.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum HelpVisibility {
+    Always,
+    /// Hidden when the profile offers a single tool, which is not selectable.
+    ToolSelection,
+    RightPanePath,
+    Yolo,
+    CrossAgentTeam,
+    Sandbox,
+    /// The sandbox sub-options, shown only while sandboxing is enabled.
+    SandboxOptions,
+    /// Skipped outright: the profile field is no longer part of the dialog.
+    Never,
+}
 
 pub(super) struct FieldHelp {
     pub(super) name: &'static str,
     pub(super) description: &'static str,
+    pub(super) visibility: HelpVisibility,
 }
 
 pub(super) const HELP_DIALOG_WIDTH: u16 = 85;
@@ -37,52 +58,69 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     FieldHelp {
         name: "Profile",
         description: "Settings profile for session defaults (Left/Right to cycle)",
+        visibility: HelpVisibility::Never,
     },
     FieldHelp {
         name: "Title",
         description: "Session name (auto-generates if empty)",
+        visibility: HelpVisibility::Always,
     },
     FieldHelp {
         name: "Path",
         description: "Working directory for the session",
+        visibility: HelpVisibility::Always,
     },
     FieldHelp {
         name: "Tool",
         description: "Which AI tool to use (Ctrl+P to configure command and extra args)",
+        visibility: HelpVisibility::ToolSelection,
     },
     FieldHelp {
         name: "Right Pane",
         description: "Optional tool for an auto-created right pane (Left/Right to cycle)",
+        visibility: HelpVisibility::Always,
+    },
+    FieldHelp {
+        name: "Right Pane Path",
+        description: "Working directory for the right pane (empty = same as the session)",
+        visibility: HelpVisibility::RightPanePath,
     },
     FieldHelp {
         name: "YOLO Mode",
         description:
             "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
+        visibility: HelpVisibility::Yolo,
     },
     FieldHelp {
         name: "Cross Agent Teams",
         description: "Launch the selected tool with its local xats integration",
+        visibility: HelpVisibility::CrossAgentTeam,
     },
     FieldHelp {
         name: "Worktree",
         description:
             "Branch name for git worktree (Ctrl+P to configure branch mode and extra repos)",
+        visibility: HelpVisibility::Always,
     },
     FieldHelp {
         name: "Sandbox",
         description: "Run session in Docker container for isolation (Ctrl+P to configure)",
+        visibility: HelpVisibility::Sandbox,
     },
     FieldHelp {
         name: "Image",
         description: "Docker image. Edit config.toml [sandbox] default_image to change default",
+        visibility: HelpVisibility::SandboxOptions,
     },
     FieldHelp {
         name: "Environment",
         description: "Env vars: bare KEY passes host value, KEY=VALUE sets explicitly",
+        visibility: HelpVisibility::SandboxOptions,
     },
     FieldHelp {
         name: "Group",
         description: "Optional grouping for organization (Ctrl+P to browse existing groups)",
+        visibility: HelpVisibility::Always,
     },
 ];
 
@@ -115,15 +153,88 @@ pub struct NewSessionData {
     pub reuse_worktree: bool,
     /// Optional tool to launch in a right pane (auto-split). None or empty = no split.
     pub right_pane_tool: Option<String>,
+    /// Working directory for the right pane. `None` means the session's own,
+    /// resolved when the pane is split rather than snapshotted here: a
+    /// worktree-backed session does not know its directory until it is created.
+    pub right_pane_path: Option<String>,
 }
 
 /// Spinner frames for loading animation
 pub(super) const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
+/// Which field the shared directory picker was opened for. The picker itself
+/// only reports a directory, so the dialog has to remember where to put it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DirPickerTarget {
+    SessionPath,
+    RightPanePath,
+    WorkspaceRepo,
+}
+
+/// A pending confirmation to create the directories a submit needs.
+///
+/// One confirmation covers every missing directory. Prompting per field can
+/// leave the first directory created after the user declines the second, which
+/// is a state they did not ask for and cannot see.
+pub(super) struct CreateDirsConfirm {
+    pub(super) dirs: Vec<String>,
+    pub(super) yes_selected: bool,
+}
+
+/// Create `dir`, appending to `owned` every component this call actually made,
+/// outermost first.
+///
+/// Each level goes through `create_dir`, which is atomic and distinguishes
+/// "this call made it" from "it was already there". `create_dir_all` does
+/// neither: it reports success for a directory that already existed, so a
+/// directory another process created while the confirmation was on screen would
+/// be treated as ours, and it creates intermediate parents without naming them,
+/// so rolling back only the path that was asked for leaves those parents behind.
+///
+/// On failure the components made so far stay in `owned`, so the caller can undo
+/// exactly them.
+fn create_dir_tracked(dir: &str, owned: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    let path = std::path::Path::new(dir);
+    if path.components().next().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty path",
+        ));
+    }
+
+    let mut current = std::path::PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match std::fs::create_dir(&current) {
+            Ok(()) => owned.push(current.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // `create_dir` reports AlreadyExists for anything occupying that
+                // name, including a regular file and a symlink whose target does
+                // not exist. Neither is a directory to launch a pane in, and a
+                // dangling symlink reaches here routinely: `Path::exists` follows
+                // the link, so it reads as missing and the dialog offers to
+                // create it. `metadata` follows the link too, which is what makes
+                // it answer the question that matters here.
+                let usable = std::fs::metadata(&current).is_ok_and(|m| m.is_dir());
+                if !usable {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("{} exists but is not a directory", current.display()),
+                    ));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 pub struct NewSessionDialog {
     pub(super) profile: String,
     pub(super) title: Input,
-    pub(super) path: Input,
+    pub(super) path: PathField,
+    /// Working directory for the right pane; empty means the session's own.
+    pub(super) right_pane_path: PathField,
     pub(super) group: Input,
     pub(super) tool_index: usize,
     /// Right pane tool index: 0 = "none", 1+ maps to available_tools[index-1]
@@ -152,8 +263,8 @@ pub struct NewSessionDialog {
     pub(super) workspace_repo_adding_new: bool,
     /// Ghost completion for workspace repo path editing
     pub(super) workspace_repo_ghost: Option<PathGhostCompletion>,
-    /// Whether the dir picker was opened for a workspace repo (vs the main path)
-    pub(super) workspace_repo_dir_picker_active: bool,
+    /// Which field the directory picker will write into when it returns.
+    pub(super) dir_picker_target: DirPickerTarget,
     /// Worktree configuration overlay mode (Ctrl+P on worktree field)
     pub(super) worktree_config_mode: bool,
     /// Focused field within the worktree config overlay (0=new_branch, 1=extra_repos)
@@ -198,15 +309,10 @@ pub struct NewSessionDialog {
     pub(super) current_hook: Option<String>,
     /// Accumulated output lines from hook execution
     pub(super) hook_output: Vec<String>,
-    /// Temporary highlight state for invalid path input.
-    pub(super) path_invalid_flash_until: Option<Instant>,
-    /// Ghost text completion for the path field (fish-shell style).
-    path_ghost: Option<PathGhostCompletion>,
     /// Ghost text completion for the group field (fish-shell style).
     group_ghost: Option<GroupGhostCompletion>,
-    /// Inline confirmation for creating a non-existent directory.
-    /// None = inactive, Some(true) = Yes selected, Some(false) = No selected.
-    pub(super) confirm_create_dir: Option<bool>,
+    /// Inline confirmation for creating the directories a submit needs.
+    pub(super) confirm_create_dirs: Option<CreateDirsConfirm>,
     /// Whether the user has been warned about reusing an existing worktree.
     /// On first Enter the warning is shown; on second Enter the session is created with reuse.
     pub(super) confirm_reuse_worktree: bool,
@@ -392,7 +498,8 @@ impl NewSessionDialog {
         Self {
             profile: profile.to_string(),
             title: Input::default(),
-            path: Input::new(current_dir),
+            path: PathField::new(current_dir),
+            right_pane_path: PathField::default(),
             group: Input::new(default_group.unwrap_or_default()),
             tool_index,
             right_pane_tool_index: 0,
@@ -413,7 +520,7 @@ impl NewSessionDialog {
             workspace_repo_editing_input: None,
             workspace_repo_adding_new: false,
             workspace_repo_ghost: None,
-            workspace_repo_dir_picker_active: false,
+            dir_picker_target: DirPickerTarget::SessionPath,
             worktree_config_mode: false,
             worktree_config_focused_field: 0,
             sandbox_enabled,
@@ -444,10 +551,8 @@ impl NewSessionDialog {
             has_hooks: false,
             current_hook: None,
             hook_output: Vec::new(),
-            path_invalid_flash_until: None,
-            path_ghost: None,
             group_ghost: None,
-            confirm_create_dir: None,
+            confirm_create_dirs: None,
             confirm_reuse_worktree: false,
             saved_yolo_mode: None,
         }
@@ -455,7 +560,7 @@ impl NewSessionDialog {
 
     /// Pre-fill the path field (e.g. from a selected session).
     pub fn set_path(&mut self, path: String) {
-        self.path = Input::new(path);
+        self.path.set_value(path);
     }
 
     /// Pre-fill the group field (e.g. from a selected session or group).
@@ -518,11 +623,12 @@ impl NewSessionDialog {
             changed = true;
         }
 
-        if let Some(until) = self.path_invalid_flash_until {
-            if Instant::now() >= until {
-                self.path_invalid_flash_until = None;
-                changed = true;
-            }
+        if self.path.tick() {
+            changed = true;
+        }
+
+        if self.right_pane_path.tick() {
+            changed = true;
         }
 
         changed
@@ -552,6 +658,28 @@ impl NewSessionDialog {
                 .is_some_and(|y| !matches!(y, crate::agents::YoloMode::AlwaysYolo))
     }
 
+    /// The right pane path field is shown only for a real right pane tool, and
+    /// never under sandboxing: there the agent's directory is decided by the
+    /// container exec, so a host-side directory would be accepted and ignored.
+    pub(super) fn has_right_pane_path_field(&self) -> bool {
+        self.right_pane_tool_index != 0 && !self.sandbox_enabled
+    }
+
+    /// Whether a help entry applies to the dialog as it currently stands. The
+    /// conditions are the same ones the fields themselves are built from.
+    pub(super) fn help_entry_visible(&self, visibility: HelpVisibility) -> bool {
+        match visibility {
+            HelpVisibility::Always => true,
+            HelpVisibility::Never => false,
+            HelpVisibility::ToolSelection => self.available_tools.len() > 1,
+            HelpVisibility::RightPanePath => self.has_right_pane_path_field(),
+            HelpVisibility::Yolo => self.has_yolo_field(),
+            HelpVisibility::CrossAgentTeam => self.has_cross_agent_team_field(),
+            HelpVisibility::Sandbox => self.docker_available,
+            HelpVisibility::SandboxOptions => self.docker_available && self.sandbox_enabled,
+        }
+    }
+
     pub(super) fn has_yolo_field(&self) -> bool {
         (!self.is_terminal_selected() && !self.selected_tool_always_yolo())
             || self.right_pane_needs_yolo()
@@ -575,10 +703,6 @@ impl NewSessionDialog {
         }
     }
 
-    fn path_field(&self) -> usize {
-        1
-    }
-
     #[cfg(test)]
     pub(super) fn new_with_config(tools: Vec<&'static str>, path: String, config: Config) -> Self {
         let tool_index = if let Some(ref default_tool) = config.session.default_tool {
@@ -593,7 +717,8 @@ impl NewSessionDialog {
         Self {
             profile: "default".to_string(),
             title: Input::default(),
-            path: Input::new(path),
+            path: PathField::new(path),
+            right_pane_path: PathField::default(),
             group: Input::default(),
             tool_index,
             right_pane_tool_index: 0,
@@ -614,7 +739,7 @@ impl NewSessionDialog {
             workspace_repo_editing_input: None,
             workspace_repo_adding_new: false,
             workspace_repo_ghost: None,
-            workspace_repo_dir_picker_active: false,
+            dir_picker_target: DirPickerTarget::SessionPath,
             worktree_config_mode: false,
             worktree_config_focused_field: 0,
             sandbox_enabled: false,
@@ -645,10 +770,8 @@ impl NewSessionDialog {
             has_hooks: false,
             current_hook: None,
             hook_output: Vec::new(),
-            path_invalid_flash_until: None,
-            path_ghost: None,
             group_ghost: None,
-            confirm_create_dir: None,
+            confirm_create_dirs: None,
             confirm_reuse_worktree: false,
             saved_yolo_mode: None,
         }
@@ -695,8 +818,8 @@ impl NewSessionDialog {
             return self.handle_worktree_config_key(key);
         }
 
-        if self.confirm_create_dir.is_some() {
-            return self.handle_confirm_create_dir_key(key);
+        if self.confirm_create_dirs.is_some() {
+            return self.handle_confirm_create_dirs_key(key);
         }
 
         if self.group_picker.is_active() {
@@ -718,96 +841,50 @@ impl NewSessionDialog {
 
         if self.dir_picker.is_active() {
             match self.dir_picker.handle_key(key) {
-                DirPickerResult::Selected(path) => {
-                    if self.workspace_repo_dir_picker_active {
+                DirPickerResult::Selected(path) => match self.dir_picker_target {
+                    DirPickerTarget::SessionPath => {
+                        self.path.set_value(path);
+                        self.path_user_edited = true;
+                    }
+                    DirPickerTarget::RightPanePath => self.right_pane_path.set_value(path),
+                    DirPickerTarget::WorkspaceRepo => {
                         self.workspace_repo_editing_input = Some(Input::new(path));
                         self.workspace_repo_ghost = self
                             .workspace_repo_editing_input
                             .as_ref()
                             .and_then(path_input::compute_path_ghost);
-                        self.workspace_repo_dir_picker_active = false;
-                    } else {
-                        self.path = Input::new(path);
-                        self.path_user_edited = true;
-                        self.recompute_path_ghost();
                     }
-                }
-                DirPickerResult::Cancelled => {
-                    self.workspace_repo_dir_picker_active = false;
-                }
-                DirPickerResult::Continue => {}
+                },
+                DirPickerResult::Cancelled | DirPickerResult::Continue => {}
             }
             return DialogResult::Continue;
         }
 
-        let has_tool_selection = self.available_tools.len() > 1;
-        let has_sandbox = self.docker_available;
-        let has_worktree = !self.worktree_branch.value().is_empty();
-        let is_terminal = self.is_terminal_selected();
-        // Field order: title, path, [tool], right_pane, [yolo], [worktree],
-        //   [new_branch], [sandbox], group
         // Worktree sub-options (extra_repos) are in a Ctrl+P overlay.
         // Tool config (extra_args, command_override) is in a Ctrl+P overlay on tool field.
         // Sandbox sub-options are in a separate sandbox_config_mode overlay.
-        let mut fi: usize = 2; // title + path
-        let tool_field = if has_tool_selection {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let right_pane_field = {
-            let f = fi;
-            fi += 1;
-            f
-        };
-        let has_yolo = self.has_yolo_field();
-        let yolo_mode_field = if has_yolo {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let has_cross_agent_team = self.has_cross_agent_team_field();
-        let cross_agent_team_field = if has_cross_agent_team {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let worktree_field = if !is_terminal {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let new_branch_field = if !is_terminal && has_worktree {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let sandbox_field = if has_sandbox {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let group_field = fi;
-        fi += 1;
-        let max_field = fi;
+        let layout = self.field_layout();
+        let tool_field = layout.tool;
+        let right_pane_field = layout.right_pane;
+        let yolo_mode_field = layout.yolo;
+        let cross_agent_team_field = layout.cross_agent_team;
+        let has_cross_agent_team = cross_agent_team_field != ABSENT;
+        let worktree_field = layout.worktree;
+        let new_branch_field = layout.new_branch;
+        let sandbox_field = layout.sandbox;
+        let group_field = layout.group;
+        let max_field = layout.count;
 
         // Ctrl+P opens a context-sensitive picker/config overlay
         if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.focused_field == self.path_field() {
-                let path_value = self.path.value().trim().to_string();
-                self.dir_picker.activate(&path_value);
+            if self.focused_field == layout.path {
+                self.dir_picker_target = DirPickerTarget::SessionPath;
+                self.path.activate_picker(&mut self.dir_picker);
+                return DialogResult::Continue;
+            }
+            if self.focused_field == layout.right_pane_path {
+                self.dir_picker_target = DirPickerTarget::RightPanePath;
+                self.right_pane_path.activate_picker(&mut self.dir_picker);
                 return DialogResult::Continue;
             }
             if self.focused_field == tool_field {
@@ -850,10 +927,21 @@ impl NewSessionDialog {
             }
             KeyCode::Enter => {
                 self.error_message = None;
-                let path_str = self.path.value().trim().to_string();
-                let resolved = expand_tilde(&path_str);
-                if !std::path::Path::new(&resolved).exists() {
-                    self.confirm_create_dir = Some(false);
+                // Refused before the create-directory confirmation: a path that
+                // exists but is not a directory is not missing, so confirming
+                // would create nothing and the split would fail on a value the
+                // dialog had already accepted.
+                if let Some((field, path)) = self.non_directory_path() {
+                    self.error_message = Some(format!("Not a directory: {path}"));
+                    self.focused_field = field;
+                    return DialogResult::Continue;
+                }
+                let missing = self.missing_directories();
+                if !missing.is_empty() {
+                    self.confirm_create_dirs = Some(CreateDirsConfirm {
+                        dirs: missing,
+                        yes_selected: false,
+                    });
                     return DialogResult::Continue;
                 }
                 // Check for worktree reuse: if a worktree branch is specified,
@@ -871,39 +959,19 @@ impl NewSessionDialog {
                 self.build_submit_result()
             }
             KeyCode::Tab | KeyCode::Down => {
-                if self.focused_field == self.path_field() {
-                    self.clear_path_ghost();
-                }
-                if self.focused_field == group_field {
-                    self.clear_group_ghost();
-                }
+                self.clear_focused_ghost();
                 self.focused_field = (self.focused_field + 1) % max_field;
-                if self.focused_field == self.path_field() {
-                    self.recompute_path_ghost();
-                }
-                if self.focused_field == group_field {
-                    self.recompute_group_ghost();
-                }
+                self.recompute_focused_ghost();
                 DialogResult::Continue
             }
             KeyCode::BackTab | KeyCode::Up => {
-                if self.focused_field == self.path_field() {
-                    self.clear_path_ghost();
-                }
-                if self.focused_field == group_field {
-                    self.clear_group_ghost();
-                }
+                self.clear_focused_ghost();
                 self.focused_field = if self.focused_field == 0 {
                     max_field - 1
                 } else {
                     self.focused_field - 1
                 };
-                if self.focused_field == self.path_field() {
-                    self.recompute_path_ghost();
-                }
-                if self.focused_field == group_field {
-                    self.recompute_group_ghost();
-                }
+                self.recompute_focused_ghost();
                 DialogResult::Continue
             }
             KeyCode::Left if self.focused_field == tool_field => {
@@ -947,6 +1015,10 @@ impl NewSessionDialog {
                     self.inherited_settings.clear();
                     self.sandbox_config_mode = false;
                 }
+                // Sandboxing hides the Cross Agent Teams and Right Pane Path
+                // fields, so the checkbox just toggled has moved. Follow it
+                // rather than leaving focus on whatever inherited its index.
+                self.focused_field = self.field_layout().sandbox;
                 DialogResult::Continue
             }
             KeyCode::Left if self.focused_field == right_pane_field => {
@@ -1000,15 +1072,17 @@ impl NewSessionDialog {
                     && self.focused_field != yolo_mode_field
                     && self.focused_field != cross_agent_team_field
                 {
-                    self.current_input_mut()
-                        .handle_event(&crossterm::event::Event::Key(key));
+                    if self.focused_field == layout.path {
+                        self.path.handle_text_key(key);
+                        self.path_user_edited = true;
+                    } else if self.focused_field == layout.right_pane_path {
+                        self.right_pane_path.handle_text_key(key);
+                    } else {
+                        self.current_input_mut()
+                            .handle_event(&crossterm::event::Event::Key(key));
+                    }
                     self.error_message = None;
                     self.confirm_reuse_worktree = false;
-                    if self.focused_field == self.path_field() {
-                        self.path_user_edited = true;
-                        self.path_invalid_flash_until = None;
-                        self.recompute_path_ghost();
-                    }
                     if self.focused_field == group_field {
                         self.recompute_group_ghost();
                         self.apply_group_default_directory();
@@ -1147,8 +1221,8 @@ impl NewSessionDialog {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.worktree_config_focused_field == WT_NEW_BRANCH =>
             {
-                let path = std::path::Path::new(self.path.value().trim());
-                if let Ok(branches) = crate::git::diff::list_branches(path) {
+                let path = std::path::PathBuf::from(self.path.resolved());
+                if let Ok(branches) = crate::git::diff::list_branches(&path) {
                     if !branches.is_empty() {
                         self.branch_picker.activate(branches);
                     }
@@ -1231,7 +1305,7 @@ impl NewSessionDialog {
                 } else {
                     initial
                 };
-                self.workspace_repo_dir_picker_active = true;
+                self.dir_picker_target = DirPickerTarget::WorkspaceRepo;
                 self.dir_picker.activate(&initial);
                 return DialogResult::Continue;
             }
@@ -1362,45 +1436,11 @@ impl NewSessionDialog {
     }
 
     fn current_input_mut(&mut self) -> &mut Input {
-        let has_tool_selection = self.available_tools.len() > 1;
-        let has_worktree = !self.worktree_branch.value().is_empty();
-        let is_terminal = self.is_terminal_selected();
-        let has_yolo = self.has_yolo_field();
-        let has_cross_agent_team = self.has_cross_agent_team_field();
-        let base = 0;
-
-        // Field layout: title, path, [tool], right_pane, [yolo], [cross_agent_team],
-        //   [worktree], [new_branch], [sandbox], group
-        let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
-        fi += 1; // right_pane (always visible)
-        let worktree_field = if !is_terminal {
-            if has_yolo {
-                fi += 1; // yolo
-            }
-            if has_cross_agent_team {
-                fi += 1; // cross agent team
-            }
-            let f = fi;
-            fi += 1;
-            if has_worktree {
-                fi += 1; // new_branch
-            }
-            f
-        } else {
-            usize::MAX
-        };
-        if self.docker_available {
-            fi += 1; // sandbox checkbox
-        }
-        let group_field = fi;
-
-        let path_field = self.path_field();
-        let title_field = 0;
+        let layout = self.field_layout();
         match self.focused_field {
-            n if n == title_field => &mut self.title,
-            n if n == path_field => &mut self.path,
-            n if n == worktree_field => &mut self.worktree_branch,
-            n if n == group_field => &mut self.group,
+            n if n == layout.title => &mut self.title,
+            n if n == layout.worktree => &mut self.worktree_branch,
+            n if n == layout.group => &mut self.group,
             _ => &mut self.title,
         }
     }
@@ -1415,9 +1455,7 @@ impl NewSessionDialog {
             return None;
         }
 
-        let path_str = self.path.value().trim().to_string();
-        let resolved = expand_tilde(&path_str);
-        let path = std::path::PathBuf::from(&resolved);
+        let path = std::path::PathBuf::from(self.path.resolved());
 
         if !GitWorktree::is_git_repo(&path) {
             return None;
@@ -1461,7 +1499,7 @@ impl NewSessionDialog {
         DialogResult::Submit(NewSessionData {
             profile: self.profile.clone(),
             title: final_title,
-            path: self.path.value().trim().to_string(),
+            path: self.path.trimmed(),
             group: self.group.value().trim().to_string(),
             tool: self.available_tools[self.tool_index].to_string(),
             worktree_branch,
@@ -1491,57 +1529,179 @@ impl NewSessionDialog {
                     .get(self.right_pane_tool_index - 1)
                     .map(|t| t.to_string())
             },
+            right_pane_path: self.right_pane_path_value(),
         })
     }
 
-    fn handle_confirm_create_dir_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        let selected = self.confirm_create_dir.as_mut().unwrap();
+    /// The right pane's chosen directory, or `None` for "the session's own".
+    /// A hidden field contributes nothing, so toggling sandboxing on does not
+    /// smuggle a directory into a session that cannot use it.
+    fn right_pane_path_value(&self) -> Option<String> {
+        if !self.has_right_pane_path_field() {
+            return None;
+        }
+        if self.right_pane_path.trimmed().is_empty() {
+            return None;
+        }
+        // The resolved form, not the typed one: a leading `~` is expanded by the
+        // shell, never by tmux, so handing `split-window -c` the literal text
+        // fails the pane after the existence check has already passed on the
+        // expanded path.
+        Some(self.right_pane_path.resolved())
+    }
+
+    /// Every directory this submit would have to create, in field order.
+    fn missing_directories(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        let session_path = self.path.resolved();
+        if !std::path::Path::new(&session_path).exists() {
+            missing.push(session_path);
+        }
+        if self.right_pane_path_value().is_some() {
+            let right_pane_path = self.right_pane_path.resolved();
+            if !std::path::Path::new(&right_pane_path).exists()
+                && !missing.contains(&right_pane_path)
+            {
+                missing.push(right_pane_path);
+            }
+        }
+        missing
+    }
+
+    /// A path that exists but is not a directory, if either field names one.
+    ///
+    /// `exists()` alone lets a regular file through as "not missing", and the
+    /// split then fails on a path the dialog had already accepted.
+    /// Returns the field alongside the path: matching the path back to a field
+    /// afterwards picks the wrong one when both fields name the same file.
+    fn non_directory_path(&self) -> Option<(usize, String)> {
+        let layout = self.field_layout();
+        let candidates = [
+            (layout.path, Some(self.path.resolved())),
+            (
+                layout.right_pane_path,
+                self.right_pane_path_value()
+                    .map(|_| self.right_pane_path.resolved()),
+            ),
+        ];
+        for (field, path) in candidates {
+            let Some(path) = path else { continue };
+            let p = std::path::Path::new(&path);
+            if p.exists() && !p.is_dir() {
+                return Some((field, path));
+            }
+        }
+        None
+    }
+
+    /// The field a directory belongs to, so a creation failure lands the cursor
+    /// on the input the user has to fix.
+    fn field_for_directory(&self, dir: &str) -> usize {
+        let layout = self.field_layout();
+        if layout.right_pane_path != ABSENT && self.right_pane_path.resolved() == dir {
+            layout.right_pane_path
+        } else {
+            layout.path
+        }
+    }
+
+    fn handle_confirm_create_dirs_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
+        let confirm = self.confirm_create_dirs.as_mut().unwrap();
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => {
-                *selected = true;
+                confirm.yes_selected = true;
                 DialogResult::Continue
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                *selected = false;
+                confirm.yes_selected = false;
                 DialogResult::Continue
             }
             KeyCode::Tab => {
-                *selected = !*selected;
+                confirm.yes_selected = !confirm.yes_selected;
                 DialogResult::Continue
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.confirm_create_dir = None;
-                self.try_create_dir_and_submit()
-            }
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.confirm_create_dir = None;
-                self.focused_field = self.path_field();
-                DialogResult::Continue
-            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.create_dirs_and_submit(),
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.decline_create_dirs(),
             KeyCode::Enter => {
-                let yes = *selected;
-                self.confirm_create_dir = None;
-                if yes {
-                    self.try_create_dir_and_submit()
+                if confirm.yes_selected {
+                    self.create_dirs_and_submit()
                 } else {
-                    self.focused_field = self.path_field();
-                    DialogResult::Continue
+                    self.decline_create_dirs()
                 }
             }
             _ => DialogResult::Continue,
         }
     }
 
-    fn try_create_dir_and_submit(&mut self) -> DialogResult<NewSessionData> {
-        let path_str = self.path.value().trim().to_string();
-        let resolved = expand_tilde(&path_str);
-        match std::fs::create_dir_all(&resolved) {
-            Ok(()) => self.build_submit_result(),
-            Err(e) => {
-                self.error_message = Some(format!("Failed to create directory: {}", e));
-                self.focused_field = self.path_field();
-                DialogResult::Continue
+    /// Declining creates nothing, which is the whole reason one confirmation
+    /// covers every directory rather than one prompt per field.
+    fn decline_create_dirs(&mut self) -> DialogResult<NewSessionData> {
+        self.confirm_create_dirs = None;
+        self.focused_field = self.path_field();
+        DialogResult::Continue
+    }
+
+    fn create_dirs_and_submit(&mut self) -> DialogResult<NewSessionData> {
+        let Some(confirm) = self.confirm_create_dirs.take() else {
+            return DialogResult::Continue;
+        };
+        // One confirmation covering every directory has to mean all or none.
+        // A failure partway through would otherwise leave the earlier ones
+        // behind while the session is not created, which is neither what the
+        // user confirmed nor something the dialog goes on to mention.
+        //
+        // Only the components this dialog itself created are rolled back, and
+        // every one of them is. `create_dir_all` gives neither: it reports
+        // success for a directory that already existed, and it creates parents
+        // without naming them, so undoing only the leaf leaves the parents
+        // behind. See `create_dir_tracked`.
+        let mut owned: Vec<std::path::PathBuf> = Vec::new();
+        for dir in &confirm.dirs {
+            if let Err(e) = create_dir_tracked(dir, &mut owned) {
+                let mut kept = Vec::new();
+                for done in owned.iter().rev() {
+                    if std::fs::remove_dir(done).is_err() {
+                        kept.push(done.display().to_string());
+                    }
+                }
+                // Silence here would leave directories behind after telling the
+                // user nothing was created.
+                self.error_message = Some(if kept.is_empty() {
+                    format!("Failed to create directory {}: {}", dir, e)
+                } else {
+                    format!(
+                        "Failed to create directory {}: {}. Left in place: {}",
+                        dir,
+                        e,
+                        kept.join(", ")
+                    )
+                });
+                self.focused_field = self.field_for_directory(dir);
+                return DialogResult::Continue;
             }
+        }
+        self.build_submit_result()
+    }
+
+    fn clear_focused_ghost(&mut self) {
+        let layout = self.field_layout();
+        if self.focused_field == layout.path {
+            self.path.clear_ghost();
+        } else if self.focused_field == layout.right_pane_path {
+            self.right_pane_path.clear_ghost();
+        } else if self.focused_field == layout.group {
+            self.clear_group_ghost();
+        }
+    }
+
+    fn recompute_focused_ghost(&mut self) {
+        let layout = self.field_layout();
+        if self.focused_field == layout.path {
+            self.path.recompute_ghost();
+        } else if self.focused_field == layout.right_pane_path {
+            self.right_pane_path.recompute_ghost();
+        } else if self.focused_field == layout.group {
+            self.recompute_group_ghost();
         }
     }
 }

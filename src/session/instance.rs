@@ -1324,10 +1324,12 @@ impl Instance {
     /// is freshly minted and never the instance's own: two live panes behind one
     /// identity is the state the recovery design cannot resolve, and launch is
     /// the only moment at which it is preventable.
-    pub fn build_extra_pane_command(&self, tool: &str) -> Option<ExtraPaneLaunch> {
+    /// `cwd` is the directory the pane will be split into. Only a shell pane
+    /// needs it in the command itself; an agent pane inherits it from the split.
+    pub fn build_extra_pane_command(&self, tool: &str, cwd: &str) -> Option<ExtraPaneLaunch> {
         if tool == "shell" {
             return Some(ExtraPaneLaunch {
-                command: self.build_extra_shell_pane_command(),
+                command: self.build_extra_shell_pane_command(cwd),
                 identity_key: String::new(),
             });
         }
@@ -1352,8 +1354,17 @@ impl Instance {
     /// so the key minted for it survives into every later relaunch and the pane
     /// is inside the restart fan-out before its first capture.
     ///
-    /// A shell pane is not recorded: it runs no agent, holds no identity and
-    /// produces no capture, so a slot would only cost the session one of four.
+    /// The launched pane's working directory travels on `pane`, because it
+    /// describes that pane. The instance's own directory is passed separately
+    /// for the primary record, which describes the pane AoE did not just
+    /// launch. The two are equal only when the pane was launched into the
+    /// session's directory.
+    ///
+    /// A shell pane that inherited the session's directory is not recorded: it
+    /// runs no agent, holds no identity and produces no capture, and recovery
+    /// would place it in that directory anyway, so a slot would only cost the
+    /// session one of four. A shell pane launched into a directory of its own
+    /// is recorded, because that directory is held nowhere else.
     ///
     /// A failure here is reported rather than logged. The pane is already
     /// running under the key it was launched with, but nothing holds that key,
@@ -1366,7 +1377,17 @@ impl Instance {
         session_name: &str,
         pane: &crate::db::reconcile::LaunchedPane<'_>,
     ) -> Result<()> {
-        if pane_agent_is_shell(pane.agent) {
+        // A shell pane runs no agent, holds no identity and produces no capture,
+        // so a slot would normally only cost the session one of four.
+        //
+        // The exception is a shell pane launched somewhere other than the
+        // session's directory. That directory is recorded nowhere else: without
+        // a slot the pane is outside the restart fan-out and absent from cold
+        // recovery entirely, so the directory the user chose survives exactly
+        // until the first restart. A shell pane that simply inherited the
+        // session's directory loses nothing by staying slotless, because
+        // recovery would put it there anyway.
+        if shell_pane_needs_no_slot(pane.agent, pane.cwd, &self.project_path) {
             return Ok(());
         }
         crate::db::Store::open_with_schema(profile)
@@ -1389,12 +1410,12 @@ impl Instance {
             })
     }
 
-    /// The user's shell for an extra pane, in the session's working directory.
+    /// The user's shell for an extra pane, in `cwd`.
     ///
     /// The `cd` is defense in depth: the split already inherits the directory,
     /// and a login shell that resets it would otherwise land the pane
     /// elsewhere.
-    fn build_extra_shell_pane_command(&self) -> String {
+    fn build_extra_shell_pane_command(&self, cwd: &str) -> String {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let inner = if self.is_sandboxed() && self.sandbox_info.is_some() {
             let container = DockerContainer::from_session_id(&self.id);
@@ -1402,7 +1423,7 @@ impl Instance {
             let docker_cmd = container.exec_command(Some(&format!("-w {}", workdir)), &shell);
             format!("stty susp undef; exec {}", docker_cmd)
         } else {
-            let escaped_dir = shell_escape(&self.project_path);
+            let escaped_dir = shell_escape(cwd);
             format!("cd {} && stty susp undef; exec {}", escaped_dir, shell)
         };
         format!("bash -lc '{}'", inner.replace('\'', "'\\''"))
@@ -3022,15 +3043,27 @@ impl Instance {
         mode: RestartMode,
         slot_identity_key: Option<&str>,
     ) -> PaneResumeOutcome {
-        // Build (and validate) the command before killing the pane, so a pane we
-        // cannot safely respawn is left running rather than killed and abandoned.
-        let Some((command, resumed)) = self.build_pane_resume_plan(
-            agent,
-            native_session_id,
-            is_primary,
-            mode,
-            slot_identity_key,
-        ) else {
+        // A shell slot is relaunched the way it was launched. The registry
+        // entry's binary is the literal `shell`, which names no program, so the
+        // launch path builds this pane through `build_extra_shell_pane_command`
+        // and the resume path has to do the same. Only slots recorded for a
+        // shell pane with a directory of its own reach this, which is why it
+        // was unreachable before those slots existed.
+        let plan = if pane_agent_is_shell(agent) {
+            Some((self.build_extra_shell_pane_command(cwd), false))
+        } else {
+            // Build (and validate) the command before killing the pane, so a pane
+            // we cannot safely respawn is left running rather than killed and
+            // abandoned.
+            self.build_pane_resume_plan(
+                agent,
+                native_session_id,
+                is_primary,
+                mode,
+                slot_identity_key,
+            )
+        };
+        let Some((command, resumed)) = plan else {
             return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
         };
 
@@ -3067,6 +3100,26 @@ impl Instance {
             PaneResumeOutcome::DegradedToFresh
         }
     }
+}
+
+/// Whether two paths name the same directory, ignoring a trailing separator.
+///
+/// Used to tell "this pane inherited the session's directory" from "this pane
+/// was given one", which is a question about what the user chose rather than
+/// about what the filesystem resolves to, so it does not canonicalize.
+fn paths_equal(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+/// Whether a launched shell pane can stay slotless.
+///
+/// A shell pane runs no agent, holds no identity and produces no capture, so a
+/// slot would normally only cost the session one of four. A shell pane launched
+/// somewhere other than the session's directory is the exception: that directory
+/// is recorded nowhere else, so without a slot the choice survives only until
+/// the first restart.
+fn shell_pane_needs_no_slot(agent: &str, cwd: &str, project_path: &str) -> bool {
+    pane_agent_is_shell(agent) && paths_equal(cwd, project_path)
 }
 
 /// Whether a tracked pane's recorded agent is a plain shell. Shell panes
@@ -3177,6 +3230,49 @@ fn rebuild_recovery_panes(
         }
     }
     Ok(paired)
+}
+
+#[cfg(test)]
+mod shell_slot_tests {
+    use super::shell_pane_needs_no_slot;
+
+    #[test]
+    fn an_inherited_shell_pane_stays_slotless() {
+        assert!(shell_pane_needs_no_slot(
+            "shell",
+            "/tmp/session",
+            "/tmp/session"
+        ));
+    }
+
+    #[test]
+    fn a_trailing_separator_is_still_the_same_directory() {
+        assert!(shell_pane_needs_no_slot(
+            "shell",
+            "/tmp/session/",
+            "/tmp/session"
+        ));
+    }
+
+    /// The directory the user chose exists nowhere else, so this pane has to be
+    /// slot-recorded or the choice dies at the first restart.
+    #[test]
+    fn a_shell_pane_with_its_own_directory_takes_a_slot() {
+        assert!(!shell_pane_needs_no_slot(
+            "shell",
+            "/tmp/other",
+            "/tmp/session"
+        ));
+    }
+
+    #[test]
+    fn an_agent_pane_always_takes_a_slot() {
+        assert!(!shell_pane_needs_no_slot(
+            "claude",
+            "/tmp/session",
+            "/tmp/session"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -3490,7 +3586,10 @@ mod tests {
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
 
-        let cmd = inst.build_extra_pane_command("codex").unwrap().command;
+        let cmd = inst
+            .build_extra_pane_command("codex", &inst.project_path)
+            .unwrap()
+            .command;
         assert!(
             cmd.contains("pre-register-codex-pane"),
             "expected pane pre-registration, got {cmd}"
@@ -3507,7 +3606,10 @@ mod tests {
         inst.tool = "claude".to_string();
         inst.cross_agent_team = true;
 
-        let cmd = inst.build_extra_pane_command("claude").unwrap().command;
+        let cmd = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap()
+            .command;
         assert!(
             cmd.contains("--dangerously-load-development-channels"),
             "expected dev-channels flag, got {cmd}"
@@ -3523,7 +3625,10 @@ mod tests {
         inst.agent_session_id = Some("preallocated-id".to_string());
         inst.xats_identity_key = Some("instance-key".to_string());
 
-        let cmd = inst.build_extra_pane_command("claude").unwrap().command;
+        let cmd = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap()
+            .command;
         assert!(
             !cmd.contains("--instance-override"),
             "override belongs to the instance's own pane, got {cmd}"
@@ -3546,7 +3651,10 @@ mod tests {
         inst.command = "codex --instance-override".to_string();
         inst.xats_identity_key = Some("instance-key".to_string());
 
-        let cmd = inst.build_extra_pane_command("codex").unwrap().command;
+        let cmd = inst
+            .build_extra_pane_command("codex", &inst.project_path)
+            .unwrap()
+            .command;
         assert!(
             !cmd.contains("--instance-override"),
             "the bootstrap must not relaunch the instance's own program, got {cmd}"
@@ -3564,7 +3672,10 @@ mod tests {
         std::env::set_var("SHELL", "/bin/zsh");
 
         let inst = Instance::new("test", "/tmp/project path/it's here");
-        let command = inst.build_extra_pane_command("shell").unwrap().command;
+        let command = inst
+            .build_extra_pane_command("shell", &inst.project_path)
+            .unwrap()
+            .command;
         let escaped_dir = shell_escape(&inst.project_path).replace('\'', "'\\''");
 
         assert!(command.starts_with("bash -lc '"));
@@ -3587,7 +3698,10 @@ mod tests {
 
         let mut inst = Instance::new("test", "/tmp/project");
         inst.tool = "claude".to_string();
-        let command = inst.build_extra_pane_command("claude").unwrap().command;
+        let command = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap()
+            .command;
 
         assert!(command.contains("stty susp undef; exec env claude"));
         assert!(!command.contains("cd "));
@@ -4177,7 +4291,9 @@ mod tests {
         inst.ensure_xats_identity_key();
         let instance_key = inst.xats_identity_key.clone().unwrap();
 
-        let launch = inst.build_extra_pane_command("claude").unwrap();
+        let launch = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap();
 
         assert!(
             !launch.identity_key.is_empty(),
@@ -4202,13 +4318,76 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(shell_env)]
+    fn extra_shell_pane_cds_to_its_own_directory_not_the_session_s() {
+        let original_shell = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", "/bin/zsh");
+
+        let inst = Instance::new("test", "/tmp/session dir");
+        let command = inst
+            .build_extra_pane_command("shell", "/tmp/other dir")
+            .unwrap()
+            .command;
+
+        assert!(
+            command.contains(&shell_escape("/tmp/other dir").replace('\'', "'\\''")),
+            "got: {command}"
+        );
+        assert!(
+            !command.contains("session dir"),
+            "a login shell that resets the directory must not land in the session's, got: {command}"
+        );
+
+        match original_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    /// The CLI can now name a tool other than the session's. Building it as a
+    /// non-primary pane is what keeps the instance's own launch context out of
+    /// it; the tool name alone must not re-open that door.
+    #[test]
+    fn a_named_tool_does_not_pick_up_the_instance_s_launch_context() {
+        let mut inst = claude_xats_instance();
+        inst.command = "claude --instance-override".to_string();
+        inst.agent_session_id = Some("pre-allocated-id".to_string());
+        inst.xats_identity_key = Some("instance-key".to_string());
+
+        let launch = inst
+            .build_extra_pane_command("codex", &inst.project_path)
+            .unwrap();
+
+        assert!(
+            !launch.command.contains("--instance-override"),
+            "got: {}",
+            launch.command
+        );
+        assert!(
+            !launch.command.contains("pre-allocated-id"),
+            "got: {}",
+            launch.command
+        );
+        assert!(
+            !launch.command.contains("instance-key"),
+            "got: {}",
+            launch.command
+        );
+        assert_ne!(launch.identity_key, "instance-key");
+    }
+
+    #[test]
     fn each_extra_pane_gets_its_own_key() {
         // Launch is the only moment at which a second pane sharing an identity is
         // preventable, so the freshness is asserted rather than assumed.
         let inst = claude_xats_instance();
 
-        let first = inst.build_extra_pane_command("claude").unwrap();
-        let second = inst.build_extra_pane_command("claude").unwrap();
+        let first = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap();
+        let second = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap();
 
         assert_ne!(first.identity_key, second.identity_key);
     }
@@ -4220,7 +4399,9 @@ mod tests {
         // pane's recorded start command, which is a property of this injection
         // route for every pane, primary included, and is out of scope here.
         let inst = codex_xats_instance();
-        let launch = inst.build_extra_pane_command("codex").unwrap();
+        let launch = inst
+            .build_extra_pane_command("codex", &inst.project_path)
+            .unwrap();
         let marker = format!("XATS_IDENTITY_KEY='{}'", launch.identity_key);
 
         let argv = launch
@@ -4240,7 +4421,9 @@ mod tests {
         let mut inst = claude_xats_instance();
         inst.cross_agent_team = false;
 
-        let launch = inst.build_extra_pane_command("claude").unwrap();
+        let launch = inst
+            .build_extra_pane_command("claude", &inst.project_path)
+            .unwrap();
 
         assert!(launch.identity_key.is_empty());
         assert!(
@@ -4257,7 +4440,9 @@ mod tests {
         // mint a key for.
         let inst = claude_xats_instance();
 
-        let launch = inst.build_extra_pane_command("shell").unwrap();
+        let launch = inst
+            .build_extra_pane_command("shell", &inst.project_path)
+            .unwrap();
 
         assert!(launch.identity_key.is_empty());
         assert!(

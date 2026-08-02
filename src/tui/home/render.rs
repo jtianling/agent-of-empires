@@ -96,6 +96,10 @@ impl HomeView {
             dialog.render(frame, area, theme);
         }
 
+        if let Some(dialog) = &self.add_pane_dialog {
+            dialog.render(frame, area, theme);
+        }
+
         if let Some(dialog) = &self.confirm_dialog {
             dialog.render(frame, area, theme);
         }

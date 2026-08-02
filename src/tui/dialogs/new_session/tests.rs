@@ -29,13 +29,20 @@ fn multi_tool_dialog() -> NewSessionDialog {
     NewSessionDialog::new_with_tools(vec!["claude", "opencode"], TEST_PATH.to_string())
 }
 
+/// Field indices for the dialog's current conditional layout. Tests name the
+/// field they mean through this rather than hardcoding an index, so adding a
+/// conditional field cannot silently change which field a test was focusing.
+fn fields(dialog: &NewSessionDialog) -> layout::FieldLayout {
+    dialog.field_layout()
+}
+
 #[test]
 fn test_initial_state() {
     let dialog = single_tool_dialog();
     assert_eq!(dialog.title.value(), "");
     assert_eq!(dialog.path.value(), TEST_PATH);
     assert_eq!(dialog.group.value(), "");
-    assert_eq!(dialog.focused_field, 0);
+    assert_eq!(dialog.focused_field, fields(&dialog).title);
     assert_eq!(dialog.tool_index, 0);
     assert_eq!(dialog.profile, "default");
 }
@@ -85,28 +92,22 @@ fn test_enter_preserves_custom_title() {
 #[test]
 fn test_tab_cycles_fields_single_tool() {
     let mut dialog = single_tool_dialog();
-    assert_eq!(dialog.focused_field, 0); // title (single profile, no profile field)
+    let f = fields(&dialog);
+    assert_eq!(dialog.focused_field, f.title);
+    assert_eq!(f.tool, layout::ABSENT, "single tool is not focusable");
 
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 1); // path
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 2); // right pane
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 3); // yolo mode
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // cross agent team
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // worktree branch
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // group
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 0); // wrap to start
+    for expected in [
+        f.path,
+        f.right_pane,
+        f.yolo,
+        f.cross_agent_team,
+        f.worktree,
+        f.group,
+        f.title,
+    ] {
+        dialog.handle_key(key(KeyCode::Tab));
+        assert_eq!(dialog.focused_field, expected);
+    }
 }
 
 #[test]
@@ -115,94 +116,71 @@ fn test_tab_cycles_fields_single_tool_with_worktree() {
     // so the main form has the same tab stops as without worktree.
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature".to_string());
-    assert_eq!(dialog.focused_field, 0); // title
+    let f = fields(&dialog);
+    assert_eq!(dialog.focused_field, f.title);
+    assert_ne!(f.new_branch, layout::ABSENT, "worktree shows new branch");
 
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 1); // path
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 2); // right pane
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 3); // yolo mode
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // cross agent team
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // worktree branch
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // new branch checkbox (now visible)
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 7); // group
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 0); // wrap to start
+    for expected in [
+        f.path,
+        f.right_pane,
+        f.yolo,
+        f.cross_agent_team,
+        f.worktree,
+        f.new_branch,
+        f.group,
+        f.title,
+    ] {
+        dialog.handle_key(key(KeyCode::Tab));
+        assert_eq!(dialog.focused_field, expected);
+    }
 }
 
 #[test]
 fn test_tab_cycles_fields_multi_tool() {
     let mut dialog = multi_tool_dialog();
-    assert_eq!(dialog.focused_field, 0); // title
+    let f = fields(&dialog);
+    assert_eq!(dialog.focused_field, f.title);
+    assert_ne!(f.tool, layout::ABSENT, "multiple tools are focusable");
 
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 1); // path
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 2); // tool selection
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 3); // right pane
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 4); // yolo mode
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 5); // cross agent team
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 6); // worktree branch
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 7); // group
-
-    dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 0); // wrap to start (no new_branch without worktree)
+    for expected in [
+        f.path,
+        f.tool,
+        f.right_pane,
+        f.yolo,
+        f.cross_agent_team,
+        f.worktree,
+        f.group,
+        f.title,
+    ] {
+        dialog.handle_key(key(KeyCode::Tab));
+        assert_eq!(dialog.focused_field, expected);
+    }
 }
 
 #[test]
 fn test_backtab_cycles_fields_reverse() {
     let mut dialog = single_tool_dialog();
-    assert_eq!(dialog.focused_field, 0); // title
+    let f = fields(&dialog);
+    assert_eq!(dialog.focused_field, f.title);
 
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 6); // group (last field without worktree/docker)
-
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 5); // worktree branch
-
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 4); // cross agent team
-
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 3); // yolo mode
-
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 2); // right pane
-
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 1); // path
-
-    dialog.handle_key(shift_key(KeyCode::BackTab));
-    assert_eq!(dialog.focused_field, 0); // title
+    for expected in [
+        f.group,
+        f.worktree,
+        f.cross_agent_team,
+        f.yolo,
+        f.right_pane,
+        f.path,
+        f.title,
+    ] {
+        dialog.handle_key(shift_key(KeyCode::BackTab));
+        assert_eq!(dialog.focused_field, expected);
+    }
 }
 
 #[test]
 fn test_char_input_to_title() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 0; // title
+    dialog.focused_field = fields(&dialog).title;
     dialog.handle_key(key(KeyCode::Char('H')));
     dialog.handle_key(key(KeyCode::Char('i')));
     assert_eq!(dialog.title.value(), "Hi");
@@ -211,7 +189,7 @@ fn test_char_input_to_title() {
 #[test]
 fn test_char_input_to_path() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
+    dialog.focused_field = fields(&dialog).path;
     dialog.handle_key(key(KeyCode::Char('/')));
     dialog.handle_key(key(KeyCode::Char('a')));
     assert_eq!(dialog.path.value(), format!("{TEST_PATH}/a"));
@@ -224,11 +202,11 @@ fn test_ghost_text_appears_for_single_match() {
     fs::write(tmp.path().join("project-file"), "not a directory").expect("failed to write file");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/pro", tmp.path().display()));
-    dialog.recompute_path_ghost();
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/pro", tmp.path().display()));
+    dialog.path.recompute_ghost();
 
-    assert_eq!(dialog.ghost_text(), Some("ject-alpha/"));
+    assert_eq!(dialog.path.ghost_text(), Some("ject-alpha/"));
 }
 
 #[test]
@@ -238,11 +216,11 @@ fn test_ghost_text_shows_common_prefix_for_multiple_matches() {
     fs::create_dir(tmp.path().join("client-web")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/cl", tmp.path().display()));
-    dialog.recompute_path_ghost();
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/cl", tmp.path().display()));
+    dialog.path.recompute_ghost();
 
-    assert_eq!(dialog.ghost_text(), Some("ient-"));
+    assert_eq!(dialog.path.ghost_text(), Some("ient-"));
 }
 
 #[test]
@@ -250,11 +228,11 @@ fn test_ghost_text_none_when_no_matches() {
     let tmp = tempfile::tempdir().expect("failed to create temp dir");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/zzz_nonexistent", tmp.path().display()));
-    dialog.recompute_path_ghost();
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/zzz_nonexistent", tmp.path().display()));
+    dialog.path.recompute_ghost();
 
-    assert_eq!(dialog.ghost_text(), None);
+    assert_eq!(dialog.path.ghost_text(), None);
 }
 
 #[test]
@@ -263,11 +241,11 @@ fn test_ghost_shows_slash_for_exact_directory_match() {
     fs::create_dir(tmp.path().join("alpha")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/alpha", tmp.path().display()));
-    dialog.recompute_path_ghost();
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/alpha", tmp.path().display()));
+    dialog.path.recompute_ghost();
 
-    assert_eq!(dialog.ghost_text(), Some("/"));
+    assert_eq!(dialog.path.ghost_text(), Some("/"));
 }
 
 #[test]
@@ -276,10 +254,10 @@ fn test_right_arrow_accepts_ghost_text() {
     fs::create_dir(tmp.path().join("project-alpha")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/pro", tmp.path().display()));
-    dialog.recompute_path_ghost();
-    assert!(dialog.ghost_text().is_some());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/pro", tmp.path().display()));
+    dialog.path.recompute_ghost();
+    assert!(dialog.path.ghost_text().is_some());
 
     dialog.handle_key(key(KeyCode::Right));
 
@@ -295,10 +273,10 @@ fn test_end_key_accepts_ghost_text() {
     fs::create_dir(tmp.path().join("project-alpha")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/pro", tmp.path().display()));
-    dialog.recompute_path_ghost();
-    assert!(dialog.ghost_text().is_some());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/pro", tmp.path().display()));
+    dialog.path.recompute_ghost();
+    assert!(dialog.path.ghost_text().is_some());
 
     dialog.handle_key(key(KeyCode::End));
 
@@ -311,14 +289,14 @@ fn test_end_key_accepts_ghost_text() {
 #[test]
 fn test_right_arrow_at_mid_input_moves_cursor_normally() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new("/tmp/alpha/beta".to_string());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new("/tmp/alpha/beta".to_string());
     // Move cursor to start
     dialog.handle_key(ctrl_key(KeyCode::Char('a')));
-    let cursor_before = dialog.path.visual_cursor();
+    let cursor_before = dialog.path.cursor();
 
     dialog.handle_key(key(KeyCode::Right));
-    let cursor_after = dialog.path.visual_cursor();
+    let cursor_after = dialog.path.cursor();
 
     // Cursor should have moved right by 1 (normal behavior)
     assert_eq!(cursor_after, cursor_before + 1);
@@ -331,10 +309,10 @@ fn test_ghost_recomputes_after_accepting() {
     fs::create_dir(tmp.path().join("alpha").join("inner")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/alp", tmp.path().display()));
-    dialog.recompute_path_ghost();
-    assert_eq!(dialog.ghost_text(), Some("ha/"));
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/alp", tmp.path().display()));
+    dialog.path.recompute_ghost();
+    assert_eq!(dialog.path.ghost_text(), Some("ha/"));
 
     dialog.handle_key(key(KeyCode::Right)); // accept ghost
 
@@ -343,7 +321,7 @@ fn test_ghost_recomputes_after_accepting() {
         format!("{}/alpha/", tmp.path().display())
     );
     // Ghost should have been recomputed for the next level
-    assert_eq!(dialog.ghost_text(), Some("inner/"));
+    assert_eq!(dialog.path.ghost_text(), Some("inner/"));
 }
 
 #[test]
@@ -352,15 +330,15 @@ fn test_tab_always_navigates_from_path_field() {
     fs::create_dir(tmp.path().join("project-alpha")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/pro", tmp.path().display()));
-    dialog.recompute_path_ghost();
-    assert!(dialog.ghost_text().is_some());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/pro", tmp.path().display()));
+    dialog.path.recompute_ghost();
+    assert!(dialog.path.ghost_text().is_some());
 
     dialog.handle_key(key(KeyCode::Tab));
 
     // Tab should navigate to next field, not accept ghost
-    assert_eq!(dialog.focused_field, 2); // right pane
+    assert_eq!(dialog.focused_field, fields(&dialog).right_pane);
 }
 
 #[test]
@@ -369,14 +347,14 @@ fn test_ghost_cleared_when_leaving_path_field() {
     fs::create_dir(tmp.path().join("project-alpha")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/pro", tmp.path().display()));
-    dialog.recompute_path_ghost();
-    assert!(dialog.ghost_text().is_some());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/pro", tmp.path().display()));
+    dialog.path.recompute_ghost();
+    assert!(dialog.path.ghost_text().is_some());
 
     dialog.handle_key(key(KeyCode::Tab));
 
-    assert_eq!(dialog.ghost_text(), None);
+    assert_eq!(dialog.path.ghost_text(), None);
 }
 
 #[test]
@@ -385,30 +363,31 @@ fn test_ghost_not_shown_when_cursor_not_at_end() {
     fs::create_dir(tmp.path().join("alpha")).expect("failed to create directory");
 
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new(format!("{}/alp", tmp.path().display()));
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new(format!("{}/alp", tmp.path().display()));
     // Move cursor to start
     dialog.handle_key(ctrl_key(KeyCode::Char('a')));
-    dialog.recompute_path_ghost();
+    dialog.path.recompute_ghost();
 
-    assert_eq!(dialog.ghost_text(), None);
+    assert_eq!(dialog.path.ghost_text(), None);
 }
 
 #[test]
 fn test_invalid_path_flash_expires_after_tick() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path_invalid_flash_until =
-        Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+    dialog.focused_field = fields(&dialog).path;
+    dialog
+        .path
+        .flash_invalid_until(std::time::Instant::now() - std::time::Duration::from_millis(1));
     assert!(dialog.tick());
-    assert!(!dialog.is_path_invalid_flash_active());
+    assert!(!dialog.path.is_invalid_flash_active());
 }
 
 #[test]
 fn test_ctrl_left_jumps_to_previous_path_segment() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new("/tmp/alpha/beta".to_string());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new("/tmp/alpha/beta".to_string());
 
     dialog.handle_key(ctrl_key(KeyCode::Left));
     dialog.handle_key(key(KeyCode::Char('X')));
@@ -419,8 +398,8 @@ fn test_ctrl_left_jumps_to_previous_path_segment() {
 #[test]
 fn test_alt_b_jumps_to_previous_path_segment() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new("/tmp/alpha/beta".to_string());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new("/tmp/alpha/beta".to_string());
 
     dialog.handle_key(alt_key(KeyCode::Char('b')));
     dialog.handle_key(key(KeyCode::Char('X')));
@@ -431,8 +410,8 @@ fn test_alt_b_jumps_to_previous_path_segment() {
 #[test]
 fn test_ctrl_a_jumps_to_start_of_path() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 1; // path
-    dialog.path = Input::new("/tmp/alpha/beta".to_string());
+    dialog.focused_field = fields(&dialog).path;
+    dialog.path = PathField::new("/tmp/alpha/beta".to_string());
 
     dialog.handle_key(ctrl_key(KeyCode::Char('a')));
     dialog.handle_key(key(KeyCode::Char('X')));
@@ -443,7 +422,7 @@ fn test_ctrl_a_jumps_to_start_of_path() {
 #[test]
 fn test_char_input_to_group() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 6; // group (single tool: title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4, worktree=5, group=6)
+    dialog.focused_field = fields(&dialog).group;
     dialog.handle_key(key(KeyCode::Char('w')));
     dialog.handle_key(key(KeyCode::Char('o')));
     dialog.handle_key(key(KeyCode::Char('r')));
@@ -454,7 +433,7 @@ fn test_char_input_to_group() {
 #[test]
 fn test_backspace_removes_char() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 0; // title
+    dialog.focused_field = fields(&dialog).title;
     dialog.title = Input::new("Hello".to_string());
     dialog.handle_key(key(KeyCode::Backspace));
     assert_eq!(dialog.title.value(), "Hell");
@@ -463,7 +442,7 @@ fn test_backspace_removes_char() {
 #[test]
 fn test_backspace_on_empty_field() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 0; // title
+    dialog.focused_field = fields(&dialog).title;
     dialog.handle_key(key(KeyCode::Backspace));
     assert_eq!(dialog.title.value(), "");
 }
@@ -471,7 +450,7 @@ fn test_backspace_on_empty_field() {
 #[test]
 fn test_tool_selection_left_right() {
     let mut dialog = multi_tool_dialog();
-    dialog.focused_field = 2; // tool field (single profile: title=0, path=1, tool=2)
+    dialog.focused_field = fields(&dialog).tool;
     assert_eq!(dialog.tool_index, 0);
 
     dialog.handle_key(key(KeyCode::Right));
@@ -487,7 +466,7 @@ fn test_tool_selection_left_right() {
 #[test]
 fn test_tool_selection_space() {
     let mut dialog = multi_tool_dialog();
-    dialog.focused_field = 2; // tool field
+    dialog.focused_field = fields(&dialog).tool;
     assert_eq!(dialog.tool_index, 0);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -500,7 +479,7 @@ fn test_tool_selection_space() {
 #[test]
 fn test_tool_selection_ignored_on_text_field() {
     let mut dialog = multi_tool_dialog();
-    dialog.focused_field = 0; // title
+    dialog.focused_field = fields(&dialog).title;
     dialog.handle_key(key(KeyCode::Char(' ')));
     assert_eq!(dialog.title.value(), " ");
     assert_eq!(dialog.tool_index, 0);
@@ -509,7 +488,7 @@ fn test_tool_selection_ignored_on_text_field() {
 #[test]
 fn test_tool_selection_ignored_single_tool() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 2; // right_pane in single-tool mode (tool not interactive)
+    dialog.focused_field = fields(&dialog).right_pane;
     dialog.handle_key(key(KeyCode::Left));
     assert_eq!(dialog.tool_index, 0);
 }
@@ -517,7 +496,7 @@ fn test_tool_selection_ignored_single_tool() {
 #[test]
 fn test_submit_with_selected_tool() {
     let mut dialog = multi_tool_dialog();
-    dialog.focused_field = 2; // tool field
+    dialog.focused_field = fields(&dialog).tool;
     dialog.handle_key(key(KeyCode::Right));
     dialog.title = Input::new("Test".to_string());
 
@@ -540,7 +519,7 @@ fn test_unknown_key_continues() {
 #[test]
 fn test_error_clears_on_input() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 0; // title
+    dialog.focused_field = fields(&dialog).title;
     dialog.error_message = Some("Some error".to_string());
 
     dialog.handle_key(key(KeyCode::Char('a')));
@@ -567,8 +546,7 @@ fn test_new_branch_checkbox_default_true() {
 fn test_new_branch_checkbox_toggle() {
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature-branch".to_string());
-    // new_branch checkbox: title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4, worktree=5, new_branch=6
-    dialog.focused_field = 6;
+    dialog.focused_field = fields(&dialog).new_branch;
     assert!(dialog.create_new_branch);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -582,7 +560,7 @@ fn test_new_branch_checkbox_toggle() {
 fn test_submit_respects_create_new_branch() {
     let mut dialog = single_tool_dialog();
     dialog.worktree_branch = Input::new("feature-branch".to_string());
-    dialog.focused_field = 6; // new_branch
+    dialog.focused_field = fields(&dialog).new_branch;
     dialog.handle_key(key(KeyCode::Char(' '))); // Toggle off
 
     let result = dialog.handle_key(key(KeyCode::Enter));
@@ -597,18 +575,16 @@ fn test_submit_respects_create_new_branch() {
 #[test]
 fn test_new_branch_field_hidden_without_worktree() {
     let mut dialog = single_tool_dialog();
-    assert_eq!(dialog.focused_field, 0);
+    let f = fields(&dialog);
+    assert_eq!(f.new_branch, layout::ABSENT);
+    assert_eq!(dialog.focused_field, f.title);
 
-    // Tab: title(0) -> path(1) -> right_pane(2) -> yolo(3) -> cross_agent_team(4) -> worktree(5) -> group(6) -> wrap
-    dialog.handle_key(key(KeyCode::Tab)); // 1 (path)
-    dialog.handle_key(key(KeyCode::Tab)); // 2 (right pane)
-    dialog.handle_key(key(KeyCode::Tab)); // 3 (yolo)
-    dialog.handle_key(key(KeyCode::Tab)); // 4 (cross agent team)
-    dialog.handle_key(key(KeyCode::Tab)); // 5 (worktree)
-    dialog.handle_key(key(KeyCode::Tab)); // 6 (group)
-    assert_eq!(dialog.focused_field, 6);
-    dialog.handle_key(key(KeyCode::Tab)); // Should wrap to 0
-    assert_eq!(dialog.focused_field, 0);
+    for _ in 0..(f.count - 1) {
+        dialog.handle_key(key(KeyCode::Tab));
+    }
+    assert_eq!(dialog.focused_field, f.group);
+    dialog.handle_key(key(KeyCode::Tab));
+    assert_eq!(dialog.focused_field, f.title);
 }
 
 #[test]
@@ -633,18 +609,18 @@ fn test_tab_skips_sandbox_options_in_main_form() {
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
 
-    // With sandbox enabled, sandbox sub-options are in separate mode now.
-    // Main form: title(0), path(1), tool(2), right_pane(3), yolo(4), worktree(5), sandbox(6), group(7)
-    for _ in 0..6 {
+    // With sandbox enabled, sandbox sub-options are in a separate mode.
+    let f = fields(&dialog);
+    for _ in 0..(f.count - 2) {
         dialog.handle_key(key(KeyCode::Tab));
     }
-    assert_eq!(dialog.focused_field, 6); // sandbox field
+    assert_eq!(dialog.focused_field, f.sandbox);
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 7); // group field (no sandbox sub-options inline)
+    assert_eq!(dialog.focused_field, f.group);
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 0); // wrap to start
+    assert_eq!(dialog.focused_field, f.title);
 }
 
 #[test]
@@ -653,19 +629,19 @@ fn test_tab_skips_sandbox_when_disabled() {
     dialog.docker_available = true;
     dialog.sandbox_enabled = false;
 
-    // claude + docker + no sandbox shows cross_agent_team:
-    // title(0), path(1), tool(2), right_pane(3), yolo(4), cross_agent_team(5),
-    // worktree(6), sandbox(7), group(8)
-    for _ in 0..7 {
+    // claude + docker + no sandbox also shows the cross agent team checkbox.
+    let f = fields(&dialog);
+    assert_ne!(f.cross_agent_team, layout::ABSENT);
+    for _ in 0..(f.count - 2) {
         dialog.handle_key(key(KeyCode::Tab));
     }
-    assert_eq!(dialog.focused_field, 7); // sandbox field
+    assert_eq!(dialog.focused_field, f.sandbox);
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 8); // group field
+    assert_eq!(dialog.focused_field, f.group);
 
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.focused_field, 0); // wrap to start
+    assert_eq!(dialog.focused_field, f.title);
 }
 
 #[test]
@@ -774,7 +750,7 @@ fn test_yolo_mode_toggle() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
-    dialog.focused_field = 4; // yolo mode field (title=0, path=1, tool=2, right_pane=3, yolo=4)
+    dialog.focused_field = fields(&dialog).yolo;
     assert!(!dialog.yolo_mode);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -826,8 +802,7 @@ fn test_disabling_sandbox_does_not_reset_yolo_mode() {
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
     dialog.yolo_mode = true;
-    // sandbox field: title=0, path=1, tool=2, right_pane=3, yolo=4, worktree=5, sandbox=6
-    dialog.focused_field = 6;
+    dialog.focused_field = fields(&dialog).sandbox;
 
     dialog.handle_key(key(KeyCode::Char(' ')));
     assert!(!dialog.sandbox_enabled);
@@ -913,7 +888,30 @@ fn test_profile_override_beats_global_default_tool() {
     assert_eq!(dialog.available_tools[dialog.tool_index], "opencode");
 }
 
-// --- confirm_create_dir tests ---
+// --- create-directory confirmation tests ---
+
+/// Stage the confirmation the way Enter would, with `yes` preselected.
+fn stage_create_dirs_confirm(dialog: &mut NewSessionDialog, yes: bool) {
+    dialog.confirm_create_dirs = Some(CreateDirsConfirm {
+        dirs: dialog.missing_directories(),
+        yes_selected: yes,
+    });
+}
+
+fn confirm_selection(dialog: &NewSessionDialog) -> Option<bool> {
+    dialog
+        .confirm_create_dirs
+        .as_ref()
+        .map(|confirm| confirm.yes_selected)
+}
+
+fn confirm_dirs(dialog: &NewSessionDialog) -> Vec<String> {
+    dialog
+        .confirm_create_dirs
+        .as_ref()
+        .map(|confirm| confirm.dirs.clone())
+        .unwrap_or_default()
+}
 
 fn nonexistent_dialog() -> NewSessionDialog {
     NewSessionDialog::new_with_tools(vec!["claude"], "/__aoe_nonexistent__/project".to_string())
@@ -924,7 +922,7 @@ fn test_enter_with_nonexistent_path_enters_confirm() {
     let mut dialog = nonexistent_dialog();
     let result = dialog.handle_key(key(KeyCode::Enter));
     assert!(matches!(result, DialogResult::Continue));
-    assert_eq!(dialog.confirm_create_dir, Some(false));
+    assert_eq!(confirm_selection(&dialog), Some(false));
 }
 
 #[test]
@@ -934,53 +932,53 @@ fn test_enter_with_existing_path_submits_directly() {
         NewSessionDialog::new_with_tools(vec!["claude"], tmp.path().to_string_lossy().to_string());
     let result = dialog.handle_key(key(KeyCode::Enter));
     assert!(matches!(result, DialogResult::Submit(_)));
-    assert!(dialog.confirm_create_dir.is_none());
+    assert!(dialog.confirm_create_dirs.is_none());
 }
 
 #[test]
 fn test_confirm_esc_cancels() {
     let mut dialog = nonexistent_dialog();
-    dialog.confirm_create_dir = Some(false);
+    stage_create_dirs_confirm(&mut dialog, false);
     let result = dialog.handle_key(key(KeyCode::Esc));
     assert!(matches!(result, DialogResult::Continue));
-    assert!(dialog.confirm_create_dir.is_none());
+    assert!(dialog.confirm_create_dirs.is_none());
     assert_eq!(dialog.focused_field, dialog.path_field());
 }
 
 #[test]
 fn test_confirm_n_cancels() {
     let mut dialog = nonexistent_dialog();
-    dialog.confirm_create_dir = Some(true);
+    stage_create_dirs_confirm(&mut dialog, true);
     dialog.handle_key(key(KeyCode::Char('n')));
-    assert!(dialog.confirm_create_dir.is_none());
+    assert!(dialog.confirm_create_dirs.is_none());
     assert_eq!(dialog.focused_field, dialog.path_field());
 }
 
 #[test]
 fn test_confirm_h_selects_yes() {
     let mut dialog = nonexistent_dialog();
-    dialog.confirm_create_dir = Some(false);
+    stage_create_dirs_confirm(&mut dialog, false);
     dialog.handle_key(key(KeyCode::Char('h')));
-    assert_eq!(dialog.confirm_create_dir, Some(true));
+    assert_eq!(confirm_selection(&dialog), Some(true));
 }
 
 #[test]
 fn test_confirm_l_selects_no() {
     let mut dialog = nonexistent_dialog();
-    dialog.confirm_create_dir = Some(true);
+    stage_create_dirs_confirm(&mut dialog, true);
     dialog.handle_key(key(KeyCode::Char('l')));
-    assert_eq!(dialog.confirm_create_dir, Some(false));
+    assert_eq!(confirm_selection(&dialog), Some(false));
 }
 
 #[test]
 fn test_confirm_tab_toggles() {
     let mut dialog = nonexistent_dialog();
-    dialog.confirm_create_dir = Some(false);
+    stage_create_dirs_confirm(&mut dialog, false);
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.confirm_create_dir, Some(true));
-    dialog.confirm_create_dir = Some(true);
+    assert_eq!(confirm_selection(&dialog), Some(true));
+    stage_create_dirs_confirm(&mut dialog, true);
     dialog.handle_key(key(KeyCode::Tab));
-    assert_eq!(dialog.confirm_create_dir, Some(false));
+    assert_eq!(confirm_selection(&dialog), Some(false));
 }
 
 #[test]
@@ -991,7 +989,7 @@ fn test_confirm_y_creates_dir_and_submits() {
 
     let mut dialog =
         NewSessionDialog::new_with_tools(vec!["claude"], new_path.to_string_lossy().to_string());
-    dialog.confirm_create_dir = Some(false);
+    stage_create_dirs_confirm(&mut dialog, false);
     let result = dialog.handle_key(key(KeyCode::Char('y')));
     assert!(matches!(result, DialogResult::Submit(_)));
     assert!(new_path.exists());
@@ -1004,7 +1002,7 @@ fn test_confirm_enter_yes_creates_dir_and_submits() {
 
     let mut dialog =
         NewSessionDialog::new_with_tools(vec!["claude"], new_path.to_string_lossy().to_string());
-    dialog.confirm_create_dir = Some(true);
+    stage_create_dirs_confirm(&mut dialog, true);
     let result = dialog.handle_key(key(KeyCode::Enter));
     assert!(matches!(result, DialogResult::Submit(_)));
     assert!(new_path.exists());
@@ -1013,10 +1011,10 @@ fn test_confirm_enter_yes_creates_dir_and_submits() {
 #[test]
 fn test_confirm_enter_no_cancels() {
     let mut dialog = nonexistent_dialog();
-    dialog.confirm_create_dir = Some(false);
+    stage_create_dirs_confirm(&mut dialog, false);
     let result = dialog.handle_key(key(KeyCode::Enter));
     assert!(matches!(result, DialogResult::Continue));
-    assert!(dialog.confirm_create_dir.is_none());
+    assert!(dialog.confirm_create_dirs.is_none());
     assert_eq!(dialog.focused_field, dialog.path_field());
 }
 
@@ -1026,11 +1024,11 @@ fn test_confirm_create_failure_shows_error() {
         vec!["claude"],
         "/proc/aoe_test_cannot_create".to_string(),
     );
-    dialog.confirm_create_dir = Some(true);
+    stage_create_dirs_confirm(&mut dialog, true);
     let result = dialog.handle_key(key(KeyCode::Char('y')));
     assert!(matches!(result, DialogResult::Continue));
     assert!(dialog.error_message.is_some());
-    assert!(dialog.confirm_create_dir.is_none());
+    assert!(dialog.confirm_create_dirs.is_none());
 }
 
 // --- Profile tests ---
@@ -1056,8 +1054,7 @@ fn test_ctrl_p_on_sandbox_enters_config_mode() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
-    // sandbox field: title=0, path=1, tool=2, right_pane=3, yolo=4, worktree=5, sandbox=6
-    dialog.focused_field = 6;
+    dialog.focused_field = fields(&dialog).sandbox;
 
     let result = dialog.handle_key(ctrl_key(KeyCode::Char('p')));
     assert!(matches!(result, DialogResult::Continue));
@@ -1070,7 +1067,7 @@ fn test_enter_on_sandbox_submits() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = true;
-    dialog.focused_field = 7; // group field (title=0, path=1, tool=2, right_pane=3, yolo=4, worktree=5, sandbox=6, group=7)
+    dialog.focused_field = fields(&dialog).group;
 
     let result = dialog.handle_key(key(KeyCode::Enter));
     // Enter should submit, not enter config mode
@@ -1083,7 +1080,7 @@ fn test_ctrl_p_on_disabled_sandbox_does_not_open_config() {
     let mut dialog = multi_tool_dialog();
     dialog.docker_available = true;
     dialog.sandbox_enabled = false;
-    dialog.focused_field = 7; // group field
+    dialog.focused_field = fields(&dialog).group;
 
     dialog.handle_key(ctrl_key(KeyCode::Char('p')));
     assert!(!dialog.sandbox_config_mode);
@@ -1161,8 +1158,7 @@ fn test_reuse_worktree_flag_false_when_not_confirmed() {
 #[test]
 fn test_reuse_worktree_confirmation_cleared_on_text_input() {
     let mut dialog = single_tool_dialog();
-    // worktree field: title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4, worktree=5
-    dialog.focused_field = 5;
+    dialog.focused_field = fields(&dialog).worktree;
     dialog.confirm_reuse_worktree = true;
     dialog.error_message = Some("Worktree exists".to_string());
 
@@ -1181,8 +1177,7 @@ fn test_right_pane_default_none() {
 #[test]
 fn test_right_pane_cycle_left_right() {
     let mut dialog = multi_tool_dialog();
-    // right pane field: title=0, path=1, tool=2, right_pane=3
-    dialog.focused_field = 3;
+    dialog.focused_field = fields(&dialog).right_pane;
     assert_eq!(dialog.right_pane_tool_index, 0); // none
 
     dialog.handle_key(key(KeyCode::Right));
@@ -1368,8 +1363,7 @@ fn test_cross_agent_team_default_from_config() {
 #[test]
 fn test_cross_agent_team_toggle_and_submit() {
     let mut dialog = NewSessionDialog::new_with_tools(vec!["codex"], TEST_PATH.to_string());
-    // title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4
-    dialog.focused_field = 4;
+    dialog.focused_field = fields(&dialog).cross_agent_team;
     assert!(!dialog.cross_agent_team);
 
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -1387,7 +1381,7 @@ fn test_cross_agent_team_toggle_and_submit() {
 #[test]
 fn test_codex_cross_agent_team_toggle_is_independent_of_yolo() {
     let mut dialog = NewSessionDialog::new_with_tools(vec!["codex"], TEST_PATH.to_string());
-    dialog.focused_field = 4;
+    dialog.focused_field = fields(&dialog).cross_agent_team;
     assert!(!dialog.yolo_mode);
     assert!(!dialog.cross_agent_team);
 
@@ -1396,7 +1390,7 @@ fn test_codex_cross_agent_team_toggle_is_independent_of_yolo() {
     assert!(!dialog.yolo_mode);
     assert!(dialog.cross_agent_team);
 
-    dialog.focused_field = 3;
+    dialog.focused_field = fields(&dialog).yolo;
     dialog.handle_key(key(KeyCode::Char(' ')));
 
     assert!(dialog.yolo_mode);
@@ -1406,26 +1400,26 @@ fn test_codex_cross_agent_team_toggle_is_independent_of_yolo() {
 #[test]
 fn test_left_right_navigates_between_yolo_and_cross_agent_team() {
     let mut dialog = single_tool_dialog();
-    // title=0, path=1, right_pane=2, yolo=3, cross_agent_team=4
-    dialog.focused_field = 3; // yolo
+    let f = fields(&dialog);
+    dialog.focused_field = f.yolo;
 
     dialog.handle_key(key(KeyCode::Right));
     assert_eq!(
-        dialog.focused_field, 4,
+        dialog.focused_field, f.cross_agent_team,
         "Right moves focus yolo -> cross agent teams"
     );
 
     dialog.handle_key(key(KeyCode::Left));
     assert_eq!(
-        dialog.focused_field, 3,
+        dialog.focused_field, f.yolo,
         "Left moves focus cross agent teams -> yolo"
     );
 
     dialog.handle_key(key(KeyCode::Right));
-    assert_eq!(dialog.focused_field, 4);
+    assert_eq!(dialog.focused_field, f.cross_agent_team);
     dialog.handle_key(key(KeyCode::Right));
     assert_eq!(
-        dialog.focused_field, 3,
+        dialog.focused_field, f.yolo,
         "Right from cross agent teams returns to yolo"
     );
 }
@@ -1433,16 +1427,20 @@ fn test_left_right_navigates_between_yolo_and_cross_agent_team() {
 #[test]
 fn test_space_toggles_not_navigates_on_yolo_row() {
     let mut dialog = single_tool_dialog();
-    dialog.focused_field = 3; // yolo
+    let f = fields(&dialog);
+    dialog.focused_field = f.yolo;
     let yolo_before = dialog.yolo_mode;
     dialog.handle_key(key(KeyCode::Char(' ')));
-    assert_eq!(dialog.focused_field, 3, "Space does not move focus");
+    assert_eq!(dialog.focused_field, f.yolo, "Space does not move focus");
     assert_ne!(dialog.yolo_mode, yolo_before, "Space toggles yolo");
 
-    dialog.focused_field = 4; // cross agent teams
+    dialog.focused_field = f.cross_agent_team;
     assert!(!dialog.cross_agent_team);
     dialog.handle_key(key(KeyCode::Char(' ')));
-    assert_eq!(dialog.focused_field, 4, "Space does not move focus");
+    assert_eq!(
+        dialog.focused_field, f.cross_agent_team,
+        "Space does not move focus"
+    );
     assert!(dialog.cross_agent_team, "Space toggles cross agent teams");
 }
 
@@ -1460,4 +1458,580 @@ fn test_cross_agent_team_not_submitted_for_non_claude() {
         }
         _ => panic!("Expected Submit"),
     }
+}
+
+// --- Field layout regression net ---
+//
+// Every conditional field the dialog gains rides on these: they assert that the
+// index the layout hands out for a field is the index whose key handling that
+// field actually answers, for each combination of conditional fields that can
+// be on screen at once.
+
+/// The fields the layout says are shown, in index order.
+fn shown_fields(dialog: &NewSessionDialog) -> Vec<usize> {
+    let f = fields(dialog);
+    let mut shown: Vec<usize> = [
+        f.title,
+        f.path,
+        f.tool,
+        f.right_pane,
+        f.right_pane_path,
+        f.yolo,
+        f.cross_agent_team,
+        f.worktree,
+        f.new_branch,
+        f.sandbox,
+        f.group,
+    ]
+    .into_iter()
+    .filter(|&index| index != layout::ABSENT)
+    .collect();
+    shown.sort_unstable();
+    shown
+}
+
+/// Tab from the first field through every field, recording where focus lands.
+fn tab_order(dialog: &mut NewSessionDialog) -> Vec<usize> {
+    dialog.focused_field = 0;
+    let count = fields(dialog).count;
+    let mut visited = vec![dialog.focused_field];
+    for _ in 1..count {
+        dialog.handle_key(key(KeyCode::Tab));
+        visited.push(dialog.focused_field);
+    }
+    visited
+}
+
+/// Focus each shown field in turn and send the key that field responds to,
+/// confirming the key reaches that field and not its neighbour. Every action is
+/// undone so the layout stays the one `fields()` reported.
+fn assert_each_field_answers_its_index(dialog: &mut NewSessionDialog, case: &str) {
+    let f = fields(dialog);
+
+    dialog.focused_field = f.title;
+    let title_before = dialog.title.value().to_string();
+    dialog.handle_key(key(KeyCode::Char('T')));
+    assert_eq!(
+        dialog.title.value(),
+        format!("{title_before}T"),
+        "{case}: title"
+    );
+
+    dialog.focused_field = f.path;
+    let path_before = dialog.path.value().to_string();
+    dialog.handle_key(key(KeyCode::Char('P')));
+    assert_eq!(
+        dialog.path.value(),
+        format!("{path_before}P"),
+        "{case}: path"
+    );
+
+    dialog.focused_field = f.group;
+    let group_before = dialog.group.value().to_string();
+    dialog.handle_key(key(KeyCode::Char('G')));
+    assert_eq!(
+        dialog.group.value(),
+        format!("{group_before}G"),
+        "{case}: group"
+    );
+
+    if f.tool != layout::ABSENT {
+        dialog.focused_field = f.tool;
+        let before = dialog.tool_index;
+        dialog.handle_key(key(KeyCode::Right));
+        assert_ne!(dialog.tool_index, before, "{case}: tool");
+        dialog.handle_key(key(KeyCode::Left));
+    }
+
+    dialog.focused_field = f.right_pane;
+    let right_pane_before = dialog.right_pane_tool_index;
+    dialog.handle_key(key(KeyCode::Right));
+    assert_ne!(
+        dialog.right_pane_tool_index, right_pane_before,
+        "{case}: right pane"
+    );
+    dialog.handle_key(key(KeyCode::Left));
+
+    if f.yolo != layout::ABSENT {
+        dialog.focused_field = f.yolo;
+        let before = dialog.yolo_mode;
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_ne!(dialog.yolo_mode, before, "{case}: yolo");
+        dialog.handle_key(key(KeyCode::Char(' ')));
+    }
+
+    if f.cross_agent_team != layout::ABSENT {
+        dialog.focused_field = f.cross_agent_team;
+        let before = dialog.cross_agent_team;
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_ne!(dialog.cross_agent_team, before, "{case}: cross agent team");
+        dialog.handle_key(key(KeyCode::Char(' ')));
+    }
+
+    if f.sandbox != layout::ABSENT {
+        dialog.focused_field = f.sandbox;
+        let before = dialog.sandbox_enabled;
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_ne!(dialog.sandbox_enabled, before, "{case}: sandbox");
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(dialog.sandbox_enabled, before, "{case}: sandbox restored");
+    }
+
+    if f.new_branch != layout::ABSENT {
+        dialog.focused_field = f.new_branch;
+        let before = dialog.create_new_branch;
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_ne!(dialog.create_new_branch, before, "{case}: new branch");
+        dialog.handle_key(key(KeyCode::Char(' ')));
+    }
+
+    // Last: typing here can make the new branch checkbox appear.
+    if f.worktree != layout::ABSENT {
+        dialog.focused_field = f.worktree;
+        let before = dialog.worktree_branch.value().to_string();
+        dialog.handle_key(key(KeyCode::Char('W')));
+        assert_eq!(
+            dialog.worktree_branch.value(),
+            format!("{before}W"),
+            "{case}: worktree"
+        );
+    }
+}
+
+fn assert_layout_is_consistent(dialog: &mut NewSessionDialog, case: &str) {
+    let shown = shown_fields(dialog);
+    let count = fields(dialog).count;
+    assert_eq!(
+        shown,
+        (0..count).collect::<Vec<_>>(),
+        "{case}: shown fields must be the contiguous range Tab walks"
+    );
+    assert_eq!(tab_order(dialog), shown, "{case}: tab order");
+    assert_each_field_answers_its_index(dialog, case);
+}
+
+#[test]
+fn test_field_layout_holds_for_existing_conditional_combinations() {
+    // No tool selector.
+    assert_layout_is_consistent(&mut single_tool_dialog(), "single tool");
+
+    // Tool selector shown.
+    assert_layout_is_consistent(&mut multi_tool_dialog(), "multi tool");
+
+    // Shell hides YOLO, Cross Agent Teams and the worktree fields.
+    let mut shell = NewSessionDialog::new_with_tools(vec!["shell"], TEST_PATH.to_string());
+    assert_eq!(fields(&shell).yolo, layout::ABSENT);
+    assert_eq!(fields(&shell).worktree, layout::ABSENT);
+    assert_layout_is_consistent(&mut shell, "shell");
+
+    // Shell on the left with an agent on the right brings YOLO back.
+    let mut shell_with_agent =
+        NewSessionDialog::new_with_tools(vec!["shell", "claude"], TEST_PATH.to_string());
+    shell_with_agent.right_pane_tool_index = 2; // claude
+    assert_ne!(fields(&shell_with_agent).yolo, layout::ABSENT);
+    assert_eq!(fields(&shell_with_agent).worktree, layout::ABSENT);
+    assert_layout_is_consistent(&mut shell_with_agent, "shell with agent right pane");
+
+    // Cross Agent Teams hidden for an unsupported tool.
+    let mut unsupported = NewSessionDialog::new_with_tools(vec!["opencode"], TEST_PATH.to_string());
+    assert_eq!(fields(&unsupported).cross_agent_team, layout::ABSENT);
+    assert_layout_is_consistent(&mut unsupported, "cross agent teams unavailable");
+
+    // Worktree branch set shows the new branch checkbox.
+    let mut worktree = single_tool_dialog();
+    worktree.worktree_branch = Input::new("feature".to_string());
+    assert_ne!(fields(&worktree).new_branch, layout::ABSENT);
+    assert_layout_is_consistent(&mut worktree, "worktree branch set");
+
+    // Docker available shows the sandbox checkbox.
+    let mut sandbox_available = multi_tool_dialog();
+    sandbox_available.docker_available = true;
+    assert_ne!(fields(&sandbox_available).sandbox, layout::ABSENT);
+    assert_layout_is_consistent(&mut sandbox_available, "sandbox available");
+
+    // Sandbox on hides Cross Agent Teams.
+    let mut sandboxed = multi_tool_dialog();
+    sandboxed.docker_available = true;
+    sandboxed.sandbox_enabled = true;
+    assert_eq!(fields(&sandboxed).cross_agent_team, layout::ABSENT);
+    assert_layout_is_consistent(&mut sandboxed, "sandbox enabled");
+}
+
+// --- Right Pane Path field ---
+
+#[test]
+fn test_right_pane_path_field_appears_with_a_right_pane_tool() {
+    let mut dialog = multi_tool_dialog();
+    assert_eq!(fields(&dialog).right_pane_path, layout::ABSENT);
+
+    dialog.focused_field = fields(&dialog).right_pane;
+    dialog.handle_key(key(KeyCode::Right));
+    let f = fields(&dialog);
+    assert_ne!(f.right_pane_path, layout::ABSENT);
+    assert_eq!(
+        f.right_pane_path,
+        f.right_pane + 1,
+        "the field sits directly below Right Pane"
+    );
+
+    dialog.handle_key(key(KeyCode::Left));
+    assert_eq!(fields(&dialog).right_pane_path, layout::ABSENT);
+}
+
+#[test]
+fn test_sandboxing_hides_the_right_pane_path_field_and_restores_it() {
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+    dialog.right_pane_tool_index = 1;
+    assert_ne!(fields(&dialog).right_pane_path, layout::ABSENT);
+
+    dialog.focused_field = fields(&dialog).sandbox;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(dialog.sandbox_enabled);
+    assert_eq!(fields(&dialog).right_pane_path, layout::ABSENT);
+
+    dialog.focused_field = fields(&dialog).sandbox;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(!dialog.sandbox_enabled);
+    assert_ne!(fields(&dialog).right_pane_path, layout::ABSENT);
+}
+
+#[test]
+fn test_hidden_right_pane_path_contributes_no_value() {
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+    dialog.right_pane_tool_index = 1;
+    dialog.right_pane_path = PathField::new("/tmp/elsewhere".to_string());
+    dialog.sandbox_enabled = true;
+
+    match dialog.handle_key(key(KeyCode::Enter)) {
+        DialogResult::Submit(data) => assert_eq!(
+            data.right_pane_path, None,
+            "a field that is not on screen must not reach the launch"
+        ),
+        _ => panic!("Expected Submit"),
+    }
+}
+
+#[test]
+fn test_empty_right_pane_path_submits_as_none() {
+    let mut dialog = multi_tool_dialog();
+    dialog.right_pane_tool_index = 1;
+
+    match dialog.handle_key(key(KeyCode::Enter)) {
+        DialogResult::Submit(data) => {
+            assert_eq!(data.right_pane_tool.as_deref(), Some("claude"));
+            assert_eq!(data.right_pane_path, None);
+        }
+        _ => panic!("Expected Submit"),
+    }
+}
+
+#[test]
+fn test_right_pane_path_is_submitted_when_set() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], tmp.path().to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+    dialog.right_pane_path = PathField::new(tmp.path().to_string_lossy().to_string());
+
+    match dialog.handle_key(key(KeyCode::Enter)) {
+        DialogResult::Submit(data) => assert_eq!(
+            data.right_pane_path.as_deref(),
+            Some(tmp.path().to_string_lossy().as_ref())
+        ),
+        _ => panic!("Expected Submit"),
+    }
+}
+
+/// Drive the open directory picker down into `picked` and select it, the way a
+/// user does: the listing is `./`, `../`, then the subdirectories, so two Downs
+/// land on the only subdirectory, the first Enter navigates into it and the
+/// second selects `./` there.
+fn pick_the_only_subdirectory(dialog: &mut NewSessionDialog) {
+    assert!(dialog.dir_picker.is_active(), "picker must be open");
+    dialog.handle_key(key(KeyCode::Down));
+    dialog.handle_key(key(KeyCode::Down));
+    dialog.handle_key(key(KeyCode::Enter));
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(
+        !dialog.dir_picker.is_active(),
+        "selecting a directory closes the picker"
+    );
+}
+
+#[test]
+fn test_ctrl_p_on_right_pane_path_targets_that_field() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let picked = tmp.path().join("picked");
+    fs::create_dir(&picked).expect("create dir");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], tmp.path().to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+    dialog.right_pane_path = PathField::new(tmp.path().to_string_lossy().to_string());
+    let session_path_before = dialog.path.value().to_string();
+
+    dialog.focused_field = fields(&dialog).right_pane_path;
+    dialog.handle_key(ctrl_key(KeyCode::Char('p')));
+    pick_the_only_subdirectory(&mut dialog);
+
+    assert_eq!(
+        dialog.right_pane_path.value(),
+        picked.to_string_lossy(),
+        "the selection is written into the field the picker was opened from"
+    );
+    assert_eq!(
+        dialog.path.value(),
+        session_path_before,
+        "the session path field is untouched"
+    );
+}
+
+#[test]
+fn test_ctrl_p_on_the_session_path_targets_that_field() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let picked = tmp.path().join("picked");
+    fs::create_dir(&picked).expect("create dir");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], tmp.path().to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+
+    dialog.focused_field = fields(&dialog).path;
+    dialog.handle_key(ctrl_key(KeyCode::Char('p')));
+    pick_the_only_subdirectory(&mut dialog);
+
+    assert_eq!(dialog.path.value(), picked.to_string_lossy());
+    assert_eq!(
+        dialog.right_pane_path.value(),
+        "",
+        "the right pane path field is untouched"
+    );
+}
+
+#[test]
+fn test_ghost_completion_works_in_the_right_pane_path_field() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    fs::create_dir(tmp.path().join("project-alpha")).expect("create dir");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], tmp.path().to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+    dialog.focused_field = fields(&dialog).right_pane_path;
+    dialog.right_pane_path = PathField::new(format!("{}/pro", tmp.path().display()));
+    dialog.right_pane_path.recompute_ghost();
+    assert_eq!(dialog.right_pane_path.ghost_text(), Some("ject-alpha/"));
+
+    dialog.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dialog.right_pane_path.value(),
+        format!("{}/project-alpha/", tmp.path().display())
+    );
+}
+
+// --- One confirmation covers every missing directory ---
+
+#[test]
+fn test_both_missing_directories_are_confirmed_together() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let session_dir = tmp.path().join("session");
+    let pane_dir = tmp.path().join("pane");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], session_dir.to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+    dialog.right_pane_path = PathField::new(pane_dir.to_string_lossy().to_string());
+
+    let result = dialog.handle_key(key(KeyCode::Enter));
+    assert!(matches!(result, DialogResult::Continue));
+    assert_eq!(
+        confirm_dirs(&dialog),
+        vec![
+            session_dir.to_string_lossy().to_string(),
+            pane_dir.to_string_lossy().to_string(),
+        ]
+    );
+
+    let result = dialog.handle_key(key(KeyCode::Char('y')));
+    assert!(matches!(result, DialogResult::Submit(_)));
+    assert!(session_dir.exists());
+    assert!(pane_dir.exists());
+}
+
+#[test]
+fn test_only_the_missing_directory_is_named() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let pane_dir = tmp.path().join("pane");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], tmp.path().to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+    dialog.right_pane_path = PathField::new(pane_dir.to_string_lossy().to_string());
+
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        confirm_dirs(&dialog),
+        vec![pane_dir.to_string_lossy().to_string()],
+        "an existing session path is not named"
+    );
+}
+
+#[test]
+fn test_declining_creates_no_directory_at_all() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let session_dir = tmp.path().join("session");
+    let pane_dir = tmp.path().join("pane");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude"], session_dir.to_string_lossy().to_string());
+    dialog.right_pane_tool_index = 1;
+    dialog.right_pane_path = PathField::new(pane_dir.to_string_lossy().to_string());
+
+    dialog.handle_key(key(KeyCode::Enter));
+    let result = dialog.handle_key(key(KeyCode::Char('n')));
+
+    assert!(matches!(result, DialogResult::Continue));
+    assert!(dialog.confirm_create_dirs.is_none());
+    assert!(!session_dir.exists(), "declining creates nothing");
+    assert!(!pane_dir.exists(), "not even the first of the two");
+}
+
+#[test]
+fn test_focus_follows_the_sandbox_checkbox_when_toggling_moves_it() {
+    // Sandboxing hides two conditional fields above the checkbox, so the
+    // checkbox's own index changes as it is toggled. Focus that stayed on the
+    // old index would silently land on a different field.
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+    dialog.right_pane_tool_index = 1;
+    dialog.focused_field = fields(&dialog).sandbox;
+
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(dialog.sandbox_enabled);
+    assert_eq!(dialog.focused_field, fields(&dialog).sandbox);
+
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(!dialog.sandbox_enabled);
+    assert_eq!(dialog.focused_field, fields(&dialog).sandbox);
+}
+
+// --- create_dir_tracked tests ---
+
+/// A dangling symlink reads as missing to `Path::exists` (which follows the
+/// link), so the dialog offers to create it; `create_dir` then reports
+/// AlreadyExists for the link itself. Treating that as success submits a path
+/// no pane can start in.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_is_not_mistaken_for_a_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let link = tmp.path().join("dangling");
+    std::os::unix::fs::symlink(tmp.path().join("no-such-target"), &link).unwrap();
+
+    assert!(!link.exists(), "precondition: it reads as missing");
+
+    let mut owned = Vec::new();
+    let err = super::create_dir_tracked(&link.to_string_lossy(), &mut owned)
+        .expect_err("a dangling symlink is not a usable directory");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        owned.is_empty(),
+        "nothing was created, nothing to roll back"
+    );
+}
+
+/// The same shape with a regular file, which is what a concurrent writer can
+/// leave at the final component while the confirmation is on screen.
+#[test]
+fn a_regular_file_at_the_final_component_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("parent").join("leaf");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"not a directory").unwrap();
+
+    let mut owned = Vec::new();
+    let err = super::create_dir_tracked(&target.to_string_lossy(), &mut owned)
+        .expect_err("a regular file is not a usable directory");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+/// Every level this call made is tracked, not just the one that was asked for,
+/// so a rollback undoes the parents it created too.
+#[test]
+fn every_created_level_is_tracked_for_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let nested = tmp.path().join("a").join("b").join("c");
+
+    let mut owned = Vec::new();
+    super::create_dir_tracked(&nested.to_string_lossy(), &mut owned).unwrap();
+
+    assert_eq!(owned.len(), 3, "a, b and c were all created: {owned:?}");
+    assert_eq!(owned.last().unwrap(), &nested);
+    assert!(
+        !owned.iter().any(|p| p == tmp.path()),
+        "the pre-existing temp dir is not ours to roll back"
+    );
+}
+
+/// An existing directory is not ours, so it must not enter the rollback list.
+#[test]
+fn a_pre_existing_directory_is_not_tracked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut owned = Vec::new();
+    super::create_dir_tracked(&tmp.path().to_string_lossy(), &mut owned).unwrap();
+    assert!(owned.is_empty());
+}
+
+#[test]
+fn an_empty_path_is_refused() {
+    let mut owned = Vec::new();
+    let err = super::create_dir_tracked("", &mut owned).expect_err("empty path");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+/// The mirror of the dangling-symlink case: a link that does resolve to a
+/// directory is a usable directory, and is not ours to roll back.
+#[test]
+#[cfg(unix)]
+fn a_symlink_to_a_real_directory_is_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("real");
+    std::fs::create_dir(&target).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let mut owned = Vec::new();
+    super::create_dir_tracked(&link.to_string_lossy(), &mut owned).unwrap();
+    assert!(owned.is_empty(), "nothing was created");
+}
+
+/// The parents created on the way to a component that turns out to be
+/// unusable must not survive: the helper reports the failure and the caller
+/// undoes exactly what was made.
+#[test]
+#[cfg(unix)]
+fn parents_created_before_a_failure_are_rolled_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("a").join("b");
+    let leaf = parent.join("dangling");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("no-such-target"), &leaf).unwrap();
+    std::fs::remove_dir_all(tmp.path().join("a")).ok();
+
+    // Rebuild with only the dangling leaf present under a fresh tree.
+    std::fs::create_dir_all(&parent).unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("no-such-target"), &leaf).unwrap();
+    let nested = leaf.join("deeper");
+
+    let mut owned = Vec::new();
+    let err = super::create_dir_tracked(&nested.to_string_lossy(), &mut owned)
+        .expect_err("the dangling component is not a directory");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+    // What the caller does with `owned`: undo it, outermost last.
+    for done in owned.iter().rev() {
+        std::fs::remove_dir(done).unwrap();
+    }
+    assert!(!nested.exists(), "nothing this call made survives");
 }

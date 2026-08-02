@@ -21,9 +21,9 @@ use crate::tmux::AvailableTools;
 use super::creation_poller::{CreationPoller, CreationRequest};
 use super::deletion_poller::DeletionPoller;
 use super::dialogs::{
-    ChangelogDialog, ConfirmDialog, ForkSessionDialog, GroupDeleteOptionsDialog, GroupRenameDialog,
-    HookTrustDialog, InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerDialog,
-    RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
+    AddPaneDialog, ChangelogDialog, ConfirmDialog, ForkSessionDialog, GroupDeleteOptionsDialog,
+    GroupRenameDialog, HookTrustDialog, InfoDialog, NewSessionData, NewSessionDialog,
+    ProfilePickerDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -86,6 +86,28 @@ pub(super) struct StableSessionIndexCache {
     pub(super) indices: HashMap<String, usize>,
 }
 
+/// A managed pane staged by session creation, launched once the session is up.
+#[derive(Clone)]
+pub struct PendingRightPane {
+    pub tool: String,
+    /// The directory the pane starts in. `None` means the session's own.
+    pub path: Option<String>,
+}
+
+impl PendingRightPane {
+    /// The directory this pane starts in, resolved against the session as it
+    /// exists now rather than as the dialog saw it.
+    ///
+    /// The fallback is late on purpose: a worktree-backed session's directory
+    /// is decided during creation, so a value snapshotted at submit would point
+    /// the pane at the original repository while the session went to the
+    /// worktree. A directory the user named is used as given, and is not
+    /// worktree-resolved, because it is not the session's repository.
+    pub fn working_dir<'a>(&'a self, session_path: &'a str) -> &'a str {
+        self.path.as_deref().unwrap_or(session_path)
+    }
+}
+
 pub struct HomeView {
     pub(super) storage: Storage,
     pub(super) instances: Vec<Instance>,
@@ -105,6 +127,7 @@ pub struct HomeView {
     pub(super) show_help: bool,
     pub(super) new_dialog: Option<NewSessionDialog>,
     pub(super) fork_dialog: Option<ForkSessionDialog>,
+    pub(super) add_pane_dialog: Option<AddPaneDialog>,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
@@ -126,8 +149,8 @@ pub struct HomeView {
     pub(super) pending_stop_session: Option<String>,
     /// Source and destination paths for a rename waiting on merge confirmation
     pub(super) pending_group_rename: Option<(String, String, Option<String>)>,
-    /// Right pane tool to launch after next session attach (one-shot, consumed on use)
-    pub(super) pending_right_pane_tool: Option<String>,
+    /// Right pane to launch after next session attach (one-shot, consumed on use)
+    pub(super) pending_right_pane: Option<PendingRightPane>,
 
     // Number jump
     pub(super) pending_jump: Option<PendingJump>,
@@ -263,6 +286,7 @@ impl HomeView {
             show_help: false,
             new_dialog: None,
             fork_dialog: None,
+            add_pane_dialog: None,
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
@@ -279,7 +303,7 @@ impl HomeView {
             pending_attach_after_warning: None,
             pending_stop_session: None,
             pending_group_rename: None,
-            pending_right_pane_tool: None,
+            pending_right_pane: None,
             pending_jump: None,
             search_active: false,
             search_query: Input::default(),
@@ -638,9 +662,9 @@ impl HomeView {
         }
     }
 
-    /// Consume the pending right pane tool (one-shot, set during session creation).
-    pub fn take_pending_right_pane_tool(&mut self) -> Option<String> {
-        self.pending_right_pane_tool.take()
+    /// Consume the pending right pane (one-shot, set during session creation).
+    pub fn take_pending_right_pane(&mut self) -> Option<PendingRightPane> {
+        self.pending_right_pane.take()
     }
 
     /// Check if on_launch hooks already ran for this session (and consume the flag).
@@ -679,6 +703,7 @@ impl HomeView {
         self.show_help
             || self.new_dialog.is_some()
             || self.fork_dialog.is_some()
+            || self.add_pane_dialog.is_some()
             || self.confirm_dialog.is_some()
             || self.unified_delete_dialog.is_some()
             || self.group_delete_options_dialog.is_some()

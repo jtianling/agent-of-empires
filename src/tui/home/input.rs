@@ -4,18 +4,24 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use super::HomeView;
+use super::{HomeView, PendingRightPane};
 use crate::session::config::{load_config, save_config, SortOrder};
 use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::{Action, PostRestart};
 use crate::tui::dialogs::{
-    ConfirmDialog, DeleteDialogConfig, DialogResult, ForkSessionData, ForkSessionDialog,
-    GroupDeleteOptionsDialog, GroupRenameDialog, HookTrustAction, InfoDialog, NewSessionData,
-    NewSessionDialog, ProfilePickerAction, RenameDialog, RenameMode, SendMessageDialog,
-    UnifiedDeleteDialog,
+    AddPaneDialog, ConfirmDialog, DeleteDialogConfig, DialogResult, ForkSessionData,
+    ForkSessionDialog, GroupDeleteOptionsDialog, GroupRenameDialog, HookTrustAction, InfoDialog,
+    NewSessionData, NewSessionDialog, ProfilePickerAction, RenameDialog, RenameMode,
+    SendMessageDialog, UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
+
+/// Pair a chosen right pane tool with its chosen directory. No tool means no
+/// pane, and no directory means the session's own, resolved at the split.
+fn pending_right_pane(tool: Option<String>, path: Option<String>) -> Option<PendingRightPane> {
+    tool.map(|tool| PendingRightPane { tool, path })
+}
 
 impl HomeView {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -245,6 +251,29 @@ impl HomeView {
                 }
                 DialogResult::Submit(data) => {
                     return self.create_forked_session(data);
+                }
+            }
+            return None;
+        }
+
+        let add_pane_dialog_result = self
+            .add_pane_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key));
+
+        if let Some(result) = add_pane_dialog_result {
+            match result {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.add_pane_dialog = None;
+                }
+                DialogResult::Submit(data) => {
+                    self.add_pane_dialog = None;
+                    self.pending_right_pane = Some(PendingRightPane {
+                        tool: data.tool,
+                        path: data.path,
+                    });
+                    return Some(Action::AddAgentPane(data.session_id));
                 }
             }
             return None;
@@ -614,6 +643,9 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('%') => {
+                self.open_add_pane_dialog();
+            }
             KeyCode::Char('f') => {
                 let Some(session_id) = self.selected_session.clone() else {
                     self.info_dialog = Some(InfoDialog::new(
@@ -658,6 +690,7 @@ impl HomeView {
                     &inst.title,
                     &inst.tool,
                     &inst.group_path,
+                    inst.is_sandboxed(),
                 ));
             }
             KeyCode::Char('s') => {
@@ -1147,17 +1180,19 @@ impl HomeView {
             .is_some_and(|h| !h.on_create.is_empty() || !h.on_launch.is_empty());
 
         if data.sandbox || has_hooks {
-            let right_pane_tool = data.right_pane_tool.clone();
+            let right_pane =
+                pending_right_pane(data.right_pane_tool.clone(), data.right_pane_path.clone());
             self.request_creation(data, hooks);
-            self.pending_right_pane_tool = right_pane_tool;
+            self.pending_right_pane = right_pane;
             return None;
         }
 
-        let right_pane_tool = data.right_pane_tool.clone();
+        let right_pane =
+            pending_right_pane(data.right_pane_tool.clone(), data.right_pane_path.clone());
         match self.create_session(data) {
             Ok(session_id) => {
                 self.new_dialog = None;
-                self.pending_right_pane_tool = right_pane_tool;
+                self.pending_right_pane = right_pane;
                 Some(Action::AttachSession(session_id))
             }
             Err(e) => {
@@ -1170,15 +1205,68 @@ impl HomeView {
         }
     }
 
+    /// Open the add-agent-pane dialog for the selected running session.
+    ///
+    /// The refusals match the CLI's: a session that is not running is reported
+    /// rather than started, and the four-slot cap is reported rather than worked
+    /// around. A group row or a session being deleted is a no-op.
+    fn open_add_pane_dialog(&mut self) {
+        let Some(session_id) = self.selected_session.clone() else {
+            return;
+        };
+        let Some(inst) = self.get_instance(&session_id) else {
+            return;
+        };
+        if inst.status == Status::Deleting {
+            return;
+        }
+
+        let (id, title, tool) = (inst.id.clone(), inst.title.clone(), inst.tool.clone());
+        let sandboxed = inst.is_sandboxed();
+        let session_name = crate::tmux::Session::generate_name(&id, &title);
+        let panes = crate::db::reconcile::session_pane_ids(&session_name);
+        if panes.is_empty() {
+            self.info_dialog = Some(InfoDialog::new(
+                "Session Not Running",
+                &format!(
+                    "'{}' is not running. Start it first, then add a pane.",
+                    title
+                ),
+            ));
+            return;
+        }
+        if panes.len() >= crate::db::reconcile::MAX_AGENT_PANES {
+            self.info_dialog = Some(InfoDialog::new(
+                "Pane Limit Reached",
+                &format!(
+                    "'{}' already has {} panes (max {}).",
+                    title,
+                    panes.len(),
+                    crate::db::reconcile::MAX_AGENT_PANES
+                ),
+            ));
+            return;
+        }
+
+        self.add_pane_dialog = Some(AddPaneDialog::new(
+            &id,
+            &title,
+            &tool,
+            self.available_tools.available_list(),
+            sandboxed,
+        ));
+    }
+
     /// Build, persist, and schedule the launch of a forked session. The
     /// existing session-attach flow in `app.rs` will then start the forked
     /// instance and spin up its right pane in the parent's working directory.
     fn create_forked_session(&mut self, data: ForkSessionData) -> Option<Action> {
-        let right_pane_tool = data.right_pane_tool.clone();
+        let right_pane =
+            pending_right_pane(data.right_pane_tool.clone(), data.right_pane_path.clone());
         match self.create_forked_session_instance(data) {
             Ok(session_id) => {
                 self.fork_dialog = None;
-                self.pending_right_pane_tool = right_pane_tool;
+                self.pending_right_pane = right_pane;
                 Some(Action::AttachSession(session_id))
             }
             Err(e) => {

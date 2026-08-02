@@ -3,7 +3,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use super::{NewSessionDialog, FIELD_HELP, HELP_DIALOG_WIDTH, SPINNER_FRAMES};
+use super::layout::ABSENT;
+use super::{FieldHelp, NewSessionDialog, FIELD_HELP, HELP_DIALOG_WIDTH, SPINNER_FRAMES};
 use crate::tui::components::{render_text_field, render_text_field_with_ghost};
 use crate::tui::styles::Theme;
 
@@ -48,6 +49,9 @@ impl NewSessionDialog {
             Constraint::Length(2), // Tool (always shown, interactive or not)
             Constraint::Length(2), // Right Pane (always shown)
         ]);
+        if self.has_right_pane_path_field() {
+            constraints.push(Constraint::Length(2)); // Right Pane Path
+        }
         if has_yolo {
             constraints.push(Constraint::Length(2)); // YOLO mode checkbox
         }
@@ -108,51 +112,16 @@ impl NewSessionDialog {
         // Render fields sequentially, tracking chunk index to match dynamic constraints
         let mut ci = 0; // chunk index
 
-        // Field index calculations (must match handle_key)
-        let title_field: usize = 0;
-        let mut fi: usize = 2 + if has_tool_selection { 1 } else { 0 };
-        let right_pane_field = {
-            let f = fi;
-            fi += 1;
-            f
-        };
-        let yolo_mode_field = if has_yolo {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let has_cross_agent_team = self.has_cross_agent_team_field();
-        let cross_agent_team_field = if has_cross_agent_team {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let worktree_field = if !is_terminal {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let new_branch_field = if !is_terminal && has_worktree {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let sandbox_field = if has_sandbox {
-            let f = fi;
-            fi += 1;
-            f
-        } else {
-            usize::MAX
-        };
-        let group_field = fi;
+        let layout = self.field_layout();
+        let title_field = layout.title;
+        let right_pane_field = layout.right_pane;
+        let yolo_mode_field = layout.yolo;
+        let cross_agent_team_field = layout.cross_agent_team;
+        let has_cross_agent_team = cross_agent_team_field != ABSENT;
+        let worktree_field = layout.worktree;
+        let new_branch_field = layout.new_branch;
+        let sandbox_field = layout.sandbox;
+        let group_field = layout.group;
 
         // Title
         render_text_field(
@@ -167,17 +136,24 @@ impl NewSessionDialog {
         ci += 1;
 
         // Path
-        let path_placeholder = if self.focused_field == self.path_field() {
+        let path_placeholder = if self.focused_field == layout.path {
             Some("(Ctrl+P to browse directories)")
         } else {
             None
         };
-        self.render_path_field(frame, chunks[ci], path_placeholder, theme);
+        self.path.render(
+            frame,
+            chunks[ci],
+            "Path:",
+            self.focused_field == layout.path,
+            path_placeholder,
+            theme,
+        );
         ci += 1;
 
         // Tool (always shown, interactive or read-only)
-        let tool_field: usize = 2;
-        let is_tool_focused = has_tool_selection && self.focused_field == tool_field;
+        let tool_field = layout.tool;
+        let is_tool_focused = self.focused_field == tool_field;
         if has_tool_selection {
             let label_style = if is_tool_focused {
                 Style::default().fg(theme.accent).underlined()
@@ -278,6 +254,24 @@ impl NewSessionDialog {
             }
 
             frame.render_widget(Paragraph::new(Line::from(rp_spans)), chunks[ci]);
+            ci += 1;
+        }
+
+        if layout.right_pane_path != ABSENT {
+            let is_focused = self.focused_field == layout.right_pane_path;
+            let placeholder = if is_focused {
+                Some("(same as session | Ctrl+P to browse directories)")
+            } else {
+                Some("(same as session)")
+            };
+            self.right_pane_path.render(
+                frame,
+                chunks[ci],
+                "Right Pane Path:",
+                is_focused,
+                placeholder,
+                theme,
+            );
             ci += 1;
         }
 
@@ -498,8 +492,8 @@ impl NewSessionDialog {
 
         // Hints/errors (last chunk)
         let hint_chunk = ci;
-        if self.confirm_create_dir.is_some() {
-            let selected = self.confirm_create_dir.unwrap_or(false);
+        if let Some(confirm) = &self.confirm_create_dirs {
+            let selected = confirm.yes_selected;
             let yes_style = if selected {
                 Style::default().fg(theme.accent).bold()
             } else {
@@ -512,7 +506,7 @@ impl NewSessionDialog {
             };
             let line = Line::from(vec![
                 Span::styled(
-                    "⚠ Path does not exist. Create? ",
+                    format!("⚠ Create {}? ", confirm.dirs.join(", ")),
                     Style::default().fg(theme.error),
                 ),
                 Span::styled("[y]es", yes_style),
@@ -534,8 +528,8 @@ impl NewSessionDialog {
                 hint_spans.push(Span::styled("←/→", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" tool  "));
             }
-            if self.focused_field == self.path_field() {
-                if self.ghost_text().is_some() {
+            if self.focused_field == layout.path {
+                if self.path.ghost_text().is_some() {
                     hint_spans.push(Span::styled("→", Style::default().fg(theme.hint)));
                     hint_spans.push(Span::raw(" accept  "));
                 }
@@ -553,6 +547,14 @@ impl NewSessionDialog {
                 }
                 hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" groups  "));
+            }
+            if self.focused_field == layout.right_pane_path {
+                if self.right_pane_path.ghost_text().is_some() {
+                    hint_spans.push(Span::styled("→", Style::default().fg(theme.hint)));
+                    hint_spans.push(Span::raw(" accept  "));
+                }
+                hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::raw(" browse  "));
             }
             if self.focused_field == tool_field {
                 hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
@@ -586,78 +588,6 @@ impl NewSessionDialog {
         if self.dir_picker.is_active() {
             self.dir_picker.render(frame, area, theme);
         }
-    }
-
-    fn render_path_field(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        placeholder: Option<&str>,
-        theme: &Theme,
-    ) {
-        let is_focused = self.focused_field == self.path_field();
-        let flashing_invalid = self.is_path_invalid_flash_active();
-
-        let label_color = if flashing_invalid {
-            theme.error
-        } else if is_focused {
-            theme.accent
-        } else {
-            theme.text
-        };
-        let value_color = if flashing_invalid {
-            theme.error
-        } else if is_focused {
-            theme.accent
-        } else {
-            theme.text
-        };
-
-        let label_style = if is_focused {
-            Style::default().fg(label_color).underlined()
-        } else {
-            Style::default().fg(label_color)
-        };
-        let value_style = Style::default().fg(value_color);
-
-        let value = self.path.value();
-        let mut spans = vec![Span::styled("Path:", label_style), Span::raw(" ")];
-
-        if value.is_empty() && !is_focused {
-            if let Some(placeholder_text) = placeholder {
-                spans.push(Span::styled(placeholder_text, value_style));
-            }
-        } else if is_focused {
-            let cursor_pos = self.path.visual_cursor();
-            let cursor_style = if flashing_invalid {
-                Style::default().fg(theme.background).bg(theme.error)
-            } else {
-                Style::default().fg(theme.background).bg(theme.accent)
-            };
-
-            let before: String = value.chars().take(cursor_pos).collect();
-            let cursor_char: String = value
-                .chars()
-                .nth(cursor_pos)
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| " ".to_string());
-            let after: String = value.chars().skip(cursor_pos + 1).collect();
-
-            if !before.is_empty() {
-                spans.push(Span::styled(before, value_style));
-            }
-            spans.push(Span::styled(cursor_char, cursor_style));
-            if !after.is_empty() {
-                spans.push(Span::styled(after, value_style));
-            }
-            if let Some(ghost) = self.ghost_text() {
-                spans.push(Span::styled(ghost, Style::default().fg(theme.dimmed)));
-            }
-        } else {
-            spans.push(Span::styled(value, value_style));
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_sandbox_config(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -1235,19 +1165,18 @@ impl NewSessionDialog {
     }
 
     fn render_help_overlay(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let has_tool_selection = self.available_tools.len() > 1;
-        let has_sandbox = self.docker_available;
-        let show_sandbox_options_help = has_sandbox && self.sandbox_enabled;
-        let has_yolo = self.has_yolo_field();
-        let has_cross_agent_team = self.has_cross_agent_team_field();
+        // Each entry names its own condition, so inserting one cannot shift what
+        // the others are tested against, and the height follows from what is
+        // actually shown instead of a constant maintained alongside the list.
+        let shown: Vec<&FieldHelp> = FIELD_HELP
+            .iter()
+            .filter(|help| self.help_entry_visible(help.visibility))
+            .collect();
 
         let dialog_width: u16 = HELP_DIALOG_WIDTH;
-        // Base fields: Title, Path, Right Pane, YOLO, Worktree, New Branch, Group + close hint
-        let base_height: u16 = 23;
-        let dialog_height: u16 = base_height
-            + if has_tool_selection { 3 } else { 0 }
-            + if has_sandbox { 3 } else { 0 }
-            + if show_sandbox_options_help { 12 } else { 0 };
+        // Three lines per entry (name, description, blank), plus borders, the
+        // margin and the close hint.
+        let dialog_height: u16 = shown.len() as u16 * 3 + 5;
 
         let dialog_area = crate::tui::dialogs::centered_rect(area, dialog_width, dialog_height);
 
@@ -1265,30 +1194,7 @@ impl NewSessionDialog {
 
         let mut lines: Vec<Line> = Vec::new();
 
-        for (idx, help) in FIELD_HELP.iter().enumerate() {
-            if idx == 0 {
-                continue; // Profile field removed
-            }
-            // idx 1 (Title), idx 2 (Path) always shown
-            if idx == 3 && !has_tool_selection {
-                continue; // Tool
-            }
-            // idx 4 (Right Pane) always shown
-            if idx == 5 && !has_yolo {
-                continue; // YOLO (hidden for terminal and AlwaysYolo agents)
-            }
-            if idx == 6 && !has_cross_agent_team {
-                continue; // Cross Agent Team (supported tools, non-sandbox)
-            }
-            // idx 7 (Worktree) always shown
-            if idx == 8 && !has_sandbox {
-                continue; // Sandbox
-            }
-            if (9..=10).contains(&idx) && !show_sandbox_options_help {
-                continue; // Image, Env
-            }
-            // idx 11 (Group) always shown
-
+        for help in shown {
             lines.push(Line::from(Span::styled(
                 help.name,
                 Style::default().fg(theme.accent).bold(),

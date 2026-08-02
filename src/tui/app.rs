@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::home::HomeView;
+use super::home::{HomeView, PendingRightPane};
 use super::styles::load_theme;
 use super::styles::Theme;
 use super::tab_title;
@@ -406,6 +406,9 @@ impl App {
             Action::AttachSession(id) => {
                 self.attach_session(&id, terminal)?;
             }
+            Action::AddAgentPane(id) => {
+                self.add_agent_pane(&id, terminal)?;
+            }
             Action::SwitchProfile(profile) => {
                 let storage = Storage::new(&profile)?;
                 let tools = self.home.available_tools();
@@ -670,6 +673,49 @@ impl App {
         self.start_session(session_id, PostRestart::Attach, terminal)
     }
 
+    /// Add a managed agent pane to a running session, then attach to it.
+    ///
+    /// Adding a pane is an act of wanting to use it, so this attaches rather
+    /// than staying on the home list. The session is not started: the `%` key
+    /// promises one more pane, not a whole session, and the home view already
+    /// refused a session that is not running before opening the dialog.
+    fn add_agent_pane(
+        &mut self,
+        session_id: &str,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        let Some(pending) = self.home.take_pending_right_pane() else {
+            return Ok(());
+        };
+        let Some(inst) = self.home.get_instance(session_id).cloned() else {
+            return Ok(());
+        };
+
+        // The cap was checked before the dialog opened, but the dialog is modal
+        // only to this TUI: `aoe session add-agent-pane` can take the last slot
+        // while it is up. Splitting anyway would leave a fifth pane that no slot
+        // can hold, live but untracked.
+        let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+        let panes = crate::db::reconcile::session_pane_ids(&session_name);
+        if panes.len() >= crate::db::reconcile::MAX_AGENT_PANES {
+            self.report_pane_not_created(&format!(
+                "'{}' already has {} panes (max {}).",
+                inst.title,
+                panes.len(),
+                crate::db::reconcile::MAX_AGENT_PANES
+            ));
+            return Ok(());
+        }
+
+        // Attaching after a failed add would drop the user into a session that
+        // gained nothing, with the reason left behind on the home screen.
+        if !self.launch_managed_pane(&inst, &pending) {
+            return Ok(());
+        }
+        crate::tmux::refresh_session_cache();
+        self.attach_session(session_id, terminal)
+    }
+
     /// Bring a session's panes up if they are not already, then either attach to
     /// it or leave the user on the home list, depending on `post`.
     fn start_session(
@@ -733,7 +779,7 @@ impl App {
                 if let Some(key) = inst.xats_identity_key.as_deref() {
                     self.home.adopt_xats_identity_key(session_id, key);
                 }
-                self.home.take_pending_right_pane_tool();
+                self.home.take_pending_right_pane();
             } else {
                 // Single-pane or non-existent session: kill and recreate from scratch
                 if session_exists {
@@ -803,63 +849,20 @@ impl App {
                     self.home.adopt_xats_identity_key(session_id, key);
                 }
 
-                if let Some(right_tool) = self.home.take_pending_right_pane_tool() {
-                    let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
-                    match inst.build_extra_pane_command(&right_tool) {
-                        Some(launch) => {
-                            match crate::tmux::split_window_right(
-                                &session_name,
-                                &inst.project_path,
-                                &launch.command,
-                                right_tool != "shell",
-                            ) {
-                                // The key the launch minted lives on the pane's
-                                // slot record, so every later relaunch reuses it
-                                // instead of handing xats a key no identity holds.
-                                Ok(pane_id) => {
-                                    let profile = self.home.storage.profile().to_string();
-                                    let recorded = inst.record_launched_extra_pane(
-                                        &profile,
-                                        &session_name,
-                                        &crate::db::reconcile::LaunchedPane {
-                                            pane_id: &pane_id,
-                                            agent: &right_tool,
-                                            identity_key: &launch.identity_key,
-                                        },
-                                    );
-                                    // The pane is up either way; surface the loss
-                                    // rather than leaving the session looking
-                                    // healthy while its identity cannot survive.
-                                    //
-                                    // A dialog rather than the session's error
-                                    // field: that field is overwritten by the
-                                    // next status poll, whose update carries the
-                                    // value read before this ran, so the warning
-                                    // could disappear before it was ever drawn.
-                                    if let Err(e) = recorded {
-                                        tracing::error!("{:#}", e);
-                                        self.home.info_dialog =
-                                            Some(crate::tui::dialogs::InfoDialog::new(
-                                                "Identity key not recorded",
-                                                &format!("{e:#}"),
-                                            ));
-                                    }
-                                }
-                                Err(e) => tracing::warn!("Failed to split right pane: {}", e),
-                            }
-                        }
-                        // Splitting anyway would leave an empty pane the user
-                        // has to close, with nothing saying why it is empty.
-                        None => tracing::warn!(
-                            "No launch command for right pane tool '{}'; pane not created",
-                            right_tool
-                        ),
+                // A failed split leaves the session with one pane and the reason
+                // on the home screen. Attaching anyway would bury that reason
+                // behind the session the user did not get what they asked for.
+                if let Some(pending) = self.home.take_pending_right_pane() {
+                    if !self.launch_managed_pane(&inst, &pending) && post == PostRestart::Attach {
+                        crate::tmux::refresh_session_cache();
+                        self.needs_redraw = true;
+                        return Ok(());
                     }
                 }
             }
         } else {
             // Session already running -- discard any pending right pane request
-            self.home.take_pending_right_pane_tool();
+            self.home.take_pending_right_pane();
         }
 
         if post == PostRestart::StayOnHome {
@@ -987,6 +990,91 @@ impl App {
         Ok(())
     }
 
+    /// Split a managed agent pane into a running session and record its durable
+    /// slot, so the pane is restartable and the key the launch minted has a home.
+    ///
+    /// An unset directory falls back to the session's own here rather than when
+    /// the dialog was submitted. A worktree-backed session's directory is
+    /// decided during creation, so a snapshot would put the pane in the original
+    /// repository while the session went to the worktree.
+    /// Returns whether the pane was created, so a caller that would otherwise
+    /// attach can stay put instead of dropping the user into a session that
+    /// gained nothing.
+    fn launch_managed_pane(
+        &mut self,
+        inst: &crate::session::Instance,
+        pending: &PendingRightPane,
+    ) -> bool {
+        let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+        let cwd = pending.working_dir(&inst.project_path);
+
+        // Splitting anyway would leave an empty pane the user has to close,
+        // with nothing saying why it is empty.
+        let Some(launch) = inst.build_extra_pane_command(&pending.tool, cwd) else {
+            self.report_pane_not_created(&format!(
+                "No launch command for right pane tool '{}'.",
+                pending.tool
+            ));
+            return false;
+        };
+
+        // The directory can be one the user typed, so a split that fails is
+        // surfaced rather than logged: a pane that silently does not appear is
+        // the failure mode a chosen directory introduces.
+        let pane_id = match crate::tmux::split_window_right(
+            &session_name,
+            cwd,
+            &launch.command,
+            pending.tool != "shell",
+        ) {
+            Ok(pane_id) => pane_id,
+            Err(e) => {
+                self.report_pane_not_created(&format!("{e:#}"));
+                return false;
+            }
+        };
+
+        // The key the launch minted lives on the pane's slot record, so every
+        // later relaunch reuses it instead of handing xats a key no identity
+        // holds. The pane's own directory lives there too, so a restart returns
+        // it here rather than to the session's directory.
+        let profile = self.home.storage.profile().to_string();
+        let recorded = inst.record_launched_extra_pane(
+            &profile,
+            &session_name,
+            &crate::db::reconcile::LaunchedPane {
+                pane_id: &pane_id,
+                agent: &pending.tool,
+                cwd,
+                identity_key: &launch.identity_key,
+            },
+        );
+
+        // The pane is up either way; surface the loss rather than leaving the
+        // session looking healthy while its identity cannot survive.
+        //
+        // A dialog rather than the session's error field: that field is
+        // overwritten by the next status poll, whose update carries the value
+        // read before this ran, so the warning could disappear before it was
+        // ever drawn.
+        if let Err(e) = recorded {
+            tracing::error!("{:#}", e);
+            self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                "Identity key not recorded",
+                &format!("{e:#}"),
+            ));
+        }
+        true
+    }
+
+    fn report_pane_not_created(&mut self, detail: &str) {
+        tracing::warn!("Right pane not created: {}", detail);
+        self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+            "Right pane not created",
+            detail,
+        ));
+    }
+
     fn try_restore_selection_from_client_context(&mut self) -> bool {
         let Some(client_name) = self.last_attach_client.as_deref() else {
             return false;
@@ -1080,6 +1168,9 @@ pub enum Action {
     EditFile(PathBuf),
     StopSession(String),
     SetTheme(String),
+    /// Add a managed agent pane to a running session, then attach to it. The
+    /// pane's tool and directory travel on `HomeView::pending_right_pane`.
+    AddAgentPane(String),
 }
 
 #[cfg(test)]

@@ -340,13 +340,18 @@ Creates a new session that shares the parent's working directory and config, and
 
 Add an agent pane to a running session.
 
-Splits the session's tmux window and launches the session's agent in the new pane. The agent is adopted into a slot by the reconciler. Respects the four-slot (four-pane) cap and refuses when the session is full.
+Splits the session's tmux window and launches an agent in the new pane. The agent defaults to the session's own tool and the working directory to the session's own; both can be named instead. The pane is adopted into a slot by the reconciler. Respects the four-slot (four-pane) cap and refuses when the session is full, and refuses a session that is not running rather than starting it.
 
-**Usage:** `aoe session add-agent-pane <IDENTIFIER>`
+**Usage:** `aoe session add-agent-pane [OPTIONS] <IDENTIFIER>`
 
 ###### **Arguments:**
 
 * `<IDENTIFIER>` — Session ID or title
+
+###### **Options:**
+
+* `--tool <TOOL>` — Agent to launch in the new pane (defaults to the session's own tool)
+* `--path <PATH>` — Working directory for the new pane (defaults to the session's own)
 
 
 

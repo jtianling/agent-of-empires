@@ -114,10 +114,19 @@ pub fn assign_slots(
     assigned
 }
 
+/// Maximum number of agent panes tracked per session, i.e. the slot range the
+/// store accepts. Every entry point that adds a pane enforces the same cap.
+pub const MAX_AGENT_PANES: usize = (MAX_SLOT + 1) as usize;
+
 /// An agent pane AoE has just launched, before any capture exists for it.
 pub struct LaunchedPane<'a> {
     pub pane_id: &'a str,
     pub agent: &'a str,
+    /// The directory this pane was launched into. Its own, not the instance's:
+    /// restart and cold-start recovery both place a pane at the directory its
+    /// slot recorded, so recording the instance's here is correct at launch and
+    /// wrong at the first restart.
+    pub cwd: &'a str,
     /// The identity key minted for this pane, empty when it gets none.
     pub identity_key: &'a str,
 }
@@ -136,18 +145,42 @@ pub fn record_launched_extra_pane(
     store: &Store,
     instance_id: &str,
     session_name: &str,
-    cwd: &str,
+    primary_cwd: &str,
     primary_agent: &str,
     pane: &LaunchedPane<'_>,
 ) -> Result<()> {
     let panes = list_session_panes(session_name);
+    let primary_pane = crate::tmux::get_agent_pane_id(session_name);
+    record_launched_extra_pane_among(
+        store,
+        instance_id,
+        &panes,
+        primary_pane.as_deref(),
+        primary_cwd,
+        primary_agent,
+        pane,
+    )
+}
+
+/// The pane-list half of [`record_launched_extra_pane`], separated from the two
+/// tmux queries that supply it so the slot writes can be exercised without a
+/// live session.
+#[allow(clippy::too_many_arguments)]
+fn record_launched_extra_pane_among(
+    store: &Store,
+    instance_id: &str,
+    panes: &[(u32, String)],
+    primary_pane: Option<&str>,
+    primary_cwd: &str,
+    primary_agent: &str,
+    pane: &LaunchedPane<'_>,
+) -> Result<()> {
     let existing_rows = store.read_slots_for_instance(instance_id)?;
     let existing_map: Vec<(i64, String)> = existing_rows
         .iter()
         .map(|s| (s.slot, s.tmux_pane.clone()))
         .collect();
-    let primary_pane = crate::tmux::get_agent_pane_id(session_name);
-    let assigned = assign_slots(&panes, primary_pane.as_deref(), &existing_map);
+    let assigned = assign_slots(panes, primary_pane, &existing_map);
     let now = crate::db::now_unix();
 
     // The fan-out restart reads only the slots that exist, so recording the
@@ -155,13 +188,13 @@ pub fn record_launched_extra_pane(
     // insert-if-absent rather than guarded by the read above: an existing row
     // carries a captured conversation, and a capture landing between the read
     // and the write would otherwise be blanked.
-    if let Some(primary) = primary_pane.as_deref() {
+    if let Some(primary) = primary_pane {
         if assigned.iter().any(|a| a.slot == 0 && a.pane_id == primary) {
             store.record_launched_slot_if_absent(
                 instance_id,
                 0,
                 primary_agent,
-                cwd,
+                primary_cwd,
                 primary,
                 "",
                 now,
@@ -176,7 +209,7 @@ pub fn record_launched_extra_pane(
         instance_id,
         assignment.slot,
         pane.agent,
-        cwd,
+        pane.cwd,
         pane.pane_id,
         pane.identity_key,
         now,
@@ -793,6 +826,105 @@ mod identity_key_tests {
         assert_eq!(launched.xats_identity_key, "launched-key");
         let other = slots.iter().find(|s| s.slot == 2).expect("other slot");
         assert_eq!(other.tmux_pane, "%3");
+    }
+
+    /// The defect this change fixes: a pane launched somewhere other than the
+    /// session's directory used to record the session's, which reads correctly
+    /// until the first restart puts the pane back in the wrong place.
+    #[test]
+    fn a_launched_pane_records_its_own_directory_not_the_instance_s() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/session-dir");
+        let panes = [(0, "%1".to_string()), (1, "%2".to_string())];
+
+        record_launched_extra_pane_among(
+            &store,
+            &inst.id,
+            &panes,
+            Some("%1"),
+            "/tmp/session-dir",
+            "claude",
+            &LaunchedPane {
+                pane_id: "%2",
+                agent: "codex",
+                cwd: "/tmp/other-dir",
+                identity_key: "launched-key",
+            },
+        )
+        .unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        let primary = slots.iter().find(|s| s.slot == 0).expect("primary slot");
+        let launched = slots.iter().find(|s| s.slot == 1).expect("launched slot");
+        assert_eq!(launched.cwd, "/tmp/other-dir");
+        assert_eq!(primary.cwd, "/tmp/session-dir");
+    }
+
+    /// The restart fan-out places each pane at the directory its slot recorded,
+    /// so the two panes come back where they were launched. Without the
+    /// assertion above, the split alone still looks correct.
+    #[test]
+    fn a_restart_reads_each_pane_s_own_directory_back() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/session-dir");
+        let panes = [(0, "%1".to_string()), (1, "%2".to_string())];
+
+        record_launched_extra_pane_among(
+            &store,
+            &inst.id,
+            &panes,
+            Some("%1"),
+            "/tmp/session-dir",
+            "claude",
+            &LaunchedPane {
+                pane_id: "%2",
+                agent: "codex",
+                cwd: "/tmp/other-dir",
+                identity_key: "launched-key",
+            },
+        )
+        .unwrap();
+
+        let mut slots = store.read_slots_for_instance(&inst.id).unwrap();
+        slots.sort_by_key(|s| s.slot);
+        let relaunch_dirs: Vec<&str> = slots.iter().map(|s| s.cwd.as_str()).collect();
+        assert_eq!(relaunch_dirs, ["/tmp/session-dir", "/tmp/other-dir"]);
+    }
+
+    /// A pane whose agent moved is corrected by its own report, which is why no
+    /// backfill is needed for records written before this change.
+    #[test]
+    fn a_capture_corrects_a_recorded_directory_and_keeps_the_key() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/session-dir");
+
+        store
+            .record_launched_slot(
+                &inst.id,
+                1,
+                "codex",
+                "/tmp/other-dir",
+                "%2",
+                "launched-key",
+                1,
+            )
+            .unwrap();
+        store
+            .upsert_pane_live("%2", "codex", "first-capture", "/tmp/moved-dir", 2)
+            .unwrap();
+
+        reconcile_session(
+            &store,
+            &inst,
+            &[(0, "%1".to_string()), (1, "%2".to_string())],
+            Some("%1"),
+        )
+        .unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        let launched = slots.iter().find(|s| s.slot == 1).expect("launched slot");
+        assert_eq!(launched.cwd, "/tmp/moved-dir");
+        assert_eq!(launched.xats_identity_key, "launched-key");
     }
 
     #[test]
