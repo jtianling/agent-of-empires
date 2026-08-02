@@ -4,9 +4,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use super::{HomeView, PendingRightPane};
+use super::HomeView;
 use crate::session::config::{load_config, save_config, SortOrder};
-use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
+use crate::session::{
+    list_profiles, repo_config, resolve_config, Item, PaneDraft, PaneWorktreeRequest, Status,
+};
 use crate::tui::app::{Action, PostRestart};
 use crate::tui::dialogs::{
     AddPaneDialog, ConfirmDialog, DeleteDialogConfig, DialogResult, ForkSessionData,
@@ -19,8 +21,18 @@ use crate::tui::settings::{SettingsAction, SettingsView};
 
 /// Pair a chosen right pane tool with its chosen directory. No tool means no
 /// pane, and no directory means the session's own, resolved at the split.
-fn pending_right_pane(tool: Option<String>, path: Option<String>) -> Option<PendingRightPane> {
-    tool.map(|tool| PendingRightPane { tool, path })
+fn pending_right_pane(
+    tool: Option<String>,
+    path: Option<String>,
+    defaults: Option<&crate::session::PaneConfig>,
+) -> Option<PaneDraft> {
+    tool.map(|tool| PaneDraft {
+        tool,
+        path: path.unwrap_or_default(),
+        yolo_mode: defaults.is_some_and(|pane| pane.yolo_mode),
+        cross_agent_team: defaults.is_some_and(|pane| pane.cross_agent_team),
+        worktree: PaneWorktreeRequest::default(),
+    })
 }
 
 impl HomeView {
@@ -211,11 +223,14 @@ impl HomeView {
                 }
                 DialogResult::Submit(data) => {
                     // Check for hooks before creating the session
-                    match repo_config::check_hook_trust(std::path::Path::new(&data.path)) {
+                    match repo_config::check_hook_trust(std::path::Path::new(&data.primary.path)) {
                         Ok(repo_config::HookTrustStatus::NeedsTrust { hooks, hooks_hash }) => {
                             use crate::tui::dialogs::HookTrustDialog;
-                            self.hook_trust_dialog =
-                                Some(HookTrustDialog::new(hooks, hooks_hash, data.path.clone()));
+                            self.hook_trust_dialog = Some(HookTrustDialog::new(
+                                hooks,
+                                hooks_hash,
+                                data.primary.path.clone(),
+                            ));
                             self.pending_hook_trust_data = Some(data);
                         }
                         Ok(repo_config::HookTrustStatus::Trusted(repo_hooks)) => {
@@ -268,11 +283,12 @@ impl HomeView {
                     self.add_pane_dialog = None;
                 }
                 DialogResult::Submit(data) => {
+                    let defaults = self
+                        .get_instance(&data.session_id)
+                        .map(|instance| instance.primary_pane_config().clone());
                     self.add_pane_dialog = None;
-                    self.pending_right_pane = Some(PendingRightPane {
-                        tool: data.tool,
-                        path: data.path,
-                    });
+                    self.pending_right_pane =
+                        pending_right_pane(Some(data.tool), data.path, defaults.as_ref());
                     return Some(Action::AddAgentPane(data.session_id));
                 }
             }
@@ -761,12 +777,7 @@ impl HomeView {
                         }
 
                         let config = DeleteDialogConfig {
-                            worktree_branch: inst
-                                .worktree_info
-                                .as_ref()
-                                .filter(|wt| wt.managed_by_aoe)
-                                .map(|wt| wt.branch.clone())
-                                .or_else(|| inst.workspace_info.as_ref().map(|w| w.branch.clone())),
+                            worktree_branch: self.managed_worktree_branch_for(inst),
                             has_sandbox: inst.sandbox_info.as_ref().is_some_and(|s| s.enabled),
                         };
 
@@ -1169,7 +1180,7 @@ impl HomeView {
 
     /// Create a session with optional hooks. Delegates to the background
     /// `CreationPoller` when hooks are present (to avoid freezing the TUI on
-    /// slow commands like `npm install`) or when the session is sandboxed.
+    /// slow commands like `npm install`).
     fn create_session_with_hooks(
         &mut self,
         data: NewSessionData,
@@ -1179,16 +1190,14 @@ impl HomeView {
             .as_ref()
             .is_some_and(|h| !h.on_create.is_empty() || !h.on_launch.is_empty());
 
-        if data.sandbox || has_hooks {
-            let right_pane =
-                pending_right_pane(data.right_pane_tool.clone(), data.right_pane_path.clone());
+        if has_hooks {
+            let right_pane = data.secondary.clone();
             self.request_creation(data, hooks);
             self.pending_right_pane = right_pane;
             return None;
         }
 
-        let right_pane =
-            pending_right_pane(data.right_pane_tool.clone(), data.right_pane_path.clone());
+        let right_pane = data.secondary.clone();
         match self.create_session(data) {
             Ok(session_id) => {
                 self.new_dialog = None;
@@ -1261,8 +1270,14 @@ impl HomeView {
     /// existing session-attach flow in `app.rs` will then start the forked
     /// instance and spin up its right pane in the parent's working directory.
     fn create_forked_session(&mut self, data: ForkSessionData) -> Option<Action> {
-        let right_pane =
-            pending_right_pane(data.right_pane_tool.clone(), data.right_pane_path.clone());
+        let defaults = self
+            .get_instance(&data.parent_id)
+            .map(|instance| instance.primary_pane_config().clone());
+        let right_pane = pending_right_pane(
+            data.right_pane_tool.clone(),
+            data.right_pane_path.clone(),
+            defaults.as_ref(),
+        );
         match self.create_forked_session_instance(data) {
             Ok(session_id) => {
                 self.fork_dialog = None;

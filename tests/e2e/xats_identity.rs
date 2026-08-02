@@ -303,29 +303,20 @@ fn wait_for_slot_row(h: &TuiTestHarness, id: &str, pane_id: &str) {
 fn right_pane_line(screen: &str) -> &str {
     screen
         .lines()
-        .find(|line| line.contains("Right Pane:"))
+        .find(|line| line.contains("Right Pane Agent:"))
         .unwrap_or("")
 }
 
-/// Move focus off the right-pane field and check the Cross Agent Teams box.
-///
-/// The field's index depends on which optional rows the selected tool renders,
-/// so the checkbox itself is the signal rather than a fixed number of tabs.
+/// Move from the right-pane selector to that pane's Cross Agent Team checkbox.
 fn enable_cross_agent_team(h: &TuiTestHarness) {
-    h.send_keys("Tab");
     for _ in 0..3 {
-        if h.capture_screen().contains("Cross Agent Teams: [x]") {
-            return;
-        }
-        h.send_keys("Space");
-        if h.capture_screen().contains("Cross Agent Teams: [x]") {
-            return;
-        }
         h.send_keys("Tab");
     }
-    panic!(
-        "could not enable Cross Agent Teams\n\n--- Screen capture ---\n{}",
-        h.capture_screen()
+    h.send_keys("Space");
+    assert!(
+        h.capture_screen().contains("Cross Agent Team: [x]"),
+        "could not enable Cross Agent Team\n\n--- Screen capture ---\n{}",
+        h.capture_screen(),
     );
 }
 
@@ -351,18 +342,15 @@ fn new_session_right_pane_is_launched_with_its_own_key() {
     h.wait_for("Title");
 
     h.type_text("Right Pane Key");
-    h.send_keys("Tab");
+    for _ in 0..3 {
+        h.send_keys("Tab");
+    }
     for _ in 0..128 {
         h.send_keys("BSpace");
     }
     h.type_text(&project);
 
-    let tabs_to_right_pane = if h.capture_screen().contains("Tool:") {
-        2
-    } else {
-        1
-    };
-    for _ in 0..tabs_to_right_pane {
+    for _ in 0..4 {
         h.send_keys("Tab");
     }
     for _ in 0..32 {
@@ -393,15 +381,11 @@ fn new_session_right_pane_is_launched_with_its_own_key() {
         !right_key.is_empty(),
         "the right pane process must carry an identity key from its first launch"
     );
-    assert_ne!(
-        right_key, left_key,
-        "two live panes must not present one identity"
+    assert!(
+        left_key.is_empty(),
+        "the disabled primary pane must stay keyless"
     );
-    assert_eq!(
-        stored_identity_key(&h, &id).as_deref(),
-        Some(left_key.as_str()),
-        "the primary pane's key is the one on the instance record"
-    );
+    assert!(stored_identity_key(&h, &id).is_none());
 
     wait_for_slot_row(&h, &id, &right);
     assert_eq!(

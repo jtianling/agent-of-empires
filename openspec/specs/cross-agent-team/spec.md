@@ -5,44 +5,30 @@ TBD - created by archiving change cross-agent-team-launch. Update Purpose after 
 ## Requirements
 ### Requirement: Cross Agent Team launch option in New Session
 
-The New Session dialog SHALL present a "Cross Agent Team" checkbox positioned to
-the right of the YOLO Mode checkbox. The option SHALL be independent of YOLO Mode:
-toggling one MUST NOT change the other.
+New Session SHALL 为 primary pane 和已选择的 secondary pane 分别展示 Cross Agent Team checkbox。  checkbox SHALL 与同一 pane 的 YOLO Mode 位于同一行, 两者 MUST 可以独立切换。
 
-The option SHALL only be available when the selected primary tool is `claude` or
-`codex`, and MUST be hidden or disabled when Sandbox is enabled.
+每个 checkbox 的可见性 SHALL 只取决于同一 pane 的 Tool。  Tool 为 `claude` 或 `codex` 时显示, 其他 Tool 时隐藏。  primary 与 secondary 的值 SHALL 相互独立, 初始值分别取自 active profile 解析后的 `cross_agent_team_default`。
 
-The checkbox's initial state SHALL be taken from the `cross_agent_team_default`
-configuration value resolved through the active profile.
+#### Scenario: Primary Claude 显示独立开关
+- **WHEN** primary Tool 为 `claude`
+- **THEN** primary Cross Agent Team checkbox SHALL 显示在 primary YOLO Mode 右侧
+- **AND**切换它 SHALL 不改变 secondary pane
 
-#### Scenario: Option visible for Claude without Sandbox
+#### Scenario: Secondary Codex 显示独立开关
+- **WHEN** Right Pane Agent 为 `codex`
+- **THEN** secondary Cross Agent Team checkbox SHALL 显示在 secondary YOLO Mode 右侧
+- **AND**切换它 SHALL 不改变 primary pane
 
-- **WHEN** the user opens New Session with tool `claude` and Sandbox not enabled
-- **THEN** a "Cross Agent Team" checkbox is shown to the right of YOLO Mode
-- **AND** it can be toggled independently of YOLO Mode
+#### Scenario: 不支持的 Tool 只隐藏自己的开关
+- **WHEN**一个 pane 的 Tool 不是 `claude` 或 `codex`
+- **THEN**该 pane 的 Cross Agent Team checkbox SHALL 不显示
+- **AND**另一个 pane 的可见性 SHALL 不受影响
 
-#### Scenario: Option visible for Codex without Sandbox
-
-- **WHEN** the user opens New Session with tool `codex` and Sandbox not enabled
-- **THEN** a "Cross Agent Team" checkbox is shown to the right of YOLO Mode
-- **AND** it can be toggled independently of YOLO Mode
-
-#### Scenario: Option hidden for unsupported tools
-
-- **WHEN** the user selects a primary tool other than `claude` or `codex` in New Session
-- **THEN** the Cross Agent Team checkbox is not shown
-
-#### Scenario: Option disabled when Sandbox enabled
-
-- **WHEN** the user enables Sandbox in New Session with tool `claude` or `codex`
-- **THEN** the Cross Agent Team checkbox is hidden or non-selectable
-- **AND** the session is not launched with tool-specific Cross Agent Team behavior
-
-#### Scenario: Default state from configuration
-
-- **WHEN** `cross_agent_team_default` is true for the active profile
-- **AND** the user opens New Session with tool `claude` or `codex` and Sandbox not enabled
-- **THEN** the Cross Agent Team checkbox is pre-checked
+#### Scenario: 两个 pane 独立应用默认值
+- **WHEN** `cross_agent_team_default` 为 true
+- **AND** primary 与 secondary 都使用支持的 Tool
+- **THEN**两个 pane 的 checkbox SHALL 分别初始化为选中
+- **AND**用户 SHALL 可以只关闭其中一个
 
 ### Requirement: Development-channels flag on launch
 
@@ -115,35 +101,28 @@ auto-confirming and leave the pane interactive without erroring the session.
 
 ### Requirement: Cross Agent Team preserved across restart
 
-The Cross Agent Team setting SHALL persist with the session. On `R` restart and
-fresh restart, AoE SHALL rebuild the tool-specific launch command. Claude SHALL
-receive the development-channels flag and auto-confirm flow. Codex SHALL repeat
-the pane pre-registration and remote app-server bootstrap.
+Cross Agent Team setting SHALL 按 pane 持久化。  `R` restart、fresh restart 和 cold recovery SHALL 从目标 pane 的 durable config 重建 tool-specific launch command。  Claude pane SHALL 根据自己的值决定 development-channel flag 和 auto-confirm, Codex pane SHALL 根据自己的值决定 pane pre-registration 和 remote app-server bootstrap。
 
-#### Scenario: Claude graceful resume re-applies behavior
+#### Scenario: Claude pane restart 重放自己的配置
+- **WHEN**一个开启 Cross Agent Team 的 Claude pane 经 `R` restart
+- **THEN**该 pane 的新命令 SHALL 包含 development-channel flag
+- **AND** AoE SHALL 对该 pane 再次执行 startup auto-confirm
 
-- **WHEN** a Cross Agent Team Claude session is restarted via `R` along the graceful-resume path
-- **THEN** the resumed command includes `--dangerously-load-development-channels`
-- **AND** AoE auto-confirms the startup screens again
+#### Scenario: 未开启的 sibling 不被装饰
+- **WHEN**一个 session 中只有一个 pane 开启 Cross Agent Team
+- **AND** session 被 restart 或 recovery
+- **THEN**只有该 pane SHALL 使用 Cross Agent Team launch path
+- **AND** sibling pane SHALL 使用普通 launch path
 
-#### Scenario: Claude kill-and-recreate re-applies behavior
+#### Scenario: Codex pane resume 保留 token 和独立开关
+- **WHEN**一个开启 Cross Agent Team 的 Codex pane 使用有效 resume token restart
+- **THEN**该 pane SHALL 再次执行 xats bootstrap
+- **AND** native Codex resume token SHALL 保留
+- **AND**其他 pane 的 Cross Agent Team 值 SHALL 不改变
 
-- **WHEN** a Cross Agent Team Claude session is restarted via `R` along the kill-and-recreate path
-- **THEN** the recreated command includes `--dangerously-load-development-channels`
-- **AND** AoE auto-confirms the startup screens again
-
-#### Scenario: Codex resume restart re-applies xats bootstrap
-
-- **WHEN** a Cross Agent Team Codex session is restarted via `R` with a resume token
-- **THEN** the pane is pre-registered with a fresh xats claim
-- **AND** the resumed Codex command connects to the configured local app-server
-- **AND** the native Codex resume token is preserved
-
-#### Scenario: Codex fresh restart re-applies xats bootstrap
-
-- **WHEN** a Cross Agent Team Codex session is restarted fresh
-- **THEN** the pane is pre-registered with a fresh xats claim
-- **AND** a fresh Codex TUI connects to the configured local app-server
+#### Scenario: Codex pane fresh restart 重放 bootstrap
+- **WHEN**一个开启 Cross Agent Team 的 Codex pane fresh restart
+- **THEN**该 pane SHALL pre-register 并连接配置的 local app-server
 
 ### Requirement: Codex xats pane bootstrap
 
@@ -289,30 +268,23 @@ exists, not on registering without one.
 
 ### Requirement: Cross Agent Team configuration
 
-AoE SHALL expose Cross Agent Team configuration in the settings TUI, editable both
-globally and per profile:
+AoE SHALL 在 Settings TUI 中继续提供 global 和 profile 两个 scope 的 Cross Agent Team 配置:
 
-- `cross_agent_team_channel`: the channel string appended after the
-  development-channels flag, defaulting to `server:cross-agent-teams-channel`.
-- `cross_agent_team_default`: whether the New Session checkbox starts checked,
-  defaulting to false.
+- `cross_agent_team_channel`: Claude development-channel string, 默认 `server:cross-agent-teams-channel`。
+- `cross_agent_team_default`: New Session 中每个受支持 pane checkbox 的初始值, 默认 false。
 
-Profile overrides SHALL merge with global values following the existing profile
-override merge logic.
+profile override SHALL 继续按现有 merge 规则覆盖 global 值。  channel 可以保持 session 级共享, 但是否启用 SHALL 为 pane 级。
 
-#### Scenario: Channel value used on launch
+#### Scenario: 自定义 channel 只用于已开启的 Claude pane
+- **WHEN** `cross_agent_team_channel` 设置为自定义值
+- **AND**一个 Claude pane 开启 Cross Agent Team
+- **THEN**该 pane 的命令 SHALL 使用自定义 channel
+- **AND**未开启的 Claude pane SHALL 不添加 development-channel flag
 
-- **WHEN** `cross_agent_team_channel` is set to a custom value
-- **AND** a Cross Agent Team claude session is launched
-- **THEN** the launched command appends that custom channel string after
-  `--dangerously-load-development-channels`
-
-#### Scenario: Per-profile override
-
-- **WHEN** a profile overrides `cross_agent_team_default` or
-  `cross_agent_team_channel`
-- **THEN** sessions created under that profile use the overridden value
-- **AND** clearing the override falls back to the global value
+#### Scenario: profile default 初始化每个 pane
+- **WHEN** profile override 设置 `cross_agent_team_default`
+- **THEN** New Session 中每个受支持 pane SHALL 使用该默认值独立初始化
+- **AND**清除 override SHALL 回退到 global 值
 
 ### Requirement: Cross Agent Team panes carry a durable identity key
 
@@ -350,17 +322,22 @@ AoE SHALL NOT read, store, display, or configure a xats team or agent name.
 
 ### Requirement: Identity key storage follows the pane's role
 
-The primary pane's identity key SHALL be stored on the instance record, alongside the other state describing that same agent (its pre-allocated session id, resume token, and pending fork). An adopted pane's identity key SHALL be stored on its durable slot record.
+每个 managed pane 的 identity key SHALL 跟随该 pane 的 durable slot 保存, 包括 primary pane。  instance record MAY 在 slot 0 建立前保留 primary identity key 作为首次启动 bootstrap 或 migration mirror, 但 SHALL NOT 在 slot 0 已有非空 key 时覆盖它。  slot SHALL 同时保存决定该 key 是否应被注入的 pane-level Cross Agent Team config。
 
-#### Scenario: Primary key survives with the instance record
+#### Scenario: Primary key 存在 slot 0
+- **WHEN** primary pane 开启 Cross Agent Team 并获得 identity key
+- **THEN**该 key SHALL 保存到 slot 0
+- **AND**关闭并重开 AoE 后 SHALL 仍可读取同一个 key
 
-- **WHEN** a Cross Agent Team session's primary pane has an identity key and AoE is closed and reopened
-- **THEN** the instance record SHALL still carry that key
+#### Scenario: Secondary key 存在自己的 slot
+- **WHEN** secondary pane 开启 Cross Agent Team 并获得 identity key
+- **THEN**该 key SHALL 保存到 secondary pane 的 durable slot
+- **AND**它 SHALL 与 primary key 相互独立
 
-#### Scenario: Adopted slot key survives with the slot record
-
-- **WHEN** an adopted pane's slot has an identity key and AoE is closed and reopened
-- **THEN** the durable slot record SHALL still carry that key
+#### Scenario: 旧 primary key 迁移到 slot 0
+- **WHEN** migration 读取到旧 instance record 上的 primary identity key
+- **THEN** migration SHALL 把它写入 slot 0
+- **AND**重复运行 migration SHALL 不覆盖 slot 0 已有的非空 key
 
 ### Requirement: Panes AoE never launched receive a key at their first relaunch
 
@@ -443,54 +420,58 @@ An identity key that no longer corresponds to a known identity SHALL be treated 
 
 ### Requirement: Extra agent panes AoE launches carry an identity key from their first launch
 
-When AoE launches an additional agent pane for a Cross Agent Team session, it SHALL mint an identity key for that pane at launch, persist it on the pane's durable slot record, and inject it into the launched process as `XATS_IDENTITY_KEY`. This covers both launch entry points: the right pane of a new session, and `aoe session add-agent-pane`.
+当 AoE 启动一个 pane-level Cross Agent Team 已开启的额外 agent pane 时, SHALL 在首次启动时创建独立 identity key, 保存到该 pane 的 durable slot, 并以 `XATS_IDENTITY_KEY` 注入进程环境。  该规则覆盖 New Session secondary pane 和 `aoe session add-agent-pane` 的明确 pane 配置。
 
-The key SHALL be freshly minted for that pane. AoE SHALL NOT reuse the instance's own key for it: two live panes presenting one identity is the state the recovery design cannot resolve, and it is preventable only at the moment the second pane is launched.
+额外 pane SHALL 不复用任何 sibling pane 的 key。  只有该 pane 自己开启 Cross Agent Team 时才创建 key, session 中其他 pane 的开关 SHALL 不作为判断依据。  shell pane SHALL 永远不创建 key。
 
-An extra pane is not a pane AoE never launched. AoE builds its command and knows its slot, so the allowance that a pane may run keyless until its first relaunch applies only to panes a user started by hand.
+#### Scenario: 只有 secondary 开启时仍获得 key
+- **WHEN** primary pane 关闭 Cross Agent Team
+- **AND** secondary agent pane 开启 Cross Agent Team
+- **THEN** secondary pane SHALL 在首次启动时获得并持久化自己的 key
+- **AND** primary pane SHALL 不获得 key
 
-The key travels the same route as the primary pane's: an environment assignment prefixing the pane's start command, which the pane's shell consumes before the agent runs. The agent process therefore never carries it in its arguments. It does remain readable from the pane's recorded start command by anything that can talk to the same tmux server, which is a property of the existing injection route rather than of this change, and is not addressed here.
+#### Scenario: 只有 primary 开启时 secondary 不获得 key
+- **WHEN** primary pane 开启 Cross Agent Team
+- **AND** secondary agent pane 关闭 Cross Agent Team
+- **THEN** secondary pane SHALL 不创建或注入 identity key
 
-#### Scenario: Right pane of a new session is launched with a key
+#### Scenario: 两个 pane 都开启时 key 不同
+- **WHEN** primary 与 secondary agent pane 都开启 Cross Agent Team
+- **THEN**两个 pane SHALL 分别获得不同 key
 
-- **WHEN** a Cross Agent Team session is created with a right pane agent tool
-- **THEN** the right pane process environment SHALL contain `XATS_IDENTITY_KEY`
-- **AND** the key SHALL be recorded on that pane's durable slot record
+#### Scenario: Restart 复用 extra pane key
+- **WHEN**一个额外 pane 已持久化 identity key
+- **AND**该 pane restart 或 recovery
+- **THEN**该 pane SHALL 复用原 key 而不是重新创建
 
-#### Scenario: A pane added through the CLI is launched with a key
+#### Scenario: Shell extra pane 没有 key
+- **WHEN**额外 pane Tool 为 `shell`
+- **THEN**该 pane SHALL 不创建 identity key
 
-- **WHEN** `aoe session add-agent-pane` launches an agent pane into a Cross Agent Team session
-- **THEN** the launched pane's environment SHALL contain `XATS_IDENTITY_KEY`
+#### Scenario: key 持久化失败需要显式报告
+- **WHEN**额外 pane 已启动但其 identity key 无法持久化
+- **THEN**失败 SHALL 显示给用户而不是只写日志
+- **AND**系统 SHALL 精确关闭本次启动的 pane
+- **AND**只回滚本次新建且尚未转交 durable state 的 Worktree
+- **AND**任何复用 Worktree SHALL 保持不变
 
-#### Scenario: The extra pane's key is not the primary pane's key
+### Requirement: Cross Agent Team launch decoration is pane scoped
 
-- **WHEN** a Cross Agent Team session is created with a right pane agent tool
-- **THEN** the right pane's identity key SHALL differ from the key injected into the primary pane
+所有 tool-specific Cross Agent Team 行为 SHALL 使用目标 pane 的配置判断, 不得读取 sibling pane 或 session 级 enabled 值替代。  该行为包括 Claude development-channel 与 auto-confirm、Codex pre-registration 与 remote bootstrap、identity key minting 和 injection。
 
-#### Scenario: The extra pane's key is reused rather than reminted on restart
+#### Scenario: Right-only Claude 使用 development channel
+- **WHEN** primary pane 关闭 Cross Agent Team
+- **AND** secondary Claude pane 开启 Cross Agent Team
+- **THEN** secondary Claude command SHALL 包含 development-channel flag
+- **AND** primary command SHALL 不包含 Cross Agent Team decoration
 
-- **WHEN** a session whose extra pane was launched with a key is restarted
-- **THEN** the relaunched extra pane SHALL carry the same identity key it carried before the restart
+#### Scenario: Right-only Codex 使用 xats bootstrap
+- **WHEN** primary pane 关闭 Cross Agent Team
+- **AND** secondary Codex pane 开启 Cross Agent Team
+- **THEN** secondary Codex SHALL 使用 pane-local xats bootstrap
+- **AND** primary pane SHALL 保持普通启动
 
-#### Scenario: No key when Cross Agent Team is disabled
-
-- **WHEN** an extra agent pane is launched for a session that does not have Cross Agent Team enabled
-- **THEN** no identity key SHALL be minted and no `XATS_IDENTITY_KEY` SHALL be injected
-
-#### Scenario: A shell extra pane receives no key
-
-- **WHEN** an extra pane is launched with the `shell` tool
-- **THEN** no identity key SHALL be minted for it
-
-#### Scenario: Failing to record the key is reported, not swallowed
-
-- **WHEN** an extra agent pane is launched but its identity key cannot be persisted
-- **THEN** the failure SHALL be surfaced to the user rather than only logged
-- **AND** the pane SHALL be left running, because it is usable and relaunching it would not repair the record
-
-#### Scenario: Key reaches the agent through the environment, not its arguments
-
-- **WHEN** an extra agent pane is launched with an identity key
-- **THEN** the key SHALL be passed as an environment assignment that the pane's shell consumes
-- **AND** the key value SHALL NOT appear in the arguments of the agent process itself
-
+#### Scenario: 新 adopt 的 pane 不继承 primary 开关
+- **WHEN** reconciler 首次 adopt 一个没有 durable pane config 的非 primary pane
+- **THEN**该 pane 的 Cross Agent Team SHALL 初始化为 false
+- **AND** primary pane 的 enabled 值 SHALL 不复制到该 pane

@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::home::{HomeView, PendingRightPane};
+use super::home::HomeView;
 use super::styles::load_theme;
 use super::styles::Theme;
 use super::tab_title;
@@ -53,6 +53,20 @@ where
 
 fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, profile: &str) {
     let _ = tab_title::set_tui_title(terminal.backend_mut(), profile);
+}
+
+fn skipped_slot_warning(skipped: usize) -> Option<String> {
+    (skipped > 0).then(|| {
+        format!("Skipped {skipped} invalid tracked pane(s); repair their stored pane configuration")
+    })
+}
+
+fn combine_pane_errors(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
+    }
 }
 
 pub struct App {
@@ -448,9 +462,12 @@ impl App {
                     // silently narrowing the restart scope.
                     let (slots, slot_read_error) =
                         match crate::db::Store::open_with_schema(&profile)
-                            .and_then(|store| store.read_slots_for_instance(&id))
+                            .and_then(|store| store.read_slots_for_instance_with_diagnostics(&id))
                         {
-                            Ok(slots) => (slots, None),
+                            Ok(read) => {
+                                let warning = skipped_slot_warning(read.skipped);
+                                (read.slots, warning)
+                            }
                             Err(e) => {
                                 tracing::error!("Failed to read agent slots for '{}': {}", id, e);
                                 (
@@ -509,18 +526,17 @@ impl App {
                                 _ => None,
                             })
                             .collect();
-                        if errors.is_empty() {
-                            self.home.set_instance_error(&id, None);
-                        } else {
-                            self.home.set_instance_error(
-                                &id,
-                                Some(format!(
-                                    "{} pane(s) failed to restart: {}",
-                                    errors.len(),
-                                    errors.join("; ")
-                                )),
-                            );
-                        }
+                        let restart_error = (!errors.is_empty()).then(|| {
+                            format!(
+                                "{} pane(s) failed to restart: {}",
+                                errors.len(),
+                                errors.join("; ")
+                            )
+                        });
+                        self.home.set_instance_error(
+                            &id,
+                            combine_pane_errors(slot_read_error, restart_error),
+                        );
                     }
 
                     if let Err(err) = self.home.save() {
@@ -596,18 +612,23 @@ impl App {
                 return Ok(());
             }
         };
-        let slots = match store.read_slots_for_instance(id) {
-            Ok(slots) => slots,
+        let read = match store.read_slots_for_instance_with_diagnostics(id) {
+            Ok(read) => read,
             Err(e) => {
                 tracing::error!("Failed to read slots for recovery of '{}': {}", id, e);
                 self.home.set_instance_error(id, Some(e.to_string()));
                 return Ok(());
             }
         };
+        let slot_warning = skipped_slot_warning(read.skipped);
+        let slots = read.slots;
 
         // Re-check recoverability at action time: a live session or an instance
-        // with no slots is not recoverable, so do nothing and surface no error.
+        // with no slots is not recoverable. Invalid tracked slots remain visible.
         if !inst.is_recoverable(!slots.is_empty()) {
+            if slot_warning.is_some() {
+                self.home.set_instance_error(id, slot_warning);
+            }
             return Ok(());
         }
 
@@ -628,22 +649,20 @@ impl App {
                         _ => None,
                     })
                     .collect();
-                if errors.is_empty() {
-                    self.home.set_instance_error(id, None);
-                } else {
-                    self.home.set_instance_error(
-                        id,
-                        Some(format!(
-                            "{} pane(s) failed to recover: {}",
-                            errors.len(),
-                            errors.join("; ")
-                        )),
-                    );
-                }
+                let recovery_error = (!errors.is_empty()).then(|| {
+                    format!(
+                        "{} pane(s) failed to recover: {}",
+                        errors.len(),
+                        errors.join("; ")
+                    )
+                });
+                self.home
+                    .set_instance_error(id, combine_pane_errors(slot_warning, recovery_error));
             }
             Err(e) => {
                 tracing::error!("Failed to recover instance '{}': {}", id, e);
-                self.home.set_instance_error(id, Some(e.to_string()));
+                self.home
+                    .set_instance_error(id, combine_pane_errors(slot_warning, Some(e.to_string())));
                 self.home
                     .set_instance_status(id, crate::session::Status::Error);
                 return Ok(());
@@ -745,7 +764,13 @@ impl App {
             return Ok(());
         }
 
-        let tmux_session = instance.tmux_session()?;
+        let tmux_session = match instance.tmux_session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.home.take_pending_right_pane();
+                return Err(error);
+            }
+        };
 
         // Determine whether the agent pane needs to be (re)started. Attaching
         // must preserve whatever is currently in the pane -- a running agent,
@@ -766,6 +791,7 @@ impl App {
                     .set_instance_status(session_id, crate::session::Status::Starting);
                 let mut inst = instance.clone();
                 if let Err(e) = inst.respawn_agent_pane() {
+                    self.home.take_pending_right_pane();
                     self.home
                         .set_instance_error(session_id, Some(e.to_string()));
                     self.home
@@ -828,6 +854,7 @@ impl App {
                     .set_instance_status(session_id, crate::session::Status::Starting);
                 let mut inst = instance.clone();
                 if let Err(e) = inst.start_with_size_opts(size, skip_on_launch) {
+                    self.home.take_pending_right_pane();
                     self.home
                         .set_instance_error(session_id, Some(e.to_string()));
                     self.home
@@ -1003,18 +1030,32 @@ impl App {
     fn launch_managed_pane(
         &mut self,
         inst: &crate::session::Instance,
-        pending: &PendingRightPane,
+        pending: &crate::session::PaneDraft,
     ) -> bool {
         let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
-        let cwd = pending.working_dir(&inst.project_path);
+        let profile = self.home.storage.profile().to_string();
+        let resolved = match crate::session::builder::resolve_pane_config(
+            pending.clone(),
+            Some(&inst.project_path),
+            &profile,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.report_pane_not_created(&format!("{error:#}"));
+                return false;
+            }
+        };
+        let pane = &resolved.config;
+        let cwd = pane.working_dir.as_str();
 
         // Splitting anyway would leave an empty pane the user has to close,
         // with nothing saying why it is empty.
-        let Some(launch) = inst.build_extra_pane_command(&pending.tool, cwd) else {
-            self.report_pane_not_created(&format!(
-                "No launch command for right pane tool '{}'.",
-                pending.tool
-            ));
+        let Some(launch) = inst.build_extra_pane_config_command(pane) else {
+            let detail = Self::append_pane_cleanup_error(
+                format!("No launch command for right pane tool '{}'.", pane.tool),
+                crate::session::builder::cleanup_resolved_pane(&resolved),
+            );
+            self.report_pane_not_created(&detail);
             return false;
         };
 
@@ -1025,11 +1066,15 @@ impl App {
             &session_name,
             cwd,
             &launch.command,
-            pending.tool != "shell",
+            pane.tool != "shell",
         ) {
             Ok(pane_id) => pane_id,
             Err(e) => {
-                self.report_pane_not_created(&format!("{e:#}"));
+                let detail = Self::append_pane_cleanup_error(
+                    format!("{e:#}"),
+                    crate::session::builder::cleanup_resolved_pane(&resolved),
+                );
+                self.report_pane_not_created(&detail);
                 return false;
             }
         };
@@ -1038,33 +1083,39 @@ impl App {
         // later relaunch reuses it instead of handing xats a key no identity
         // holds. The pane's own directory lives there too, so a restart returns
         // it here rather than to the session's directory.
-        let profile = self.home.storage.profile().to_string();
         let recorded = inst.record_launched_extra_pane(
             &profile,
             &session_name,
             &crate::db::reconcile::LaunchedPane {
                 pane_id: &pane_id,
-                agent: &pending.tool,
-                cwd,
+                config: pane,
                 identity_key: &launch.identity_key,
             },
         );
 
-        // The pane is up either way; surface the loss rather than leaving the
-        // session looking healthy while its identity cannot survive.
-        //
-        // A dialog rather than the session's error field: that field is
-        // overwritten by the next status poll, whose update carries the value
-        // read before this ran, so the warning could disappear before it was
-        // ever drawn.
         if let Err(e) = recorded {
             tracing::error!("{:#}", e);
-            self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
-                "Identity key not recorded",
-                &format!("{e:#}"),
-            ));
+            let detail = match crate::tmux::kill_pane_exact(&pane_id) {
+                Ok(()) => Self::append_pane_cleanup_error(
+                    format!("{e:#}"),
+                    crate::session::builder::cleanup_resolved_pane(&resolved),
+                ),
+                Err(rollback_error) => {
+                    format!("{e:#}. Failed to roll back pane {pane_id}: {rollback_error:#}")
+                }
+            };
+            self.report_pane_not_created(&detail);
+            return false;
         }
+        inst.auto_confirm_launched_pane(&pane_id, pane);
         true
+    }
+
+    fn append_pane_cleanup_error(detail: String, cleanup: anyhow::Result<()>) -> String {
+        match cleanup {
+            Ok(()) => detail,
+            Err(error) => format!("{detail}. {error:#}"),
+        }
     }
 
     fn report_pane_not_created(&mut self, detail: &str) {

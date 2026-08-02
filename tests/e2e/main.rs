@@ -29,6 +29,7 @@ mod multi_agent_session;
 mod multi_pane_restart;
 mod new_session;
 mod pane_cwd;
+mod pane_level_config;
 mod pane_session_capture;
 mod profile_picker;
 mod right_pane_cwd;

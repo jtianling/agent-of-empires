@@ -255,7 +255,7 @@ fn poll_count_eq(db: &Path, sql: &str, expected: &str, timeout: Duration) -> (bo
 }
 
 /// Kills the spawned monitor + attach client and the isolated private tmux
-/// server on drop, so the test cleans up even if an assertion panics. (This test
+/// sessions on drop, so the test cleans up even if an assertion panics. (This test
 /// deliberately does not run `spawn_tui`, so the harness Drop -- which only
 /// sweeps the default socket -- would otherwise leave the private server and its
 /// managed session running.)
@@ -275,11 +275,7 @@ impl Drop for Cleanup<'_> {
             let _ = c.kill();
             let _ = c.wait();
         }
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(self.h.tmux_socket_path())
-            .arg("kill-server")
-            .output();
+        crate::harness::stop_private_tmux_sessions(self.h.tmux_socket_path());
     }
 }
 

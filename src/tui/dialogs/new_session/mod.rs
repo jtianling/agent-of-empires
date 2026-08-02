@@ -16,12 +16,10 @@ use tui_input::Input;
 use super::DialogResult;
 use layout::ABSENT;
 
-use crate::containers::{self, ContainerRuntimeInterface};
-use crate::session::config::SandboxConfig;
 use crate::session::repo_config::HookProgress;
 #[cfg(test)]
 use crate::session::Config;
-use crate::session::{civilizations, resolve_config};
+use crate::session::{civilizations, resolve_config, PaneDraft, PaneWorktreeRequest};
 use crate::tmux::AvailableTools;
 use crate::tui::components::{
     DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult, PathField,
@@ -39,11 +37,6 @@ pub(super) enum HelpVisibility {
     RightPanePath,
     Yolo,
     CrossAgentTeam,
-    Sandbox,
-    /// The sandbox sub-options, shown only while sandboxing is enabled.
-    SandboxOptions,
-    /// Skipped outright: the profile field is no longer part of the dialog.
-    Never,
 }
 
 pub(super) struct FieldHelp {
@@ -56,14 +49,19 @@ pub(super) const HELP_DIALOG_WIDTH: u16 = 85;
 
 pub(super) const FIELD_HELP: &[FieldHelp] = &[
     FieldHelp {
-        name: "Profile",
-        description: "Settings profile for session defaults (Left/Right to cycle)",
-        visibility: HelpVisibility::Never,
-    },
-    FieldHelp {
         name: "Title",
         description: "Session name (auto-generates if empty)",
         visibility: HelpVisibility::Always,
+    },
+    FieldHelp {
+        name: "Group",
+        description: "Optional grouping for organization (Ctrl+P to browse existing groups)",
+        visibility: HelpVisibility::Always,
+    },
+    FieldHelp {
+        name: "Tool",
+        description: "Which AI tool to use (Ctrl+P to configure command and extra args)",
+        visibility: HelpVisibility::ToolSelection,
     },
     FieldHelp {
         name: "Path",
@@ -71,9 +69,21 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
         visibility: HelpVisibility::Always,
     },
     FieldHelp {
-        name: "Tool",
-        description: "Which AI tool to use (Ctrl+P to configure command and extra args)",
-        visibility: HelpVisibility::ToolSelection,
+        name: "YOLO Mode",
+        description:
+            "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
+        visibility: HelpVisibility::Yolo,
+    },
+    FieldHelp {
+        name: "Cross Agent Team",
+        description: "Launch the selected tool with its local xats integration",
+        visibility: HelpVisibility::CrossAgentTeam,
+    },
+    FieldHelp {
+        name: "Worktree",
+        description:
+            "Branch name for git worktree (Ctrl+P to configure branch mode and extra repos)",
+        visibility: HelpVisibility::Always,
     },
     FieldHelp {
         name: "Right Pane",
@@ -85,78 +95,21 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
         description: "Working directory for the right pane (empty = same as the session)",
         visibility: HelpVisibility::RightPanePath,
     },
-    FieldHelp {
-        name: "YOLO Mode",
-        description:
-            "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
-        visibility: HelpVisibility::Yolo,
-    },
-    FieldHelp {
-        name: "Cross Agent Teams",
-        description: "Launch the selected tool with its local xats integration",
-        visibility: HelpVisibility::CrossAgentTeam,
-    },
-    FieldHelp {
-        name: "Worktree",
-        description:
-            "Branch name for git worktree (Ctrl+P to configure branch mode and extra repos)",
-        visibility: HelpVisibility::Always,
-    },
-    FieldHelp {
-        name: "Sandbox",
-        description: "Run session in Docker container for isolation (Ctrl+P to configure)",
-        visibility: HelpVisibility::Sandbox,
-    },
-    FieldHelp {
-        name: "Image",
-        description: "Docker image. Edit config.toml [sandbox] default_image to change default",
-        visibility: HelpVisibility::SandboxOptions,
-    },
-    FieldHelp {
-        name: "Environment",
-        description: "Env vars: bare KEY passes host value, KEY=VALUE sets explicitly",
-        visibility: HelpVisibility::SandboxOptions,
-    },
-    FieldHelp {
-        name: "Group",
-        description: "Optional grouping for organization (Ctrl+P to browse existing groups)",
-        visibility: HelpVisibility::Always,
-    },
 ];
 
 #[derive(Clone)]
 pub struct NewSessionData {
     pub profile: String,
     pub title: String,
-    pub path: String,
     pub group: String,
-    pub tool: String,
-    pub worktree_branch: Option<String>,
-    pub create_new_branch: bool,
-    pub extra_repo_paths: Vec<String>,
-    pub sandbox: bool,
-    /// The sandbox image to use (always populated from the input field).
-    pub sandbox_image: String,
-    pub yolo_mode: bool,
-    /// Whether to launch in Cross Agent Team mode for a supported non-sandboxed tool.
-    pub cross_agent_team: bool,
+    pub primary: PaneDraft,
+    pub secondary: Option<PaneDraft>,
     /// Claude development-channels string for Cross Agent Team launches.
     pub cross_agent_team_channel: String,
-    /// Additional environment entries for the container.
-    /// `KEY` = pass through from host, `KEY=VALUE` = set explicitly.
-    pub extra_env: Vec<String>,
     /// Extra arguments to append after the agent binary
     pub extra_args: String,
     /// Command override for the agent binary (replaces the default binary)
     pub command_override: String,
-    /// Whether to reuse an existing worktree instead of failing
-    pub reuse_worktree: bool,
-    /// Optional tool to launch in a right pane (auto-split). None or empty = no split.
-    pub right_pane_tool: Option<String>,
-    /// Working directory for the right pane. `None` means the session's own,
-    /// resolved when the pane is split rather than snapshotted here: a
-    /// worktree-backed session does not know its directory until it is created.
-    pub right_pane_path: Option<String>,
 }
 
 /// Spinner frames for loading animation
@@ -168,7 +121,13 @@ pub(super) const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 pub(super) enum DirPickerTarget {
     SessionPath,
     RightPanePath,
-    WorkspaceRepo,
+    WorkspaceRepo(PaneTarget),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PaneTarget {
+    Primary,
+    Secondary,
 }
 
 /// A pending confirmation to create the directories a submit needs.
@@ -229,61 +188,66 @@ fn create_dir_tracked(dir: &str, owned: &mut Vec<std::path::PathBuf>) -> std::io
     Ok(())
 }
 
+pub(super) struct PaneDialogState {
+    pub(super) tool_index: usize,
+    pub(super) path: PathField,
+    pub(super) worktree_branch: Input,
+    pub(super) create_new_branch: bool,
+    pub(super) yolo_mode: bool,
+    pub(super) cross_agent_team: bool,
+    pub(super) workspace_repos: Vec<String>,
+    pub(super) workspace_repos_expanded: bool,
+    pub(super) workspace_repo_selected_index: usize,
+    pub(super) workspace_repo_editing_input: Option<Input>,
+    pub(super) workspace_repo_adding_new: bool,
+    pub(super) workspace_repo_ghost: Option<PathGhostCompletion>,
+    pub(super) confirm_reuse_worktree: bool,
+    saved_yolo_mode: Option<bool>,
+    saved_cross_agent_team: Option<bool>,
+}
+
+impl PaneDialogState {
+    fn new(path: String, tool_index: usize, yolo_mode: bool, cross_agent_team: bool) -> Self {
+        Self {
+            tool_index,
+            path: PathField::new(path),
+            worktree_branch: Input::default(),
+            create_new_branch: true,
+            yolo_mode,
+            cross_agent_team,
+            workspace_repos: Vec::new(),
+            workspace_repos_expanded: false,
+            workspace_repo_selected_index: 0,
+            workspace_repo_editing_input: None,
+            workspace_repo_adding_new: false,
+            workspace_repo_ghost: None,
+            confirm_reuse_worktree: false,
+            saved_yolo_mode: None,
+            saved_cross_agent_team: None,
+        }
+    }
+}
+
 pub struct NewSessionDialog {
     pub(super) profile: String,
     pub(super) title: Input,
-    pub(super) path: PathField,
-    /// Working directory for the right pane; empty means the session's own.
-    pub(super) right_pane_path: PathField,
     pub(super) group: Input,
-    pub(super) tool_index: usize,
-    /// Right pane tool index: 0 = "none", 1+ maps to available_tools[index-1]
-    pub(super) right_pane_tool_index: usize,
+    pub(super) primary: PaneDialogState,
+    pub(super) secondary: Option<PaneDialogState>,
+    pub(super) collapsed_secondary: Option<PaneDialogState>,
     pub(super) focused_field: usize,
     pub(super) available_tools: Vec<&'static str>,
     pub(super) existing_titles: Vec<String>,
-    pub(super) worktree_branch: Input,
-    pub(super) create_new_branch: bool,
-    pub(super) sandbox_enabled: bool,
-    pub(super) sandbox_image: Input,
-    pub(super) docker_available: bool,
-    pub(super) yolo_mode: bool,
-    pub(super) yolo_mode_default: bool,
-    pub(super) cross_agent_team: bool,
     pub(super) cross_agent_team_channel: String,
-    /// Additional repo paths for multi-repo workspace
-    pub(super) workspace_repos: Vec<String>,
-    /// Whether the workspace repos list is expanded (editing mode)
-    pub(super) workspace_repos_expanded: bool,
-    /// Currently selected index in the workspace repos list
-    pub(super) workspace_repo_selected_index: usize,
-    /// Input for editing/adding workspace repo entries
-    pub(super) workspace_repo_editing_input: Option<Input>,
-    /// Whether we are adding a new repo entry (vs editing existing)
-    pub(super) workspace_repo_adding_new: bool,
-    /// Ghost completion for workspace repo path editing
-    pub(super) workspace_repo_ghost: Option<PathGhostCompletion>,
+    default_yolo_mode: bool,
+    default_cross_agent_team: bool,
     /// Which field the directory picker will write into when it returns.
     pub(super) dir_picker_target: DirPickerTarget,
     /// Worktree configuration overlay mode (Ctrl+P on worktree field)
     pub(super) worktree_config_mode: bool,
     /// Focused field within the worktree config overlay (0=new_branch, 1=extra_repos)
     pub(super) worktree_config_focused_field: usize,
-    /// Extra environment entries (session-specific).
-    /// `KEY` = pass through, `KEY=VALUE` = set explicitly.
-    pub(super) extra_env: Vec<String>,
-    /// Whether the env list is expanded (editing mode)
-    pub(super) env_list_expanded: bool,
-    /// Currently selected index in the env list
-    pub(super) env_selected_index: usize,
-    /// Input for editing/adding env entries
-    pub(super) env_editing_input: Option<Input>,
-    /// Whether we are adding a new entry (vs editing existing)
-    pub(super) env_adding_new: bool,
-    /// Pre-computed label/value pairs for non-default inherited sandbox settings.
-    pub(super) inherited_settings: Vec<(String, String)>,
-    pub(super) sandbox_config_mode: bool,
-    pub(super) sandbox_focused_field: usize,
+    pub(super) worktree_config_target: PaneTarget,
     /// Tool configuration mode (Ctrl+P on tool field)
     pub(super) tool_config_mode: bool,
     pub(super) tool_config_focused_field: usize,
@@ -313,11 +277,6 @@ pub struct NewSessionDialog {
     group_ghost: Option<GroupGhostCompletion>,
     /// Inline confirmation for creating the directories a submit needs.
     pub(super) confirm_create_dirs: Option<CreateDirsConfirm>,
-    /// Whether the user has been warned about reusing an existing worktree.
-    /// On first Enter the warning is shown; on second Enter the session is created with reuse.
-    pub(super) confirm_reuse_worktree: bool,
-    /// Saved yolo_mode value before switching to shell, restored on switch back.
-    saved_yolo_mode: Option<bool>,
 }
 
 /// Shared logic for handling key events in an editable list (env keys or env values).
@@ -402,33 +361,6 @@ fn handle_editable_list_key(
     }
 }
 
-/// Build label/value pairs for non-default inherited sandbox settings.
-fn build_inherited_settings(sandbox: &SandboxConfig) -> Vec<(String, String)> {
-    let mut settings = Vec::new();
-    if sandbox.mount_ssh {
-        settings.push(("Mount SSH".to_string(), "yes".to_string()));
-    }
-    if !sandbox.extra_volumes.is_empty() {
-        settings.push((
-            "Extra Volumes".to_string(),
-            format!("{} items", sandbox.extra_volumes.len()),
-        ));
-    }
-    if !sandbox.volume_ignores.is_empty() {
-        settings.push((
-            "Volume Ignores".to_string(),
-            format!("{} items", sandbox.volume_ignores.len()),
-        ));
-    }
-    if let Some(ref cpu) = sandbox.cpu_limit {
-        settings.push(("CPU Limit".to_string(), cpu.clone()));
-    }
-    if let Some(ref mem) = sandbox.memory_limit {
-        settings.push(("Memory Limit".to_string(), mem.clone()));
-    }
-    settings
-}
-
 impl NewSessionDialog {
     pub fn new(
         tools: AvailableTools,
@@ -447,8 +379,6 @@ impl NewSessionDialog {
             .unwrap_or(launch_dir_str);
 
         let available_tools = tools.available_list();
-        let docker_available = containers::get_container_runtime().is_available();
-
         // Load resolved config (global merged with profile overrides)
         let config = resolve_config(profile).unwrap_or_default();
 
@@ -462,8 +392,6 @@ impl NewSessionDialog {
             0
         };
 
-        // Apply sandbox defaults from config
-        let sandbox_enabled = docker_available && config.sandbox.enabled_by_default;
         let yolo_mode = config.session.yolo_mode_default;
         let cross_agent_team = config.session.cross_agent_team_default;
         let cross_agent_team_channel = config.session.cross_agent_team_channel.clone();
@@ -487,22 +415,13 @@ impl NewSessionDialog {
             .cloned()
             .unwrap_or_default();
 
-        // Initialize env entries and inherited settings from config when sandbox is enabled
-        let (extra_env, inherited_settings) = if sandbox_enabled {
-            let inherited = build_inherited_settings(&config.sandbox);
-            (config.sandbox.environment.clone(), inherited)
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
         Self {
             profile: profile.to_string(),
             title: Input::default(),
-            path: PathField::new(current_dir),
-            right_pane_path: PathField::default(),
             group: Input::new(default_group.unwrap_or_default()),
-            tool_index,
-            right_pane_tool_index: 0,
+            primary: PaneDialogState::new(current_dir, tool_index, yolo_mode, cross_agent_team),
+            secondary: None,
+            collapsed_secondary: None,
             focused_field: 0,
             available_tools,
             existing_titles,
@@ -512,34 +431,13 @@ impl NewSessionDialog {
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
             dir_picker: DirPicker::new(),
-            worktree_branch: Input::default(),
-            create_new_branch: true,
-            workspace_repos: Vec::new(),
-            workspace_repos_expanded: false,
-            workspace_repo_selected_index: 0,
-            workspace_repo_editing_input: None,
-            workspace_repo_adding_new: false,
-            workspace_repo_ghost: None,
             dir_picker_target: DirPickerTarget::SessionPath,
             worktree_config_mode: false,
             worktree_config_focused_field: 0,
-            sandbox_enabled,
-            sandbox_image: Input::new(
-                containers::get_container_runtime().effective_default_image(),
-            ),
-            docker_available,
-            yolo_mode,
-            yolo_mode_default: yolo_mode,
-            cross_agent_team,
+            worktree_config_target: PaneTarget::Primary,
             cross_agent_team_channel,
-            extra_env,
-            env_list_expanded: false,
-            env_selected_index: 0,
-            env_editing_input: None,
-            env_adding_new: false,
-            inherited_settings,
-            sandbox_config_mode: false,
-            sandbox_focused_field: 0,
+            default_yolo_mode: yolo_mode,
+            default_cross_agent_team: cross_agent_team,
             tool_config_mode: false,
             tool_config_focused_field: 0,
             extra_args: Input::new(extra_args_value),
@@ -553,14 +451,12 @@ impl NewSessionDialog {
             hook_output: Vec::new(),
             group_ghost: None,
             confirm_create_dirs: None,
-            confirm_reuse_worktree: false,
-            saved_yolo_mode: None,
         }
     }
 
     /// Pre-fill the path field (e.g. from a selected session).
     pub fn set_path(&mut self, path: String) {
-        self.path.set_value(path);
+        self.primary.path.set_value(path);
     }
 
     /// Pre-fill the group field (e.g. from a selected session or group).
@@ -570,7 +466,7 @@ impl NewSessionDialog {
 
     #[cfg(test)]
     pub fn path_value(&self) -> &str {
-        self.path.value()
+        self.primary.path.value()
     }
 
     #[cfg(test)]
@@ -623,46 +519,122 @@ impl NewSessionDialog {
             changed = true;
         }
 
-        if self.path.tick() {
+        if self.primary.path.tick() {
             changed = true;
         }
 
-        if self.right_pane_path.tick() {
+        if self.secondary.as_mut().is_some_and(|pane| pane.path.tick()) {
             changed = true;
         }
 
         changed
     }
 
-    pub(super) fn is_terminal_selected(&self) -> bool {
-        self.available_tools.get(self.tool_index).copied() == Some("shell")
+    pub(super) fn pane(&self, target: PaneTarget) -> Option<&PaneDialogState> {
+        match target {
+            PaneTarget::Primary => Some(&self.primary),
+            PaneTarget::Secondary => self.secondary.as_ref(),
+        }
     }
 
-    /// Whether the currently selected tool is always in YOLO mode (no opt-in needed).
-    pub(super) fn selected_tool_always_yolo(&self) -> bool {
-        let tool_name = self.available_tools[self.tool_index];
+    pub(super) fn pane_mut(&mut self, target: PaneTarget) -> Option<&mut PaneDialogState> {
+        match target {
+            PaneTarget::Primary => Some(&mut self.primary),
+            PaneTarget::Secondary => self.secondary.as_mut(),
+        }
+    }
+
+    pub(super) fn pane_tool(&self, target: PaneTarget) -> Option<&'static str> {
+        let pane = self.pane(target)?;
+        self.available_tools.get(pane.tool_index).copied()
+    }
+
+    /// Whether the selected pane tool is always in YOLO mode (no opt-in needed).
+    pub(super) fn pane_tool_always_yolo(&self, target: PaneTarget) -> bool {
+        let Some(tool_name) = self.pane_tool(target) else {
+            return false;
+        };
         crate::agents::get_agent(tool_name)
             .and_then(|a| a.yolo.as_ref())
             .is_some_and(|y| matches!(y, crate::agents::YoloMode::AlwaysYolo))
     }
 
-    pub(super) fn right_pane_needs_yolo(&self) -> bool {
-        if self.right_pane_tool_index == 0 {
+    pub(super) fn pane_has_yolo(&self, target: PaneTarget) -> bool {
+        let Some(tool_name) = self.pane_tool(target) else {
             return false;
-        }
-
-        let tool_name = self.available_tools[self.right_pane_tool_index - 1];
-        tool_name != "shell"
-            && crate::agents::get_agent(tool_name)
-                .and_then(|a| a.yolo.as_ref())
-                .is_some_and(|y| !matches!(y, crate::agents::YoloMode::AlwaysYolo))
+        };
+        crate::agents::get_agent(tool_name)
+            .and_then(|agent| agent.yolo.as_ref())
+            .is_some_and(|mode| !matches!(mode, crate::agents::YoloMode::AlwaysYolo))
     }
 
-    /// The right pane path field is shown only for a real right pane tool, and
-    /// never under sandboxing: there the agent's directory is decided by the
-    /// container exec, so a host-side directory would be accepted and ignored.
     pub(super) fn has_right_pane_path_field(&self) -> bool {
-        self.right_pane_tool_index != 0 && !self.sandbox_enabled
+        self.secondary.is_some()
+    }
+
+    pub(super) fn pane_has_cross_agent_team(&self, target: PaneTarget) -> bool {
+        self.pane_tool(target)
+            .is_some_and(crate::session::Instance::supports_cross_agent_team_tool)
+    }
+
+    pub(super) fn right_pane_selection_index(&self) -> usize {
+        self.secondary
+            .as_ref()
+            .map_or(0, |pane| pane.tool_index + 1)
+    }
+
+    fn set_right_pane_selection(&mut self, selection: usize) {
+        if selection == 0 {
+            if let Some(pane) = self.secondary.take() {
+                self.collapsed_secondary = Some(pane);
+            }
+            return;
+        }
+        let tool_index = selection - 1;
+        let default_yolo_mode = self.default_yolo_mode;
+        let default_cross_agent_team = self.default_cross_agent_team;
+        let mut pane = self
+            .secondary
+            .take()
+            .or_else(|| self.collapsed_secondary.take())
+            .unwrap_or_else(|| {
+                PaneDialogState::new(
+                    String::new(),
+                    tool_index,
+                    default_yolo_mode,
+                    default_cross_agent_team,
+                )
+            });
+        pane.tool_index = tool_index;
+        self.secondary = Some(pane);
+        self.normalize_pane_for_tool(PaneTarget::Secondary);
+    }
+
+    fn normalize_pane_for_tool(&mut self, target: PaneTarget) {
+        let always_yolo = self.pane_tool_always_yolo(target);
+        let is_shell = self.pane_tool(target) == Some("shell");
+        let Some(pane) = self.pane_mut(target) else {
+            return;
+        };
+        if is_shell {
+            pane.saved_yolo_mode.get_or_insert(pane.yolo_mode);
+            pane.saved_cross_agent_team
+                .get_or_insert(pane.cross_agent_team);
+            pane.yolo_mode = false;
+            pane.cross_agent_team = false;
+        } else {
+            if let Some(saved) = pane.saved_yolo_mode.take() {
+                pane.yolo_mode = saved;
+            }
+            if always_yolo {
+                pane.yolo_mode = true;
+            }
+        }
+        if !is_shell {
+            if let Some(saved) = pane.saved_cross_agent_team.take() {
+                pane.cross_agent_team = saved;
+            }
+        }
     }
 
     /// Whether a help entry applies to the dialog as it currently stands. The
@@ -670,35 +642,14 @@ impl NewSessionDialog {
     pub(super) fn help_entry_visible(&self, visibility: HelpVisibility) -> bool {
         match visibility {
             HelpVisibility::Always => true,
-            HelpVisibility::Never => false,
             HelpVisibility::ToolSelection => self.available_tools.len() > 1,
             HelpVisibility::RightPanePath => self.has_right_pane_path_field(),
-            HelpVisibility::Yolo => self.has_yolo_field(),
-            HelpVisibility::CrossAgentTeam => self.has_cross_agent_team_field(),
-            HelpVisibility::Sandbox => self.docker_available,
-            HelpVisibility::SandboxOptions => self.docker_available && self.sandbox_enabled,
-        }
-    }
-
-    pub(super) fn has_yolo_field(&self) -> bool {
-        (!self.is_terminal_selected() && !self.selected_tool_always_yolo())
-            || self.right_pane_needs_yolo()
-    }
-
-    /// Cross Agent Team supports Claude and Codex, and is unavailable in Sandbox.
-    pub(super) fn has_cross_agent_team_field(&self) -> bool {
-        self.available_tools
-            .get(self.tool_index)
-            .is_some_and(|&t| crate::session::Instance::supports_cross_agent_team_tool(t))
-            && !self.sandbox_enabled
-    }
-
-    fn sync_yolo_for_right_pane(&mut self) {
-        if self.is_terminal_selected() {
-            if self.right_pane_needs_yolo() && !self.yolo_mode {
-                self.yolo_mode = self.saved_yolo_mode.unwrap_or(self.yolo_mode_default);
-            } else if !self.right_pane_needs_yolo() {
-                self.yolo_mode = false;
+            HelpVisibility::Yolo => {
+                self.pane_has_yolo(PaneTarget::Primary) || self.pane_has_yolo(PaneTarget::Secondary)
+            }
+            HelpVisibility::CrossAgentTeam => {
+                self.pane_has_cross_agent_team(PaneTarget::Primary)
+                    || self.pane_has_cross_agent_team(PaneTarget::Secondary)
             }
         }
     }
@@ -717,11 +668,15 @@ impl NewSessionDialog {
         Self {
             profile: "default".to_string(),
             title: Input::default(),
-            path: PathField::new(path),
-            right_pane_path: PathField::default(),
             group: Input::default(),
-            tool_index,
-            right_pane_tool_index: 0,
+            primary: PaneDialogState::new(
+                path,
+                tool_index,
+                config.session.yolo_mode_default,
+                config.session.cross_agent_team_default,
+            ),
+            secondary: None,
+            collapsed_secondary: None,
             focused_field: 0,
             available_tools: tools,
             existing_titles: Vec::new(),
@@ -731,34 +686,13 @@ impl NewSessionDialog {
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
             dir_picker: DirPicker::new(),
-            worktree_branch: Input::default(),
-            create_new_branch: true,
-            workspace_repos: Vec::new(),
-            workspace_repos_expanded: false,
-            workspace_repo_selected_index: 0,
-            workspace_repo_editing_input: None,
-            workspace_repo_adding_new: false,
-            workspace_repo_ghost: None,
             dir_picker_target: DirPickerTarget::SessionPath,
             worktree_config_mode: false,
             worktree_config_focused_field: 0,
-            sandbox_enabled: false,
-            sandbox_image: Input::new(
-                containers::get_container_runtime().effective_default_image(),
-            ),
-            docker_available: false,
-            yolo_mode: false,
-            yolo_mode_default: false,
-            cross_agent_team: config.session.cross_agent_team_default,
+            worktree_config_target: PaneTarget::Primary,
             cross_agent_team_channel: config.session.cross_agent_team_channel.clone(),
-            extra_env: Vec::new(),
-            env_list_expanded: false,
-            env_selected_index: 0,
-            env_editing_input: None,
-            env_adding_new: false,
-            inherited_settings: Vec::new(),
-            sandbox_config_mode: false,
-            sandbox_focused_field: 0,
+            default_yolo_mode: config.session.yolo_mode_default,
+            default_cross_agent_team: config.session.cross_agent_team_default,
             tool_config_mode: false,
             tool_config_focused_field: 0,
             extra_args: Input::default(),
@@ -772,8 +706,6 @@ impl NewSessionDialog {
             hook_output: Vec::new(),
             group_ghost: None,
             confirm_create_dirs: None,
-            confirm_reuse_worktree: false,
-            saved_yolo_mode: None,
         }
     }
 
@@ -803,11 +735,6 @@ impl NewSessionDialog {
             return DialogResult::Continue;
         }
 
-        // Delegate to sandbox config mode handler when active
-        if self.sandbox_config_mode {
-            return self.handle_sandbox_config_key(key);
-        }
-
         // Delegate to tool config mode handler when active
         if self.tool_config_mode {
             return self.handle_tool_config_key(key);
@@ -833,8 +760,10 @@ impl NewSessionDialog {
 
         if self.branch_picker.is_active() {
             if let ListPickerResult::Selected(value) = self.branch_picker.handle_key(key) {
-                self.worktree_branch = Input::new(value);
-                self.confirm_reuse_worktree = false;
+                if let Some(pane) = self.pane_mut(self.worktree_config_target) {
+                    pane.worktree_branch = Input::new(value);
+                    pane.confirm_reuse_worktree = false;
+                }
             }
             return DialogResult::Continue;
         }
@@ -843,16 +772,22 @@ impl NewSessionDialog {
             match self.dir_picker.handle_key(key) {
                 DirPickerResult::Selected(path) => match self.dir_picker_target {
                     DirPickerTarget::SessionPath => {
-                        self.path.set_value(path);
+                        self.primary.path.set_value(path);
                         self.path_user_edited = true;
                     }
-                    DirPickerTarget::RightPanePath => self.right_pane_path.set_value(path),
-                    DirPickerTarget::WorkspaceRepo => {
-                        self.workspace_repo_editing_input = Some(Input::new(path));
-                        self.workspace_repo_ghost = self
-                            .workspace_repo_editing_input
-                            .as_ref()
-                            .and_then(path_input::compute_path_ghost);
+                    DirPickerTarget::RightPanePath => {
+                        if let Some(pane) = self.secondary.as_mut() {
+                            pane.path.set_value(path);
+                        }
+                    }
+                    DirPickerTarget::WorkspaceRepo(target) => {
+                        if let Some(pane) = self.pane_mut(target) {
+                            pane.workspace_repo_editing_input = Some(Input::new(path));
+                            pane.workspace_repo_ghost = pane
+                                .workspace_repo_editing_input
+                                .as_ref()
+                                .and_then(path_input::compute_path_ghost);
+                        }
                     }
                 },
                 DirPickerResult::Cancelled | DirPickerResult::Continue => {}
@@ -862,16 +797,16 @@ impl NewSessionDialog {
 
         // Worktree sub-options (extra_repos) are in a Ctrl+P overlay.
         // Tool config (extra_args, command_override) is in a Ctrl+P overlay on tool field.
-        // Sandbox sub-options are in a separate sandbox_config_mode overlay.
         let layout = self.field_layout();
         let tool_field = layout.tool;
         let right_pane_field = layout.right_pane;
         let yolo_mode_field = layout.yolo;
         let cross_agent_team_field = layout.cross_agent_team;
         let has_cross_agent_team = cross_agent_team_field != ABSENT;
+        let right_yolo_field = layout.right_pane_yolo;
+        let right_cross_agent_team_field = layout.right_pane_cross_agent_team;
+        let has_right_cross_agent_team = right_cross_agent_team_field != ABSENT;
         let worktree_field = layout.worktree;
-        let new_branch_field = layout.new_branch;
-        let sandbox_field = layout.sandbox;
         let group_field = layout.group;
         let max_field = layout.count;
 
@@ -879,12 +814,14 @@ impl NewSessionDialog {
         if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.focused_field == layout.path {
                 self.dir_picker_target = DirPickerTarget::SessionPath;
-                self.path.activate_picker(&mut self.dir_picker);
+                self.primary.path.activate_picker(&mut self.dir_picker);
                 return DialogResult::Continue;
             }
             if self.focused_field == layout.right_pane_path {
                 self.dir_picker_target = DirPickerTarget::RightPanePath;
-                self.right_pane_path.activate_picker(&mut self.dir_picker);
+                if let Some(pane) = self.secondary.as_mut() {
+                    pane.path.activate_picker(&mut self.dir_picker);
+                }
                 return DialogResult::Continue;
             }
             if self.focused_field == tool_field {
@@ -896,14 +833,23 @@ impl NewSessionDialog {
                 self.group_picker.activate(self.existing_groups.clone());
                 return DialogResult::Continue;
             }
-            if self.focused_field == worktree_field && !self.worktree_branch.value().is_empty() {
+            if self.focused_field == worktree_field
+                && !self.primary.worktree_branch.value().is_empty()
+            {
                 self.worktree_config_mode = true;
                 self.worktree_config_focused_field = 0;
+                self.worktree_config_target = PaneTarget::Primary;
                 return DialogResult::Continue;
             }
-            if self.focused_field == sandbox_field && self.sandbox_enabled {
-                self.sandbox_config_mode = true;
-                self.sandbox_focused_field = 0;
+            if self.focused_field == layout.right_pane_worktree
+                && self
+                    .secondary
+                    .as_ref()
+                    .is_some_and(|pane| !pane.worktree_branch.value().is_empty())
+            {
+                self.worktree_config_mode = true;
+                self.worktree_config_focused_field = 0;
+                self.worktree_config_target = PaneTarget::Secondary;
                 return DialogResult::Continue;
             }
         }
@@ -946,15 +892,28 @@ impl NewSessionDialog {
                 }
                 // Check for worktree reuse: if a worktree branch is specified,
                 // compute the path and warn once before allowing reuse.
-                if !self.confirm_reuse_worktree {
-                    if let Some(existing_path) = self.check_worktree_exists() {
-                        self.confirm_reuse_worktree = true;
-                        self.error_message = Some(format!(
-                            "Worktree already exists at {}. Press Enter again to reuse it.",
-                            existing_path
-                        ));
-                        return DialogResult::Continue;
+                let existing = self.unconfirmed_worktrees();
+                if !existing.is_empty() {
+                    for target in existing.iter().map(|(target, _)| *target) {
+                        if let Some(pane) = self.pane_mut(target) {
+                            pane.confirm_reuse_worktree = true;
+                        }
                     }
+                    let paths = existing
+                        .iter()
+                        .map(|(target, path)| {
+                            let label = match target {
+                                PaneTarget::Primary => "primary",
+                                PaneTarget::Secondary => "secondary",
+                            };
+                            format!("{label}: {path}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.error_message = Some(format!(
+                        "Worktrees already exist. Press Enter again to reuse: {paths}"
+                    ));
+                    return DialogResult::Continue;
                 }
                 self.build_submit_result()
             }
@@ -976,69 +935,55 @@ impl NewSessionDialog {
             }
             KeyCode::Left if self.focused_field == tool_field => {
                 let len = self.available_tools.len();
-                self.tool_index = (self.tool_index + len - 1) % len;
+                self.primary.tool_index = (self.primary.tool_index + len - 1) % len;
+                self.normalize_pane_for_tool(PaneTarget::Primary);
                 self.reload_tool_config();
                 DialogResult::Continue
             }
             KeyCode::Right if self.focused_field == tool_field => {
-                self.tool_index = (self.tool_index + 1) % self.available_tools.len();
-                if self.selected_tool_always_yolo() {
-                    self.yolo_mode = true;
-                } else {
-                    self.yolo_mode = self.yolo_mode_default;
-                }
+                self.primary.tool_index =
+                    (self.primary.tool_index + 1) % self.available_tools.len();
+                self.normalize_pane_for_tool(PaneTarget::Primary);
                 self.reload_tool_config();
                 DialogResult::Continue
             }
             KeyCode::Char(' ') if self.focused_field == tool_field => {
-                self.tool_index = (self.tool_index + 1) % self.available_tools.len();
-                if self.selected_tool_always_yolo() {
-                    self.yolo_mode = true;
-                } else {
-                    self.yolo_mode = self.yolo_mode_default;
-                }
+                self.primary.tool_index =
+                    (self.primary.tool_index + 1) % self.available_tools.len();
+                self.normalize_pane_for_tool(PaneTarget::Primary);
                 self.reload_tool_config();
-                DialogResult::Continue
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if self.focused_field == sandbox_field =>
-            {
-                self.sandbox_enabled = !self.sandbox_enabled;
-                if self.sandbox_enabled {
-                    let config = resolve_config(&self.profile).unwrap_or_default();
-                    self.extra_env = config.sandbox.environment.clone();
-                    self.inherited_settings = build_inherited_settings(&config.sandbox);
-                } else {
-                    self.extra_env.clear();
-                    self.env_list_expanded = false;
-                    self.env_editing_input = None;
-                    self.inherited_settings.clear();
-                    self.sandbox_config_mode = false;
-                }
-                // Sandboxing hides the Cross Agent Teams and Right Pane Path
-                // fields, so the checkbox just toggled has moved. Follow it
-                // rather than leaving focus on whatever inherited its index.
-                self.focused_field = self.field_layout().sandbox;
                 DialogResult::Continue
             }
             KeyCode::Left if self.focused_field == right_pane_field => {
                 let len = self.available_tools.len() + 1; // +1 for "none"
-                self.right_pane_tool_index = (self.right_pane_tool_index + len - 1) % len;
-                self.sync_yolo_for_right_pane();
+                let selection = (self.right_pane_selection_index() + len - 1) % len;
+                self.set_right_pane_selection(selection);
                 DialogResult::Continue
             }
             KeyCode::Right | KeyCode::Char(' ') if self.focused_field == right_pane_field => {
                 let len = self.available_tools.len() + 1; // +1 for "none"
-                self.right_pane_tool_index = (self.right_pane_tool_index + 1) % len;
-                self.sync_yolo_for_right_pane();
+                let selection = (self.right_pane_selection_index() + 1) % len;
+                self.set_right_pane_selection(selection);
                 DialogResult::Continue
             }
             KeyCode::Char(' ') if self.focused_field == yolo_mode_field => {
-                self.yolo_mode = !self.yolo_mode;
+                self.primary.yolo_mode = !self.primary.yolo_mode;
                 DialogResult::Continue
             }
             KeyCode::Char(' ') if self.focused_field == cross_agent_team_field => {
-                self.cross_agent_team = !self.cross_agent_team;
+                self.primary.cross_agent_team = !self.primary.cross_agent_team;
+                DialogResult::Continue
+            }
+            KeyCode::Char(' ') if self.focused_field == right_yolo_field => {
+                if let Some(pane) = self.secondary.as_mut() {
+                    pane.yolo_mode = !pane.yolo_mode;
+                }
+                DialogResult::Continue
+            }
+            KeyCode::Char(' ') if self.focused_field == right_cross_agent_team_field => {
+                if let Some(pane) = self.secondary.as_mut() {
+                    pane.cross_agent_team = !pane.cross_agent_team;
+                }
                 DialogResult::Continue
             }
             // Left/Right move focus between the YOLO Mode and Cross Agent Teams
@@ -1055,91 +1000,58 @@ impl NewSessionDialog {
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right if self.focused_field == yolo_mode_field => {
-                self.yolo_mode = !self.yolo_mode;
+                self.primary.yolo_mode = !self.primary.yolo_mode;
                 DialogResult::Continue
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if self.focused_field == new_branch_field =>
+            KeyCode::Left | KeyCode::Right
+                if self.focused_field == right_yolo_field && has_right_cross_agent_team =>
             {
-                self.create_new_branch = !self.create_new_branch;
+                self.focused_field = right_cross_agent_team_field;
+                DialogResult::Continue
+            }
+            KeyCode::Left | KeyCode::Right
+                if self.focused_field == right_cross_agent_team_field =>
+            {
+                self.focused_field = right_yolo_field;
+                DialogResult::Continue
+            }
+            KeyCode::Left | KeyCode::Right if self.focused_field == right_yolo_field => {
+                if let Some(pane) = self.secondary.as_mut() {
+                    pane.yolo_mode = !pane.yolo_mode;
+                }
                 DialogResult::Continue
             }
             _ => {
                 if self.focused_field != tool_field
                     && self.focused_field != right_pane_field
-                    && self.focused_field != new_branch_field
-                    && self.focused_field != sandbox_field
                     && self.focused_field != yolo_mode_field
                     && self.focused_field != cross_agent_team_field
+                    && self.focused_field != right_yolo_field
+                    && self.focused_field != right_cross_agent_team_field
                 {
                     if self.focused_field == layout.path {
-                        self.path.handle_text_key(key);
+                        self.primary.path.handle_text_key(key);
                         self.path_user_edited = true;
                     } else if self.focused_field == layout.right_pane_path {
-                        self.right_pane_path.handle_text_key(key);
+                        if let Some(pane) = self.secondary.as_mut() {
+                            pane.path.handle_text_key(key);
+                        }
                     } else {
                         self.current_input_mut()
                             .handle_event(&crossterm::event::Event::Key(key));
                     }
                     self.error_message = None;
-                    self.confirm_reuse_worktree = false;
+                    if self.focused_field == layout.worktree {
+                        self.primary.confirm_reuse_worktree = false;
+                    } else if self.focused_field == layout.right_pane_worktree {
+                        if let Some(pane) = self.secondary.as_mut() {
+                            pane.confirm_reuse_worktree = false;
+                        }
+                    }
                     if self.focused_field == group_field {
                         self.recompute_group_ghost();
                         self.apply_group_default_directory();
                     }
-                }
-                DialogResult::Continue
-            }
-        }
-    }
-
-    /// Handle key events when in sandbox configuration mode.
-    fn handle_sandbox_config_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        // Sandbox config fields: 0=image, 1=env (inherited is always-visible, not focusable)
-        const SANDBOX_IMAGE: usize = 0;
-        const SANDBOX_ENV: usize = 1;
-        const SANDBOX_MAX: usize = 2;
-
-        // Handle env list editing when expanded
-        if self.env_list_expanded && self.sandbox_focused_field == SANDBOX_ENV {
-            return self.handle_env_list_key(key);
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                self.sandbox_config_mode = false;
-                DialogResult::Continue
-            }
-            KeyCode::Char('?') => {
-                self.show_help = true;
-                DialogResult::Continue
-            }
-            KeyCode::Enter if self.sandbox_focused_field == SANDBOX_ENV => {
-                self.env_list_expanded = true;
-                self.env_selected_index = 0;
-                DialogResult::Continue
-            }
-            KeyCode::Enter => {
-                self.sandbox_config_mode = false;
-                DialogResult::Continue
-            }
-            KeyCode::Tab | KeyCode::Down => {
-                self.sandbox_focused_field = (self.sandbox_focused_field + 1) % SANDBOX_MAX;
-                DialogResult::Continue
-            }
-            KeyCode::BackTab | KeyCode::Up => {
-                self.sandbox_focused_field = if self.sandbox_focused_field == 0 {
-                    SANDBOX_MAX - 1
-                } else {
-                    self.sandbox_focused_field - 1
-                };
-                DialogResult::Continue
-            }
-            _ => {
-                // Text input for image field only
-                if self.sandbox_focused_field == SANDBOX_IMAGE {
-                    self.sandbox_image
-                        .handle_event(&crossterm::event::Event::Key(key));
                 }
                 DialogResult::Continue
             }
@@ -1203,7 +1115,11 @@ impl NewSessionDialog {
         const WT_MAX: usize = 2;
 
         // Handle workspace repos list editing when expanded
-        if self.workspace_repos_expanded && self.worktree_config_focused_field == WT_EXTRA_REPOS {
+        if self
+            .pane(self.worktree_config_target)
+            .is_some_and(|pane| pane.workspace_repos_expanded)
+            && self.worktree_config_focused_field == WT_EXTRA_REPOS
+        {
             return self.handle_workspace_repos_list_key(key);
         }
 
@@ -1221,7 +1137,10 @@ impl NewSessionDialog {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.worktree_config_focused_field == WT_NEW_BRANCH =>
             {
-                let path = std::path::PathBuf::from(self.path.resolved());
+                let path = self
+                    .pane(self.worktree_config_target)
+                    .map(|pane| std::path::PathBuf::from(pane.path.resolved()))
+                    .unwrap_or_default();
                 if let Ok(branches) = crate::git::diff::list_branches(&path) {
                     if !branches.is_empty() {
                         self.branch_picker.activate(branches);
@@ -1230,8 +1149,10 @@ impl NewSessionDialog {
                 DialogResult::Continue
             }
             KeyCode::Enter if self.worktree_config_focused_field == WT_EXTRA_REPOS => {
-                self.workspace_repos_expanded = true;
-                self.workspace_repo_selected_index = 0;
+                if let Some(pane) = self.pane_mut(self.worktree_config_target) {
+                    pane.workspace_repos_expanded = true;
+                    pane.workspace_repo_selected_index = 0;
+                }
                 DialogResult::Continue
             }
             KeyCode::Enter => {
@@ -1254,49 +1175,27 @@ impl NewSessionDialog {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.worktree_config_focused_field == WT_NEW_BRANCH =>
             {
-                self.create_new_branch = !self.create_new_branch;
+                if let Some(pane) = self.pane_mut(self.worktree_config_target) {
+                    pane.create_new_branch = !pane.create_new_branch;
+                }
                 DialogResult::Continue
             }
             _ => DialogResult::Continue,
         }
     }
 
-    /// Handle key events when the env list is expanded
-    fn handle_env_list_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        let validate =
-            |value: &str, list: &[String]| !value.is_empty() && !list.contains(&value.to_string());
-        let snapshot: Vec<String> = self.extra_env.clone();
-        let result = handle_editable_list_key(
-            key,
-            &mut self.extra_env,
-            &mut self.env_list_expanded,
-            &mut self.env_selected_index,
-            &mut self.env_editing_input,
-            &mut self.env_adding_new,
-            validate,
-        );
-
-        // Validate the current entry if the list changed
-        if self.extra_env != snapshot {
-            self.error_message = self
-                .extra_env
-                .get(self.env_selected_index)
-                .and_then(|entry| crate::session::validate_env_entry(entry));
-        }
-
-        result
-    }
-
     /// Handle key events when the workspace repos list is expanded
     fn handle_workspace_repos_list_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        // When actively editing a repo path, handle path-specific keys first
-        if self.workspace_repo_editing_input.is_some() {
-            // Ctrl+P: open dir picker for repo path
+        let target = self.worktree_config_target;
+        let is_editing = self
+            .pane(target)
+            .is_some_and(|pane| pane.workspace_repo_editing_input.is_some());
+        if is_editing {
             if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 let initial = self
-                    .workspace_repo_editing_input
-                    .as_ref()
-                    .map(|i| i.value().trim().to_string())
+                    .pane(target)
+                    .and_then(|pane| pane.workspace_repo_editing_input.as_ref())
+                    .map(|input| input.value().trim().to_string())
                     .unwrap_or_default();
                 let initial = if initial.is_empty() {
                     std::env::current_dir()
@@ -1305,24 +1204,29 @@ impl NewSessionDialog {
                 } else {
                     initial
                 };
-                self.dir_picker_target = DirPickerTarget::WorkspaceRepo;
+                self.dir_picker_target = DirPickerTarget::WorkspaceRepo(target);
                 self.dir_picker.activate(&initial);
                 return DialogResult::Continue;
             }
 
-            // Right/End at end of input: accept ghost text
             if matches!(key.code, KeyCode::Right | KeyCode::End)
                 && key.modifiers == KeyModifiers::NONE
             {
-                if let Some(ref input) = self.workspace_repo_editing_input {
-                    let cursor = input.visual_cursor();
-                    let char_len = input.value().chars().count();
+                if let Some(pane) = self.pane_mut(target) {
+                    let cursor = pane
+                        .workspace_repo_editing_input
+                        .as_ref()
+                        .map_or(0, Input::visual_cursor);
+                    let char_len = pane
+                        .workspace_repo_editing_input
+                        .as_ref()
+                        .map_or(0, |input| input.value().chars().count());
                     if cursor >= char_len {
-                        if let Some(ghost) = self.workspace_repo_ghost.take() {
-                            if let Some(ref mut input) = self.workspace_repo_editing_input {
+                        if let Some(ghost) = pane.workspace_repo_ghost.take() {
+                            if let Some(ref mut input) = pane.workspace_repo_editing_input {
                                 if let Some(new_value) = ghost.accept(input) {
                                     *input = Input::new(new_value);
-                                    self.workspace_repo_ghost =
+                                    pane.workspace_repo_ghost =
                                         path_input::compute_path_ghost(input);
                                     return DialogResult::Continue;
                                 }
@@ -1333,11 +1237,7 @@ impl NewSessionDialog {
             }
         }
 
-        // Intercept 'a' to pre-populate with the expanded cwd (like the main path field)
-        if self.workspace_repo_editing_input.is_none()
-            && key.code == KeyCode::Char('a')
-            && key.modifiers == KeyModifiers::NONE
-        {
+        if !is_editing && key.code == KeyCode::Char('a') && key.modifiers == KeyModifiers::NONE {
             let cwd = std::env::current_dir()
                 .map(|p| {
                     let mut s = path_input::collapse_tilde(&p.to_string_lossy());
@@ -1347,53 +1247,57 @@ impl NewSessionDialog {
                     s
                 })
                 .unwrap_or_default();
-            self.workspace_repo_editing_input = Some(Input::new(cwd));
-            self.workspace_repo_adding_new = true;
-            self.workspace_repo_ghost = self
-                .workspace_repo_editing_input
-                .as_ref()
-                .and_then(path_input::compute_path_ghost);
+            if let Some(pane) = self.pane_mut(target) {
+                pane.workspace_repo_editing_input = Some(Input::new(cwd));
+                pane.workspace_repo_adding_new = true;
+                pane.workspace_repo_ghost = pane
+                    .workspace_repo_editing_input
+                    .as_ref()
+                    .and_then(path_input::compute_path_ghost);
+            }
             return DialogResult::Continue;
         }
 
         let validate =
             |value: &str, list: &[String]| !value.is_empty() && !list.contains(&value.to_string());
 
-        // Wrap the generic handler to add tilde expansion and ghost recomputation
-        let had_input = self.workspace_repo_editing_input.is_some();
-        let was_adding = self.workspace_repo_adding_new;
-        let edit_index = self.workspace_repo_selected_index;
+        let Some(pane) = self.pane_mut(target) else {
+            return DialogResult::Continue;
+        };
+        let had_input = pane.workspace_repo_editing_input.is_some();
+        let was_adding = pane.workspace_repo_adding_new;
+        let edit_index = pane.workspace_repo_selected_index;
         let result = handle_editable_list_key(
             key,
-            &mut self.workspace_repos,
-            &mut self.workspace_repos_expanded,
-            &mut self.workspace_repo_selected_index,
-            &mut self.workspace_repo_editing_input,
-            &mut self.workspace_repo_adding_new,
+            &mut pane.workspace_repos,
+            &mut pane.workspace_repos_expanded,
+            &mut pane.workspace_repo_selected_index,
+            &mut pane.workspace_repo_editing_input,
+            &mut pane.workspace_repo_adding_new,
             validate,
         );
 
         // If editing just finished (Enter pressed), expand tilde in the stored value
-        if had_input && self.workspace_repo_editing_input.is_none() {
+        if had_input && pane.workspace_repo_editing_input.is_none() {
             let idx = if was_adding {
-                self.workspace_repos.len().saturating_sub(1)
+                pane.workspace_repos.len().saturating_sub(1)
             } else {
                 edit_index
             };
-            if let Some(entry) = self.workspace_repos.get_mut(idx) {
+            if let Some(entry) = pane.workspace_repos.get_mut(idx) {
                 *entry = path_input::expand_tilde(entry);
             }
-            self.workspace_repo_ghost = None;
+            pane.workspace_repo_ghost = None;
         }
 
         // If still editing, recompute ghost
-        if self.workspace_repo_editing_input.is_some() {
-            self.workspace_repo_ghost = self
+        if pane.workspace_repo_editing_input.is_some() {
+            pane.workspace_repo_ghost = pane
                 .workspace_repo_editing_input
                 .as_ref()
                 .and_then(path_input::compute_path_ghost);
         } else {
-            self.workspace_repo_ghost = None;
+            pane.workspace_repo_ghost = None;
         }
 
         result
@@ -1403,7 +1307,7 @@ impl NewSessionDialog {
         let config = resolve_config(&self.profile).unwrap_or_default();
         let tool = self
             .available_tools
-            .get(self.tool_index)
+            .get(self.primary.tool_index)
             .or_else(|| self.available_tools.first())
             .copied()
             .unwrap_or("claude");
@@ -1423,39 +1327,41 @@ impl NewSessionDialog {
                 .cloned()
                 .unwrap_or_default(),
         );
-        if tool == "shell" {
-            self.saved_yolo_mode = Some(self.yolo_mode);
-            if !self.right_pane_needs_yolo() {
-                self.yolo_mode = false;
-            }
-            self.worktree_branch = Input::default();
-            self.create_new_branch = true;
-        } else if let Some(saved) = self.saved_yolo_mode.take() {
-            self.yolo_mode = saved;
-        }
     }
 
     fn current_input_mut(&mut self) -> &mut Input {
         let layout = self.field_layout();
         match self.focused_field {
             n if n == layout.title => &mut self.title,
-            n if n == layout.worktree => &mut self.worktree_branch,
+            n if n == layout.worktree => &mut self.primary.worktree_branch,
+            n if n == layout.right_pane_worktree => {
+                &mut self
+                    .secondary
+                    .as_mut()
+                    .expect("visible secondary field")
+                    .worktree_branch
+            }
             n if n == layout.group => &mut self.group,
             _ => &mut self.title,
         }
     }
 
-    /// Check if the worktree path for the current branch already exists on disk.
-    /// Returns `Some(path_display)` if it exists, `None` otherwise.
-    fn check_worktree_exists(&self) -> Option<String> {
+    fn check_worktree_exists(&self, target: PaneTarget) -> Option<String> {
         use crate::git::GitWorktree;
 
-        let branch = self.worktree_branch.value().trim();
+        let pane = self.pane(target)?;
+        let branch = pane.worktree_branch.value().trim();
         if branch.is_empty() {
             return None;
         }
 
-        let path = std::path::PathBuf::from(self.path.resolved());
+        let pane_path = pane.path.resolved();
+        let source_path = if target == PaneTarget::Secondary && pane_path.trim().is_empty() {
+            self.primary.path.resolved()
+        } else {
+            pane_path
+        };
+        let path = std::path::PathBuf::from(source_path);
 
         if !GitWorktree::is_git_repo(&path) {
             return None;
@@ -1481,6 +1387,43 @@ impl NewSessionDialog {
         }
     }
 
+    fn unconfirmed_worktrees(&self) -> Vec<(PaneTarget, String)> {
+        [PaneTarget::Primary, PaneTarget::Secondary]
+            .into_iter()
+            .filter_map(|target| {
+                let pane = self.pane(target)?;
+                if pane.confirm_reuse_worktree {
+                    return None;
+                }
+                self.check_worktree_exists(target)
+                    .map(|path| (target, path))
+            })
+            .collect()
+    }
+
+    fn pane_to_draft(&self, target: PaneTarget) -> Option<PaneDraft> {
+        let pane = self.pane(target)?;
+        let branch = pane.worktree_branch.value().trim();
+        let has_worktree = !branch.is_empty();
+        Some(PaneDraft {
+            tool: self.pane_tool(target)?.to_string(),
+            path: pane.path.resolved(),
+            yolo_mode: pane.yolo_mode && self.pane_has_yolo(target)
+                || self.pane_tool_always_yolo(target),
+            cross_agent_team: pane.cross_agent_team && self.pane_has_cross_agent_team(target),
+            worktree: PaneWorktreeRequest {
+                branch: has_worktree.then(|| branch.to_string()),
+                create_new_branch: pane.create_new_branch,
+                extra_repo_paths: if has_worktree {
+                    pane.workspace_repos.clone()
+                } else {
+                    Vec::new()
+                },
+                reuse_existing: pane.confirm_reuse_worktree,
+            },
+        })
+    }
+
     fn build_submit_result(&self) -> DialogResult<NewSessionData> {
         let title_value = self.title.value().trim();
         let final_title = if title_value.is_empty() {
@@ -1489,76 +1432,32 @@ impl NewSessionDialog {
         } else {
             title_value.to_string()
         };
-        let worktree_value = self.worktree_branch.value().trim();
-        let has_worktree_branch = !worktree_value.is_empty();
-        let worktree_branch = if has_worktree_branch {
-            Some(worktree_value.to_string())
-        } else {
-            None
-        };
         DialogResult::Submit(NewSessionData {
             profile: self.profile.clone(),
             title: final_title,
-            path: self.path.trimmed(),
             group: self.group.value().trim().to_string(),
-            tool: self.available_tools[self.tool_index].to_string(),
-            worktree_branch,
-            create_new_branch: self.create_new_branch,
-            extra_repo_paths: if has_worktree_branch {
-                self.workspace_repos.clone()
-            } else {
-                Vec::new()
-            },
-            sandbox: self.sandbox_enabled,
-            sandbox_image: self.sandbox_image.value().trim().to_string(),
-            yolo_mode: self.yolo_mode || self.selected_tool_always_yolo(),
-            cross_agent_team: self.cross_agent_team && self.has_cross_agent_team_field(),
+            primary: self
+                .pane_to_draft(PaneTarget::Primary)
+                .expect("primary pane"),
+            secondary: self.pane_to_draft(PaneTarget::Secondary),
             cross_agent_team_channel: self.cross_agent_team_channel.clone(),
-            extra_env: if self.sandbox_enabled {
-                self.extra_env.clone()
-            } else {
-                Vec::new()
-            },
             extra_args: self.extra_args.value().trim().to_string(),
             command_override: self.command_override.value().trim().to_string(),
-            reuse_worktree: self.confirm_reuse_worktree,
-            right_pane_tool: if self.right_pane_tool_index == 0 {
-                None
-            } else {
-                self.available_tools
-                    .get(self.right_pane_tool_index - 1)
-                    .map(|t| t.to_string())
-            },
-            right_pane_path: self.right_pane_path_value(),
         })
-    }
-
-    /// The right pane's chosen directory, or `None` for "the session's own".
-    /// A hidden field contributes nothing, so toggling sandboxing on does not
-    /// smuggle a directory into a session that cannot use it.
-    fn right_pane_path_value(&self) -> Option<String> {
-        if !self.has_right_pane_path_field() {
-            return None;
-        }
-        if self.right_pane_path.trimmed().is_empty() {
-            return None;
-        }
-        // The resolved form, not the typed one: a leading `~` is expanded by the
-        // shell, never by tmux, so handing `split-window -c` the literal text
-        // fails the pane after the existence check has already passed on the
-        // expanded path.
-        Some(self.right_pane_path.resolved())
     }
 
     /// Every directory this submit would have to create, in field order.
     fn missing_directories(&self) -> Vec<String> {
         let mut missing = Vec::new();
-        let session_path = self.path.resolved();
+        let session_path = self.primary.path.resolved();
         if !std::path::Path::new(&session_path).exists() {
             missing.push(session_path);
         }
-        if self.right_pane_path_value().is_some() {
-            let right_pane_path = self.right_pane_path.resolved();
+        if let Some(secondary) = self.secondary.as_ref() {
+            let right_pane_path = secondary.path.resolved();
+            if right_pane_path.is_empty() {
+                return missing;
+            }
             if !std::path::Path::new(&right_pane_path).exists()
                 && !missing.contains(&right_pane_path)
             {
@@ -1577,11 +1476,13 @@ impl NewSessionDialog {
     fn non_directory_path(&self) -> Option<(usize, String)> {
         let layout = self.field_layout();
         let candidates = [
-            (layout.path, Some(self.path.resolved())),
+            (layout.path, Some(self.primary.path.resolved())),
             (
                 layout.right_pane_path,
-                self.right_pane_path_value()
-                    .map(|_| self.right_pane_path.resolved()),
+                self.secondary
+                    .as_ref()
+                    .map(|pane| pane.path.resolved())
+                    .filter(|path| !path.is_empty()),
             ),
         ];
         for (field, path) in candidates {
@@ -1598,7 +1499,12 @@ impl NewSessionDialog {
     /// on the input the user has to fix.
     fn field_for_directory(&self, dir: &str) -> usize {
         let layout = self.field_layout();
-        if layout.right_pane_path != ABSENT && self.right_pane_path.resolved() == dir {
+        if layout.right_pane_path != ABSENT
+            && self
+                .secondary
+                .as_ref()
+                .is_some_and(|pane| pane.path.resolved() == dir)
+        {
             layout.right_pane_path
         } else {
             layout.path
@@ -1686,9 +1592,11 @@ impl NewSessionDialog {
     fn clear_focused_ghost(&mut self) {
         let layout = self.field_layout();
         if self.focused_field == layout.path {
-            self.path.clear_ghost();
+            self.primary.path.clear_ghost();
         } else if self.focused_field == layout.right_pane_path {
-            self.right_pane_path.clear_ghost();
+            if let Some(pane) = self.secondary.as_mut() {
+                pane.path.clear_ghost();
+            }
         } else if self.focused_field == layout.group {
             self.clear_group_ghost();
         }
@@ -1697,9 +1605,11 @@ impl NewSessionDialog {
     fn recompute_focused_ghost(&mut self) {
         let layout = self.field_layout();
         if self.focused_field == layout.path {
-            self.path.recompute_ghost();
+            self.primary.path.recompute_ghost();
         } else if self.focused_field == layout.right_pane_path {
-            self.right_pane_path.recompute_ghost();
+            if let Some(pane) = self.secondary.as_mut() {
+                pane.path.recompute_ghost();
+            }
         } else if self.focused_field == layout.group {
             self.recompute_group_ghost();
         }

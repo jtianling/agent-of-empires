@@ -427,19 +427,14 @@ fn select_dialog_tool(h: &CodexXatsHarness, field: &str, tool: &str) {
 
 fn create_codex_shell_session(h: &CodexXatsHarness, title: &str) -> String {
     h.send_key("n");
-    h.wait_for_screen(&h.outer_session, "Cross Agent Teams");
+    h.wait_for_screen(&h.outer_session, "Cross Agent Team");
     h.type_text(title);
     h.send_key("Tab");
 
-    let tabs_to_right_pane = if h.capture(&h.outer_session).contains("Tool:") {
-        2
-    } else {
-        1
-    };
-    for _ in 0..tabs_to_right_pane {
+    for _ in 0..6 {
         h.send_key("Tab");
     }
-    select_dialog_tool(h, "Right Pane:", "shell");
+    select_dialog_tool(h, "Right Pane Agent:", "shell");
     h.send_key("Enter");
 
     h.wait_for_session_name(title)
@@ -453,10 +448,10 @@ fn test_new_codex_cross_agent_team_session_bootstraps_xats() {
     h.spawn_tui();
     h.wait_for_screen(&h.outer_session, "Agent of Empires");
     h.send_key("n");
-    h.wait_for_screen(&h.outer_session, "Cross Agent Teams");
+    h.wait_for_screen(&h.outer_session, "Cross Agent Team");
     assert!(h
         .capture(&h.outer_session)
-        .contains("Cross Agent Teams: [x]"));
+        .contains("Cross Agent Team: [x]"));
 
     h.type_text("codex-xats-e2e");
     h.send_key("Enter");

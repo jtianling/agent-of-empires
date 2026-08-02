@@ -9,9 +9,7 @@
 The shell category allows users to launch plain shell sessions (non-agent) through the same
 session management interface used for AI coding agents. Shell sessions use the user's default
 shell and skip agent-specific features like YOLO mode and worktree management.
-
 ## Requirements
-
 ### Requirement: Shell tool is available in tool picker
 The system SHALL include "shell" as a selectable tool in the new session dialog's tool picker. Shell SHALL appear after "gemini" and before "cursor" in the tool list. The alias "terminal" SHALL resolve to "shell" for backwards compatibility.
 
@@ -35,15 +33,21 @@ The system SHALL launch the user's default shell (`$SHELL`, falling back to `/bi
 - **THEN** the session falls back to `/bin/sh`
 
 ### Requirement: Agent-specific fields hidden for shell
-The system SHALL hide fields that do not apply to shell sessions: YOLO Mode and Worktree/Branch.
+
+系统 SHALL 隐藏 shell pane 不适用的 agent 专属字段: YOLO Mode 和 Cross Agent Team。  Path 和 Worktree SHALL 保持可用, 因为它们配置 pane working directory, 而不是 agent 权限。
 
 #### Scenario: YOLO mode hidden for shell
-- **WHEN** the user selects "shell" as the tool in the new session dialog
-- **THEN** the YOLO Mode field is not displayed
+- **WHEN** 用户在 New Session 中为一个 pane 选择 `shell`
+- **THEN** 该 pane 的 YOLO Mode SHALL 不显示
 
-#### Scenario: Worktree/Branch hidden for shell
-- **WHEN** the user selects "shell" as the tool in the new session dialog
-- **THEN** the Worktree and Branch fields are not displayed
+#### Scenario: Cross Agent Team hidden for shell
+- **WHEN** 用户在 New Session 中为一个 pane 选择 `shell`
+- **THEN** 该 pane 的 Cross Agent Team SHALL 不显示
+
+#### Scenario: Path and Worktree remain available for shell
+- **WHEN** 用户为 primary 或 secondary pane 选择 `shell`
+- **THEN** 该 pane 的 Path SHALL 保持显示
+- **AND** 该 pane 的 Worktree SHALL 保持显示
 
 ### Requirement: Shell has no YOLO mode
 The shell tool SHALL NOT have a YOLO/auto-approve mode configured (`yolo: None`).

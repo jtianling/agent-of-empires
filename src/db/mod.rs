@@ -263,6 +263,51 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_agent_slot_config(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        pane: &crate::session::PaneConfig,
+        native_session_id: &str,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        pane.validate()?;
+        let worktree_info = serialize_pane_worktree(pane.worktree.as_ref())?;
+        self.conn.execute(
+            "INSERT INTO agent_slot \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              yolo_mode, cross_agent_team, worktree_info, pane_config_version, last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11) \
+             ON CONFLICT(instance_id, slot) DO UPDATE SET \
+             agent = excluded.agent, native_session_id = excluded.native_session_id, \
+             cwd = excluded.cwd, tmux_pane = excluded.tmux_pane, \
+             xats_identity_key = excluded.xats_identity_key, \
+             yolo_mode = excluded.yolo_mode, cross_agent_team = excluded.cross_agent_team, \
+             worktree_info = excluded.worktree_info, pane_config_version = 1, \
+             last_seen_at = excluded.last_seen_at",
+            rusqlite::params![
+                instance_id,
+                slot,
+                pane.tool,
+                native_session_id,
+                pane.working_dir,
+                tmux_pane,
+                xats_identity_key,
+                pane.yolo_mode,
+                pane.cross_agent_team,
+                worktree_info,
+                last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Write the durable slot record of a pane AoE has just launched, before any
     /// capture exists for it.
     ///
@@ -320,6 +365,27 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_launched_slot_config(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        pane: &crate::session::PaneConfig,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        self.upsert_agent_slot_config(
+            instance_id,
+            slot,
+            pane,
+            "",
+            tmux_pane,
+            xats_identity_key,
+            last_seen_at,
+        )
+    }
+
     /// Snapshot a pane capture into its slot without disturbing the slot's
     /// identity key: a key already stored wins over the one passed in.
     ///
@@ -373,6 +439,53 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_agent_slot_capture_config(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        pane: &crate::session::PaneConfig,
+        native_session_id: &str,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        pane.validate()?;
+        let worktree_info = serialize_pane_worktree(pane.worktree.as_ref())?;
+        self.conn.execute(
+            "INSERT INTO agent_slot \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              yolo_mode, cross_agent_team, worktree_info, pane_config_version, last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11) \
+             ON CONFLICT(instance_id, slot) DO UPDATE SET \
+             agent = excluded.agent, native_session_id = excluded.native_session_id, \
+             cwd = excluded.cwd, tmux_pane = excluded.tmux_pane, \
+             yolo_mode = excluded.yolo_mode, \
+             cross_agent_team = excluded.cross_agent_team, \
+             xats_identity_key = CASE \
+               WHEN agent_slot.xats_identity_key != '' THEN agent_slot.xats_identity_key \
+               ELSE excluded.xats_identity_key END, \
+             last_seen_at = excluded.last_seen_at",
+            rusqlite::params![
+                instance_id,
+                slot,
+                pane.tool,
+                native_session_id,
+                pane.working_dir,
+                tmux_pane,
+                xats_identity_key,
+                pane.yolo_mode,
+                pane.cross_agent_team,
+                worktree_info,
+                last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Write a launch-time slot record only when the slot has none.
     ///
     /// Used for the primary pane, whose record is written as a side effect of
@@ -412,30 +525,251 @@ impl Store {
         Ok(())
     }
 
-    /// Read all durable slots for an instance, ordered by slot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_launched_slot_config_if_absent(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        pane: &crate::session::PaneConfig,
+        tmux_pane: &str,
+        xats_identity_key: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        pane.validate()?;
+        let worktree_info = serialize_pane_worktree(pane.worktree.as_ref())?;
+        self.conn.execute(
+            "INSERT INTO agent_slot \
+             (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+              yolo_mode, cross_agent_team, worktree_info, pane_config_version, last_seen_at) \
+             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10) \
+             ON CONFLICT(instance_id, slot) DO NOTHING",
+            rusqlite::params![
+                instance_id,
+                slot,
+                pane.tool,
+                pane.working_dir,
+                tmux_pane,
+                xats_identity_key,
+                pane.yolo_mode,
+                pane.cross_agent_team,
+                worktree_info,
+                last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read all valid durable slots for an instance, ordered by slot.
     pub fn read_slots_for_instance(&self, instance_id: &str) -> Result<Vec<AgentSlot>> {
+        Ok(self
+            .read_slots_for_instance_with_diagnostics(instance_id)?
+            .slots)
+    }
+
+    /// Read slots and report records that could not safely be recovered.
+    pub fn read_slots_for_instance_with_diagnostics(
+        &self,
+        instance_id: &str,
+    ) -> Result<AgentSlotRead> {
+        let (rows, unreadable) = self.read_raw_slots_for_instance(instance_id)?;
+        let mut result = AgentSlotRead {
+            skipped: unreadable,
+            ..Default::default()
+        };
+        for row in rows {
+            let slot = row.slot;
+            match self.normalize_raw_slot(row) {
+                Ok(record) => result.slots.push(record),
+                Err(error) => {
+                    tracing::warn!(
+                        "Skipping invalid pane slot {} for instance '{}': {}",
+                        slot,
+                        instance_id,
+                        error
+                    );
+                    result.skipped += 1;
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn read_raw_slots_for_instance(&self, instance_id: &str) -> Result<(Vec<RawAgentSlot>, usize)> {
         let mut stmt = self.conn.prepare(
             "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, \
-             xats_identity_key, last_seen_at \
+             xats_identity_key, yolo_mode, cross_agent_team, worktree_info, last_seen_at \
              FROM agent_slot WHERE instance_id = ?1 ORDER BY slot",
         )?;
         let rows = stmt.query_map([instance_id], |r| {
-            Ok(AgentSlot {
-                instance_id: r.get(0)?,
-                slot: r.get(1)?,
-                agent: r.get(2)?,
-                native_session_id: r.get(3)?,
-                cwd: r.get(4)?,
-                tmux_pane: r.get(5)?,
-                xats_identity_key: r.get(6)?,
-                last_seen_at: r.get(7)?,
-            })
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, bool>(7)?,
+                r.get::<_, bool>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, i64>(10)?,
+            ))
         })?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        let mut unreadable = 0;
+        for row in rows {
+            let row = match row {
+                Ok(row) => row,
+                Err(error) => {
+                    tracing::warn!(
+                        "Skipping unreadable pane slot for instance '{}': {}",
+                        instance_id,
+                        error
+                    );
+                    unreadable += 1;
+                    continue;
+                }
+            };
+            let (
+                row_instance_id,
+                slot,
+                agent,
+                native_session_id,
+                cwd,
+                tmux_pane,
+                xats_identity_key,
+                yolo_mode,
+                cross_agent_team,
+                worktree_json,
+                last_seen_at,
+            ) = row;
+            out.push(RawAgentSlot {
+                instance_id: row_instance_id,
+                slot,
+                agent,
+                native_session_id,
+                cwd,
+                tmux_pane,
+                xats_identity_key,
+                yolo_mode,
+                cross_agent_team,
+                worktree_json,
+                last_seen_at,
+            });
         }
-        Ok(out)
+        Ok((out, unreadable))
+    }
+
+    fn normalize_raw_slot(&self, row: RawAgentSlot) -> Result<AgentSlot> {
+        let worktree_info = deserialize_pane_worktree(&row.worktree_json)?;
+        let mut normalized = crate::session::PaneConfig::new(
+            row.agent.clone(),
+            row.cwd.clone(),
+            row.yolo_mode,
+            row.cross_agent_team,
+        );
+        normalized.worktree = worktree_info;
+        normalized.validate()?;
+        if normalized.yolo_mode != row.yolo_mode
+            || normalized.cross_agent_team != row.cross_agent_team
+        {
+            self.conn.execute(
+                "UPDATE agent_slot SET yolo_mode = ?1, cross_agent_team = ?2 \
+                 WHERE instance_id = ?3 AND slot = ?4",
+                rusqlite::params![
+                    normalized.yolo_mode,
+                    normalized.cross_agent_team,
+                    row.instance_id.as_str(),
+                    row.slot
+                ],
+            )?;
+            tracing::warn!(
+                "Normalized pane capability flags for slot {} in instance '{}'",
+                row.slot,
+                row.instance_id
+            );
+        }
+        let record = AgentSlot {
+            instance_id: row.instance_id,
+            slot: row.slot,
+            agent: row.agent,
+            native_session_id: row.native_session_id,
+            cwd: row.cwd,
+            tmux_pane: row.tmux_pane,
+            xats_identity_key: row.xats_identity_key,
+            yolo_mode: normalized.yolo_mode,
+            cross_agent_team: normalized.cross_agent_team,
+            worktree_info: normalized.worktree,
+            last_seen_at: row.last_seen_at,
+        };
+        Ok(record)
+    }
+
+    pub fn migrate_legacy_pane_configs(
+        &self,
+        instances: &[crate::session::Instance],
+    ) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        for instance in instances {
+            let primary = instance.primary_pane_config();
+            let primary_worktree = serialize_pane_worktree(primary.worktree.as_ref())?;
+            let rows = {
+                let mut statement = transaction.prepare(
+                    "SELECT slot, agent, cwd, worktree_info, xats_identity_key \
+                     FROM agent_slot \
+                     WHERE instance_id = ?1 AND pane_config_version = 0",
+                )?;
+                let rows = statement
+                    .query_map([instance.id.as_str()], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (slot, agent, cwd, stored_worktree, stored_key) in rows {
+                let pane = crate::session::PaneConfig::new(
+                    agent,
+                    cwd,
+                    primary.yolo_mode,
+                    primary.cross_agent_team,
+                );
+                let worktree_info = if slot == 0 && stored_worktree.is_empty() {
+                    primary_worktree.as_str()
+                } else {
+                    stored_worktree.as_str()
+                };
+                let identity_key = if slot == 0 && stored_key.is_empty() {
+                    instance.xats_identity_key.as_deref().unwrap_or("")
+                } else {
+                    stored_key.as_str()
+                };
+                transaction.execute(
+                    "UPDATE agent_slot SET \
+                     yolo_mode = ?1, cross_agent_team = ?2, worktree_info = ?3, \
+                     xats_identity_key = ?4, pane_config_version = 1 \
+                     WHERE instance_id = ?5 AND slot = ?6 AND pane_config_version = 0",
+                    rusqlite::params![
+                        pane.yolo_mode,
+                        pane.cross_agent_team,
+                        worktree_info,
+                        identity_key,
+                        instance.id,
+                        slot
+                    ],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Remove all durable records for an instance (used on session deletion):
@@ -518,6 +852,26 @@ impl Store {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AgentSlotRead {
+    pub slots: Vec<AgentSlot>,
+    pub skipped: usize,
+}
+
+struct RawAgentSlot {
+    instance_id: String,
+    slot: i64,
+    agent: String,
+    native_session_id: String,
+    cwd: String,
+    tmux_pane: String,
+    xats_identity_key: String,
+    yolo_mode: bool,
+    cross_agent_team: bool,
+    worktree_json: String,
+    last_seen_at: i64,
+}
+
 /// A volatile per-pane capture row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneLive {
@@ -538,10 +892,43 @@ pub struct AgentSlot {
     pub cwd: String,
     pub tmux_pane: String,
     /// Opaque xats identity key for the agent occupying this slot, empty when it
-    /// has none. Only adopted (non-primary) slots use it: the primary pane's key
-    /// lives on the instance record next to its session id and resume token.
+    /// has none. Every managed pane, including primary, owns its key through its
+    /// durable slot record.
     pub xats_identity_key: String,
+    pub yolo_mode: bool,
+    pub cross_agent_team: bool,
+    pub worktree_info: Option<crate::session::PaneWorktreeInfo>,
     pub last_seen_at: i64,
+}
+
+impl AgentSlot {
+    pub fn pane_config(&self) -> crate::session::PaneConfig {
+        crate::session::PaneConfig {
+            tool: self.agent.clone(),
+            working_dir: self.cwd.clone(),
+            yolo_mode: self.yolo_mode,
+            cross_agent_team: self.cross_agent_team,
+            worktree: self.worktree_info.clone(),
+        }
+    }
+}
+
+fn serialize_pane_worktree(info: Option<&crate::session::PaneWorktreeInfo>) -> Result<String> {
+    match info {
+        Some(info) if !info.is_empty() => serde_json::to_string(info).map_err(Into::into),
+        _ => Ok(String::new()),
+    }
+}
+
+fn deserialize_pane_worktree(value: &str) -> Result<Option<crate::session::PaneWorktreeInfo>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let info: crate::session::PaneWorktreeInfo = serde_json::from_str(value)?;
+    if info.is_empty() {
+        anyhow::bail!("empty pane worktree metadata");
+    }
+    Ok(Some(info))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,6 +967,10 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             cwd                TEXT NOT NULL,
             tmux_pane          TEXT NOT NULL DEFAULT '',
             xats_identity_key  TEXT NOT NULL DEFAULT '',
+            yolo_mode          INTEGER NOT NULL DEFAULT 0,
+            cross_agent_team   INTEGER NOT NULL DEFAULT 0,
+            worktree_info      TEXT NOT NULL DEFAULT '',
+            pane_config_version INTEGER NOT NULL DEFAULT 0,
             last_seen_at       INTEGER NOT NULL,
             PRIMARY KEY (instance_id, slot)
         );
@@ -668,7 +1059,14 @@ fn prune_events(conn: &Connection) -> Result<()> {
 /// is added when absent. Idempotent: a no-op once the column exists, so fresh and
 /// already-healed databases are left untouched.
 fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
-    for column in ["tmux_pane", "xats_identity_key"] {
+    for (column, definition) in [
+        ("tmux_pane", "TEXT NOT NULL DEFAULT ''"),
+        ("xats_identity_key", "TEXT NOT NULL DEFAULT ''"),
+        ("yolo_mode", "INTEGER NOT NULL DEFAULT 0"),
+        ("cross_agent_team", "INTEGER NOT NULL DEFAULT 0"),
+        ("worktree_info", "TEXT NOT NULL DEFAULT ''"),
+        ("pane_config_version", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
         let has_column: bool = conn.query_row(
             "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = ?1",
             [column],
@@ -676,7 +1074,7 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
         )?;
         if !has_column {
             conn.execute(
-                &format!("ALTER TABLE agent_slot ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
+                &format!("ALTER TABLE agent_slot ADD COLUMN {column} {definition}"),
                 [],
             )?;
         }
@@ -936,7 +1334,16 @@ mod tests {
 
         ensure_schema(&store.conn).unwrap();
 
-        assert!(column_exists(&store.conn, "agent_slot", "tmux_pane"));
+        for column in [
+            "tmux_pane",
+            "xats_identity_key",
+            "yolo_mode",
+            "cross_agent_team",
+            "worktree_info",
+            "pane_config_version",
+        ] {
+            assert!(column_exists(&store.conn, "agent_slot", column));
+        }
         // The seeded row is preserved (column added, table not recreated) and
         // its backfilled `tmux_pane` defaults to the empty string.
         let slots = store.read_slots_for_instance("legacy").unwrap();
@@ -1302,5 +1709,187 @@ mod tests {
         let slots = store.read_slots_for_instance("inst").unwrap();
         assert_eq!(slots[0].xats_identity_key, "");
         assert_eq!(slots[1].xats_identity_key, "key-1");
+    }
+
+    #[test]
+    fn pane_config_round_trips_flags_and_worktree_metadata() {
+        let (_tmp, store) = temp_store();
+        let pane = crate::session::PaneConfig {
+            tool: "codex".to_string(),
+            working_dir: "/tmp/right".to_string(),
+            yolo_mode: true,
+            cross_agent_team: true,
+            worktree: Some(crate::session::PaneWorktreeInfo {
+                worktree_path: Some("/tmp/right".to_string()),
+                worktree: Some(crate::session::WorktreeInfo {
+                    branch: "right-branch".to_string(),
+                    main_repo_path: "/tmp/repo".to_string(),
+                    managed_by_aoe: true,
+                    created_at: chrono::Utc::now(),
+                    cleanup_on_delete: true,
+                }),
+                workspace: None,
+            }),
+        };
+
+        store
+            .record_launched_slot_config("inst", 1, &pane, "%2", "right-key", 9)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].pane_config(), pane);
+        assert_eq!(slots[0].xats_identity_key, "right-key");
+    }
+
+    #[test]
+    fn capture_tool_change_normalizes_flags_and_preserves_worktree() {
+        let (_tmp, store) = temp_store();
+        let mut launched = crate::session::PaneConfig::new("codex", "/tmp/right", true, true);
+        launched.worktree = Some(crate::session::PaneWorktreeInfo {
+            worktree_path: Some("/tmp/owned".to_string()),
+            worktree: Some(crate::session::WorktreeInfo {
+                branch: "right-branch".to_string(),
+                main_repo_path: "/tmp/repo".to_string(),
+                managed_by_aoe: true,
+                created_at: chrono::Utc::now(),
+                cleanup_on_delete: true,
+            }),
+            workspace: None,
+        });
+        store
+            .record_launched_slot_config("inst", 1, &launched, "%2", "right-key", 1)
+            .unwrap();
+
+        let captured = crate::session::PaneConfig::new("shell", "/tmp/runtime", true, true);
+        store
+            .upsert_agent_slot_capture_config("inst", 1, &captured, "native", "%2", "", 2)
+            .unwrap();
+
+        let slot = store.read_slots_for_instance("inst").unwrap().remove(0);
+        assert_eq!(slot.agent, "shell");
+        assert!(!slot.yolo_mode);
+        assert!(!slot.cross_agent_team);
+        assert_eq!(
+            slot.worktree_info.and_then(|info| info.worktree_path),
+            Some("/tmp/owned".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_persisted_worktree_metadata_is_skipped_at_read_boundary() {
+        let (_tmp, store) = temp_store();
+        store
+            .conn
+            .execute(
+                "INSERT INTO agent_slot \
+                 (instance_id, slot, agent, native_session_id, cwd, worktree_info, last_seen_at) \
+                 VALUES ('inst', 0, 'claude', '', '/tmp', '{invalid', 1)",
+                [],
+            )
+            .unwrap();
+        store
+            .upsert_agent_slot("inst", 1, "codex", "right", "/tmp", "%2", "", 2)
+            .unwrap();
+
+        let read = store
+            .read_slots_for_instance_with_diagnostics("inst")
+            .unwrap();
+        assert_eq!(read.slots.len(), 1);
+        assert_eq!(read.slots[0].slot, 1);
+        assert_eq!(read.skipped, 1);
+    }
+
+    #[test]
+    fn read_normalizes_and_repairs_persisted_capability_flags() {
+        let (_tmp, store) = temp_store();
+        store
+            .conn
+            .execute(
+                "INSERT INTO agent_slot \
+                 (instance_id, slot, agent, native_session_id, cwd, yolo_mode, \
+                  cross_agent_team, pane_config_version, last_seen_at) \
+                 VALUES ('inst', 0, 'shell', '', '/tmp', 1, 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+
+        let read = store
+            .read_slots_for_instance_with_diagnostics("inst")
+            .unwrap();
+        assert_eq!(read.skipped, 0);
+        assert_eq!(read.slots.len(), 1);
+        assert!(!read.slots[0].yolo_mode);
+        assert!(!read.slots[0].cross_agent_team);
+
+        let persisted: (bool, bool) = store
+            .conn
+            .query_row(
+                "SELECT yolo_mode, cross_agent_team FROM agent_slot \
+                 WHERE instance_id = 'inst' AND slot = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted, (false, false));
+    }
+
+    #[test]
+    fn legacy_pane_migration_is_idempotent_and_inherits_shared_values() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 0, "shell", "left", "/tmp/left", "%1", "", 1)
+            .unwrap();
+        store
+            .upsert_agent_slot("inst", 1, "codex", "right", "/tmp/right", "%2", "", 1)
+            .unwrap();
+        store
+            .upsert_agent_slot("inst", 2, "shell", "", "/tmp/shell", "%3", "", 1)
+            .unwrap();
+        let mut instance = crate::session::Instance::new("test", "/tmp/left");
+        instance.id = "inst".to_string();
+        instance.yolo_mode = true;
+        instance.cross_agent_team = true;
+        instance.xats_identity_key = Some("left-key".to_string());
+        instance.worktree_info = Some(crate::session::WorktreeInfo {
+            branch: "left-branch".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            managed_by_aoe: true,
+            created_at: chrono::Utc::now(),
+            cleanup_on_delete: true,
+        });
+        instance.primary_pane = crate::session::PaneConfig::default();
+        instance.hydrate_legacy_primary_pane();
+
+        store
+            .migrate_legacy_pane_configs(&[instance.clone()])
+            .unwrap();
+        store.migrate_legacy_pane_configs(&[instance]).unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].agent, "shell");
+        assert!(!slots[0].yolo_mode);
+        assert!(!slots[0].cross_agent_team);
+        assert!(slots[1].yolo_mode);
+        assert!(slots[1].cross_agent_team);
+        assert!(!slots[2].yolo_mode);
+        assert!(!slots[2].cross_agent_team);
+        assert_eq!(slots[0].xats_identity_key, "left-key");
+        assert_eq!(
+            slots[0]
+                .worktree_info
+                .as_ref()
+                .and_then(|info| info.worktree.as_ref())
+                .map(|info| info.branch.as_str()),
+            Some("left-branch")
+        );
+        assert_eq!(
+            slots[0]
+                .worktree_info
+                .as_ref()
+                .and_then(|info| info.worktree_path.as_deref()),
+            Some("/tmp/left")
+        );
+        assert!(slots[1].xats_identity_key.is_empty());
+        assert!(slots[1].worktree_info.is_none());
     }
 }

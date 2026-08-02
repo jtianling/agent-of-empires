@@ -121,12 +121,7 @@ pub const MAX_AGENT_PANES: usize = (MAX_SLOT + 1) as usize;
 /// An agent pane AoE has just launched, before any capture exists for it.
 pub struct LaunchedPane<'a> {
     pub pane_id: &'a str,
-    pub agent: &'a str,
-    /// The directory this pane was launched into. Its own, not the instance's:
-    /// restart and cold-start recovery both place a pane at the directory its
-    /// slot recorded, so recording the instance's here is correct at launch and
-    /// wrong at the first restart.
-    pub cwd: &'a str,
+    pub config: &'a crate::session::PaneConfig,
     /// The identity key minted for this pane, empty when it gets none.
     pub identity_key: &'a str,
 }
@@ -140,13 +135,13 @@ pub struct LaunchedPane<'a> {
 /// then on. The extra pane's row is always written: its slot is by construction
 /// free or held by a pane that is gone. The primary pane's row is written only
 /// when it has none, because an existing one carries a captured conversation
-/// that a launch-time row would blank. Its key stays on the instance record.
+/// that a launch-time row would blank. Its key is persisted in slot 0.
 pub fn record_launched_extra_pane(
     store: &Store,
     instance_id: &str,
     session_name: &str,
-    primary_cwd: &str,
-    primary_agent: &str,
+    primary: &crate::session::PaneConfig,
+    primary_identity_key: &str,
     pane: &LaunchedPane<'_>,
 ) -> Result<()> {
     let panes = list_session_panes(session_name);
@@ -156,8 +151,8 @@ pub fn record_launched_extra_pane(
         instance_id,
         &panes,
         primary_pane.as_deref(),
-        primary_cwd,
-        primary_agent,
+        primary,
+        primary_identity_key,
         pane,
     )
 }
@@ -171,8 +166,8 @@ fn record_launched_extra_pane_among(
     instance_id: &str,
     panes: &[(u32, String)],
     primary_pane: Option<&str>,
-    primary_cwd: &str,
-    primary_agent: &str,
+    primary: &crate::session::PaneConfig,
+    primary_identity_key: &str,
     pane: &LaunchedPane<'_>,
 ) -> Result<()> {
     let existing_rows = store.read_slots_for_instance(instance_id)?;
@@ -188,15 +183,17 @@ fn record_launched_extra_pane_among(
     // insert-if-absent rather than guarded by the read above: an existing row
     // carries a captured conversation, and a capture landing between the read
     // and the write would otherwise be blanked.
-    if let Some(primary) = primary_pane {
-        if assigned.iter().any(|a| a.slot == 0 && a.pane_id == primary) {
-            store.record_launched_slot_if_absent(
+    if let Some(primary_pane_id) = primary_pane {
+        if assigned
+            .iter()
+            .any(|a| a.slot == 0 && a.pane_id == primary_pane_id)
+        {
+            store.record_launched_slot_config_if_absent(
                 instance_id,
                 0,
-                primary_agent,
-                primary_cwd,
                 primary,
-                "",
+                primary_pane_id,
+                primary_identity_key,
                 now,
             )?;
         }
@@ -205,11 +202,10 @@ fn record_launched_extra_pane_among(
     let Some(assignment) = assigned.iter().find(|a| a.pane_id == pane.pane_id) else {
         anyhow::bail!("pane {} was assigned no slot", pane.pane_id);
     };
-    store.record_launched_slot(
+    store.record_launched_slot_config(
         instance_id,
         assignment.slot,
-        pane.agent,
-        pane.cwd,
+        pane.config,
         pane.pane_id,
         pane.identity_key,
         now,
@@ -362,6 +358,10 @@ fn reconcile_session(
         .iter()
         .map(|s| (s.slot, s.xats_identity_key.clone()))
         .collect();
+    let existing_configs: HashMap<i64, crate::session::PaneConfig> = existing_rows
+        .iter()
+        .map(|slot| (slot.slot, slot.pane_config()))
+        .collect();
     // Slots already tracked for this instance: used to detect first-time
     // adoption (a slot that did not exist before) for event logging.
     let existing: HashSet<i64> = existing_rows.iter().map(|s| s.slot).collect();
@@ -383,16 +383,67 @@ fn reconcile_session(
             continue;
         }
         let now = crate::db::now_unix();
-        store.upsert_agent_slot_capture(
+        let mut pane_config = existing_configs
+            .get(&pane.slot)
+            .cloned()
+            .unwrap_or_else(|| {
+                if pane.slot == 0 {
+                    inst.primary_pane_config().clone()
+                } else {
+                    crate::session::PaneConfig::new(
+                        capture.agent.clone(),
+                        capture.cwd.clone(),
+                        false,
+                        false,
+                    )
+                }
+            });
+        pane_config.tool = capture.agent.clone();
+        pane_config.working_dir = capture.cwd.clone();
+        let normalized = crate::session::PaneConfig::new(
+            pane_config.tool.clone(),
+            pane_config.working_dir.clone(),
+            pane_config.yolo_mode,
+            pane_config.cross_agent_team,
+        );
+        pane_config.yolo_mode = normalized.yolo_mode;
+        pane_config.cross_agent_team = normalized.cross_agent_team;
+        if let Err(error) = pane_config.validate() {
+            tracing::warn!(
+                "reconcile: skipping invalid capture for {} slot {}: {}",
+                inst.id,
+                pane.slot,
+                error
+            );
+            continue;
+        }
+        let identity_key = existing_keys
+            .get(&pane.slot)
+            .map(String::as_str)
+            .filter(|key| !key.is_empty())
+            .or_else(|| {
+                (pane.slot == 0)
+                    .then_some(inst.xats_identity_key.as_deref())
+                    .flatten()
+            })
+            .unwrap_or("");
+        if let Err(error) = store.upsert_agent_slot_capture_config(
             &inst.id,
             pane.slot,
-            &capture.agent,
+            &pane_config,
             &capture.native_session_id,
-            &capture.cwd,
             &pane.pane_id,
-            existing_keys.get(&pane.slot).map_or("", String::as_str),
+            identity_key,
             now,
-        )?;
+        ) {
+            tracing::warn!(
+                "reconcile: failed to persist {} slot {}: {}",
+                inst.id,
+                pane.slot,
+                error
+            );
+            continue;
+        }
         if !existing.contains(&pane.slot) {
             // First time this slot is recorded for the session: adoption.
             store.append_event(
@@ -702,6 +753,63 @@ mod identity_key_tests {
         );
     }
 
+    #[test]
+    fn invalid_capture_does_not_block_a_valid_sibling() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+        store
+            .upsert_pane_live("%1", "claude", "left", "", 1)
+            .unwrap();
+        store
+            .upsert_pane_live("%2", "codex", "right", "/tmp/right", 1)
+            .unwrap();
+
+        reconcile_session(
+            &store,
+            &inst,
+            &[(0, "%1".to_string()), (1, "%2".to_string())],
+            Some("%1"),
+        )
+        .unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].slot, 1);
+        assert_eq!(slots[0].agent, "codex");
+    }
+
+    #[test]
+    fn adopted_secondary_flags_do_not_inherit_from_primary() {
+        let (_tmp, store) = store();
+        let mut inst = Instance::new("recon", "/tmp/recon");
+        inst.set_primary_pane_config(crate::session::PaneConfig::new(
+            "claude",
+            "/tmp/recon",
+            true,
+            true,
+        ));
+        store
+            .upsert_pane_live("%1", "claude", "left", "/tmp/recon", 1)
+            .unwrap();
+        store
+            .upsert_pane_live("%2", "shell", "right", "/tmp/right", 1)
+            .unwrap();
+
+        reconcile_session(
+            &store,
+            &inst,
+            &[(0, "%1".to_string()), (1, "%2".to_string())],
+            Some("%1"),
+        )
+        .unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        let secondary = slots.iter().find(|slot| slot.slot == 1).unwrap();
+        assert_eq!(secondary.agent, "shell");
+        assert!(!secondary.yolo_mode);
+        assert!(!secondary.cross_agent_team);
+    }
+
     fn event_kinds(store: &Store, instance_id: &str) -> Vec<String> {
         let mut stmt = store
             .conn
@@ -836,18 +944,19 @@ mod identity_key_tests {
         let (_tmp, store) = store();
         let inst = Instance::new("recon", "/tmp/session-dir");
         let panes = [(0, "%1".to_string()), (1, "%2".to_string())];
+        let primary = crate::session::PaneConfig::new("claude", "/tmp/session-dir", false, false);
+        let launched = crate::session::PaneConfig::new("codex", "/tmp/other-dir", false, false);
 
         record_launched_extra_pane_among(
             &store,
             &inst.id,
             &panes,
             Some("%1"),
-            "/tmp/session-dir",
-            "claude",
+            &primary,
+            "primary-key",
             &LaunchedPane {
                 pane_id: "%2",
-                agent: "codex",
-                cwd: "/tmp/other-dir",
+                config: &launched,
                 identity_key: "launched-key",
             },
         )
@@ -858,6 +967,7 @@ mod identity_key_tests {
         let launched = slots.iter().find(|s| s.slot == 1).expect("launched slot");
         assert_eq!(launched.cwd, "/tmp/other-dir");
         assert_eq!(primary.cwd, "/tmp/session-dir");
+        assert_eq!(primary.xats_identity_key, "primary-key");
     }
 
     #[test]
@@ -866,18 +976,20 @@ mod identity_key_tests {
             let (_tmp, store) = store();
             let inst = Instance::new("recon", "/tmp/session-dir");
             let panes = [(0, "%1".to_string()), (1, "%2".to_string())];
+            let primary =
+                crate::session::PaneConfig::new("codex", "/tmp/session-dir", false, false);
+            let launched = crate::session::PaneConfig::new("shell", shell_cwd, false, false);
 
             record_launched_extra_pane_among(
                 &store,
                 &inst.id,
                 &panes,
                 Some("%1"),
-                "/tmp/session-dir",
-                "codex",
+                &primary,
+                "",
                 &LaunchedPane {
                     pane_id: "%2",
-                    agent: "shell",
-                    cwd: shell_cwd,
+                    config: &launched,
                     identity_key: "",
                 },
             )
@@ -900,18 +1012,19 @@ mod identity_key_tests {
         let (_tmp, store) = store();
         let inst = Instance::new("recon", "/tmp/session-dir");
         let panes = [(0, "%1".to_string()), (1, "%2".to_string())];
+        let primary = crate::session::PaneConfig::new("claude", "/tmp/session-dir", false, false);
+        let launched = crate::session::PaneConfig::new("codex", "/tmp/other-dir", false, false);
 
         record_launched_extra_pane_among(
             &store,
             &inst.id,
             &panes,
             Some("%1"),
-            "/tmp/session-dir",
-            "claude",
+            &primary,
+            "",
             &LaunchedPane {
                 pane_id: "%2",
-                agent: "codex",
-                cwd: "/tmp/other-dir",
+                config: &launched,
                 identity_key: "launched-key",
             },
         )

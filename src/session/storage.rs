@@ -43,7 +43,10 @@ impl Storage {
             return Ok(Vec::new());
         }
 
-        let instances: Vec<Instance> = serde_json::from_str(&content)?;
+        let mut instances: Vec<Instance> = serde_json::from_str(&content)?;
+        for instance in &mut instances {
+            instance.hydrate_legacy_primary_pane();
+        }
         Ok(instances)
     }
 

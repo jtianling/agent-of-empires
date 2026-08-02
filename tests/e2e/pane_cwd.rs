@@ -98,7 +98,7 @@ fn wait_for_target_contains(h: &TuiTestHarness, target: &str, expected: &str) {
 fn right_pane_line(screen: &str) -> &str {
     screen
         .lines()
-        .find(|line| line.contains("Right Pane:"))
+        .find(|line| line.contains("Right Pane Agent:"))
         .unwrap_or("")
 }
 
@@ -192,18 +192,15 @@ fn test_new_session_shell_right_pane_starts_in_project_path() {
     h.wait_for("Title");
 
     h.type_text("Right Pane Shell");
-    h.send_keys("Tab");
+    for _ in 0..3 {
+        h.send_keys("Tab");
+    }
     for _ in 0..128 {
         h.send_keys("BSpace");
     }
     h.type_text(&expected_project);
 
-    let tabs_to_right_pane = if h.capture_screen().contains("Tool:") {
-        2
-    } else {
-        1
-    };
-    for _ in 0..tabs_to_right_pane {
+    for _ in 0..2 {
         h.send_keys("Tab");
     }
 

@@ -14,6 +14,131 @@ use crate::tmux;
 
 use super::container_config;
 use super::environment::{build_docker_env_args, shell_escape};
+use super::PaneConfig;
+
+pub(crate) trait PaneConfigTarget {
+    fn resolve_for(self, instance: &Instance) -> PaneConfig;
+}
+
+#[cfg(test)]
+mod pane_level_command_tests {
+    use super::*;
+
+    #[test]
+    fn yolo_is_read_from_the_target_pane_only() {
+        let instance = Instance::new("test", "/tmp");
+        let enabled = PaneConfig::new("claude", "/tmp/left", true, false);
+        let disabled = PaneConfig::new("claude", "/tmp/right", false, false);
+
+        let enabled_command = instance
+            .build_pane_command(&enabled, None, false, None)
+            .unwrap();
+        let disabled_command = instance
+            .build_pane_command(&disabled, None, false, None)
+            .unwrap();
+
+        assert!(enabled_command.contains("--dangerously-skip-permissions"));
+        assert!(!disabled_command.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn cross_agent_team_is_read_from_the_target_pane_only() {
+        let mut instance = Instance::new("test", "/tmp");
+        instance.cross_agent_team_channel = "test-channel".to_string();
+        let enabled = PaneConfig::new("claude", "/tmp/right", false, true);
+        let disabled = PaneConfig::new("claude", "/tmp/left", false, false);
+
+        let enabled_command = instance
+            .build_pane_command(&enabled, None, false, Some("right-key"))
+            .unwrap();
+        let disabled_command = instance
+            .build_pane_command(&disabled, None, false, Some("left-key"))
+            .unwrap();
+
+        assert!(enabled_command.contains("test-channel"));
+        assert!(enabled_command.contains("right-key"));
+        assert!(!disabled_command.contains("test-channel"));
+        assert!(!disabled_command.contains("left-key"));
+    }
+
+    #[test]
+    fn secondary_identity_keys_are_independent() {
+        let instance = Instance::new("test", "/tmp");
+        let pane = PaneConfig::new("codex", "/tmp/right", false, true);
+
+        let first = instance.build_extra_pane_config_command(&pane).unwrap();
+        let second = instance.build_extra_pane_config_command(&pane).unwrap();
+
+        assert!(!first.identity_key.is_empty());
+        assert!(!second.identity_key.is_empty());
+        assert_ne!(first.identity_key, second.identity_key);
+        assert!(first.command.contains("pre-register-codex-pane"));
+    }
+
+    #[test]
+    fn fresh_resume_plan_keeps_target_pane_flags() {
+        let instance = Instance::new("test", "/tmp");
+        let pane = PaneConfig::new("claude", "/tmp/right", true, true);
+
+        let (command, resumed) = instance
+            .build_pane_resume_plan(&pane, "", false, RestartMode::Fresh, Some("right-key"))
+            .unwrap();
+
+        assert!(!resumed);
+        assert!(command.contains("--dangerously-skip-permissions"));
+        assert!(command.contains("right-key"));
+    }
+
+    #[test]
+    fn pane_flag_matrix_does_not_leak_between_siblings() {
+        let mut instance = Instance::new("test", "/tmp");
+        instance.cross_agent_team_channel = "pane-channel".to_string();
+        for (left_yolo, left_team, right_yolo, right_team) in [
+            (true, false, false, true),
+            (false, true, true, false),
+            (true, true, true, true),
+            (false, false, false, false),
+        ] {
+            let left = PaneConfig::new("claude", "/tmp/left", left_yolo, left_team);
+            let right = PaneConfig::new("claude", "/tmp/right", right_yolo, right_team);
+            let left_command = instance
+                .build_pane_command(&left, None, true, Some("left-key"))
+                .unwrap();
+            let right_command = instance
+                .build_pane_command(&right, None, false, Some("right-key"))
+                .unwrap();
+
+            assert_eq!(
+                left_command.contains("--dangerously-skip-permissions"),
+                left_yolo
+            );
+            assert_eq!(left_command.contains("pane-channel"), left_team);
+            assert_eq!(
+                right_command.contains("--dangerously-skip-permissions"),
+                right_yolo
+            );
+            assert_eq!(right_command.contains("pane-channel"), right_team);
+        }
+    }
+}
+
+impl PaneConfigTarget for &PaneConfig {
+    fn resolve_for(self, _instance: &Instance) -> PaneConfig {
+        self.clone()
+    }
+}
+
+#[cfg(test)]
+impl PaneConfigTarget for &str {
+    fn resolve_for(self, instance: &Instance) -> PaneConfig {
+        PaneConfig::new(
+            self,
+            instance.project_path.clone(),
+            instance.yolo_mode,
+            instance.cross_agent_team && !instance.is_sandboxed(),
+        )
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalInfo {
@@ -474,7 +599,7 @@ impl Default for StatusUpdateOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub branch: String,
     pub main_repo_path: String,
@@ -484,7 +609,7 @@ pub struct WorktreeInfo {
     pub cleanup_on_delete: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRepo {
     pub name: String,
     pub source_path: String,
@@ -498,7 +623,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub branch: String,
     pub workspace_dir: String,
@@ -541,6 +666,8 @@ pub struct Instance {
     pub extra_args: String,
     #[serde(default)]
     pub tool: String,
+    #[serde(default)]
+    pub primary_pane: PaneConfig,
     #[serde(default)]
     pub yolo_mode: bool,
     /// When set for a supported non-sandboxed tool, launches with its xats
@@ -641,6 +768,7 @@ impl Instance {
             command: String::new(),
             extra_args: String::new(),
             tool: "claude".to_string(),
+            primary_pane: PaneConfig::new("claude", project_path, false, false),
             yolo_mode: false,
             cross_agent_team: false,
             cross_agent_team_channel: String::new(),
@@ -688,7 +816,7 @@ impl Instance {
     }
 
     pub fn is_yolo_mode(&self) -> bool {
-        self.yolo_mode
+        self.primary_pane.yolo_mode
     }
 
     pub fn supports_cross_agent_team_tool(tool: &str) -> bool {
@@ -697,23 +825,61 @@ impl Instance {
 
     /// Whether this instance launches with tool-specific Cross Agent Team behavior.
     pub fn is_cross_agent_team(&self) -> bool {
-        self.cross_agent_team
+        self.primary_pane.cross_agent_team
             && !self.is_sandboxed()
-            && Self::supports_cross_agent_team_tool(&self.tool)
+            && Self::supports_cross_agent_team_tool(&self.primary_pane.tool)
     }
 
-    /// Whether a pane running `target_agent` takes this instance's Cross Agent
-    /// Team integration.
-    ///
-    /// Which integration a pane needs is decided by the agent running in it, not
-    /// by the instance's tool: a Claude pane adopted into a Codex instance needs
-    /// Claude's development-channel flag, and a Codex pane adopted into a Claude
-    /// instance needs Codex's bootstrap. Keying either on `self.tool` gives an
-    /// adopted pane the wrong integration in one direction and none in the other.
-    ///
-    /// What stays instance-level is whether Cross Agent Team is on at all.
-    fn cross_agent_team_pane(&self, target_agent: &str) -> bool {
-        self.is_cross_agent_team() && Self::supports_cross_agent_team_tool(target_agent)
+    pub fn primary_pane_config(&self) -> &PaneConfig {
+        &self.primary_pane
+    }
+
+    fn legacy_primary_pane_config(&self) -> PaneConfig {
+        let mut pane = PaneConfig::new(
+            self.tool.clone(),
+            self.project_path.clone(),
+            self.yolo_mode,
+            self.cross_agent_team,
+        );
+        if self.worktree_info.is_some() || self.workspace_info.is_some() {
+            pane.worktree = Some(super::PaneWorktreeInfo {
+                worktree_path: self
+                    .worktree_info
+                    .as_ref()
+                    .map(|_| self.project_path.clone()),
+                worktree: self.worktree_info.clone(),
+                workspace: self.workspace_info.clone(),
+            });
+        }
+        pane
+    }
+
+    pub fn hydrate_legacy_primary_pane(&mut self) {
+        if self.primary_pane.tool.is_empty() || self.primary_pane.working_dir.is_empty() {
+            self.primary_pane = self.legacy_primary_pane_config();
+        } else {
+            self.primary_pane = std::mem::take(&mut self.primary_pane).normalized();
+        }
+        self.sync_legacy_primary_fields();
+    }
+
+    pub fn set_primary_pane_config(&mut self, config: PaneConfig) {
+        self.primary_pane = config.normalized();
+        self.sync_legacy_primary_fields();
+    }
+
+    pub fn sync_primary_pane_from_legacy(&mut self) {
+        self.primary_pane = self.legacy_primary_pane_config();
+        self.sync_legacy_primary_fields();
+    }
+
+    fn sync_legacy_primary_fields(&mut self) {
+        self.tool = self.primary_pane.tool.clone();
+        self.project_path = self.primary_pane.working_dir.clone();
+        self.yolo_mode = self.primary_pane.yolo_mode;
+        self.cross_agent_team = self.primary_pane.cross_agent_team;
+        self.worktree_info = self.primary_pane.worktree_info().cloned();
+        self.workspace_info = self.primary_pane.workspace_info().cloned();
     }
 
     /// Mint this instance's primary-pane xats identity key if Cross Agent Team is
@@ -726,21 +892,15 @@ impl Instance {
     }
 
     /// Whether AoE should mint an identity key for this slot before launching it.
-    /// Slot 0 is the primary pane, whose key lives on the instance record, and a
-    /// slot that already has one keeps it.
     fn slot_needs_identity_key(&self, slot: &crate::db::AgentSlot) -> bool {
-        // Slot 0 is skipped because the instance record already holds the key for
-        // the instance's own agent -- which is only true when slot 0 is running
-        // that agent. An adopted slot 0 running something else is described by
-        // neither: the instance's key belongs to a different agent, and skipping
-        // it here would leave that pane the only tracked pane with no key at all.
-        let instance_record_holds_it = slot.slot == 0 && self.pane_runs_instance_tool(&slot.agent);
-        self.is_cross_agent_team() && !instance_record_holds_it && slot.xats_identity_key.is_empty()
+        !self.is_sandboxed()
+            && slot.cross_agent_team
+            && Self::supports_cross_agent_team_tool(&slot.agent)
+            && slot.xats_identity_key.is_empty()
     }
 
     /// Mint and persist an identity key for every adopted slot that has none, so
-    /// panes AoE is about to launch carry one. Slot 0 is the primary pane, whose
-    /// key lives on the instance record instead.
+    /// panes AoE is about to launch carry one.
     ///
     /// This is where a hand-started pane first gets a key: adoption is
     /// observe-first, so AoE never built that pane's original command and could
@@ -752,12 +912,11 @@ impl Instance {
     ) {
         for slot in slots.iter_mut().filter(|s| self.slot_needs_identity_key(s)) {
             let key = Uuid::new_v4().to_string();
-            match store.upsert_agent_slot(
+            match store.upsert_agent_slot_config(
                 &slot.instance_id,
                 slot.slot,
-                &slot.agent,
+                &slot.pane_config(),
                 &slot.native_session_id,
-                &slot.cwd,
                 &slot.tmux_pane,
                 &key,
                 slot.last_seen_at,
@@ -773,22 +932,22 @@ impl Instance {
         }
     }
 
-    /// The identity key to inject into a pane being launched: the instance's own
-    /// for the primary pane, the slot's for an adopted one. `None` when Cross
-    /// Agent Team is off, so no variable is injected at all.
+    /// The identity key to inject into a pane being launched. Durable slot state
+    /// wins; the instance value is only the bootstrap source before slot 0 exists.
     fn xats_identity_key_for_pane<'a>(
         &'a self,
+        pane: &PaneConfig,
         is_primary: bool,
         slot_identity_key: Option<&'a str>,
     ) -> Option<&'a str> {
-        if !self.is_cross_agent_team() {
+        if !pane.cross_agent_team || !Self::supports_cross_agent_team_tool(&pane.tool) {
             return None;
         }
-        let key = if is_primary {
-            self.xats_identity_key.as_deref()
-        } else {
-            slot_identity_key
-        };
+        let key = slot_identity_key.or_else(|| {
+            is_primary
+                .then_some(self.xats_identity_key.as_deref())
+                .flatten()
+        });
         key.filter(|k| !k.is_empty())
     }
 
@@ -813,12 +972,14 @@ impl Instance {
     ///
     /// Separate from [`cross_agent_team_pane`](Self::cross_agent_team_pane),
     /// which asks what integration a pane's agent needs.
-    fn agent_pane_has_claude_prompts(&self, pane_agent: &str) -> bool {
-        pane_agent == "claude" && self.is_cross_agent_team()
+    fn agent_pane_has_claude_prompts(&self, target: impl PaneConfigTarget) -> bool {
+        let pane = target.resolve_for(self);
+        !self.is_sandboxed() && pane.tool == "claude" && pane.cross_agent_team
     }
 
-    fn run_auto_confirm(&self, pane_agent: &str) {
-        if !self.agent_pane_has_claude_prompts(pane_agent) {
+    fn run_auto_confirm(&self, target: impl PaneConfigTarget) {
+        let pane = target.resolve_for(self);
+        if !self.agent_pane_has_claude_prompts(&pane) {
             return;
         }
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
@@ -826,6 +987,17 @@ impl Instance {
             return;
         };
         self.auto_confirm_panes(&[agent_pane]);
+    }
+
+    pub fn auto_confirm_launched_pane(&self, pane_id: &str, pane: &PaneConfig) {
+        if self.agent_pane_has_claude_prompts(pane) {
+            self.auto_confirm_panes(&[pane_id.to_string()]);
+        }
+    }
+
+    #[cfg(test)]
+    fn cross_agent_team_pane(&self, agent: &str) -> bool {
+        self.cross_agent_team && !self.is_sandboxed() && Self::supports_cross_agent_team_tool(agent)
     }
 
     /// Answer the confirmation screens of the panes named, and of no others.
@@ -862,7 +1034,7 @@ impl Instance {
     /// safe: watching longer cannot produce a second Enter for a question
     /// already answered.
     fn auto_confirm_panes(&self, panes: &[String]) {
-        if !self.cross_agent_team_pane("claude") || panes.is_empty() {
+        if panes.is_empty() {
             return;
         }
 
@@ -944,8 +1116,8 @@ impl Instance {
     /// The `--dangerously-load-development-channels <channel>` flag for Cross
     /// Agent Team launches, or `None` when the mode is off. Falls back to the
     /// default channel when the stored channel is empty.
-    fn claude_cross_agent_team_flag(&self) -> Option<String> {
-        if !self.is_cross_agent_team() {
+    fn claude_cross_agent_team_flag(&self, pane: &PaneConfig) -> Option<String> {
+        if !pane.cross_agent_team {
             return None;
         }
         let channel = if self.cross_agent_team_channel.is_empty() {
@@ -978,9 +1150,11 @@ impl Instance {
         }
     }
 
-    fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str) -> String {
+    fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str, working_dir: &str) -> String {
         match codex_app_server_endpoint() {
-            Ok(endpoint) => self.codex_xats_bootstrap_command_for(cmd, base, &endpoint),
+            Ok(endpoint) => {
+                self.codex_xats_bootstrap_command_for(cmd, base, working_dir, &endpoint)
+            }
             Err(diagnostic) => {
                 tracing::warn!("{}", diagnostic);
                 codex_xats_aborted_command(&diagnostic)
@@ -1007,13 +1181,14 @@ impl Instance {
         &self,
         cmd: &str,
         base: &str,
+        working_dir: &str,
         endpoint: &CodexAppServerEndpoint,
     ) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
-        let project_path = shell_escape(&self.project_path);
+        let working_dir = shell_escape(working_dir);
         let app_server_url = shell_escape(&endpoint.url);
         let codex_command = format!(
-            "{base} --remote {app_server_url} -C {project_path} \
+            "{base} --remote {app_server_url} -C {working_dir} \
              -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\"{suffix}"
         );
         let script = format!(
@@ -1265,9 +1440,13 @@ impl Instance {
         )?;
 
         if launch == SessionLaunch::Agent {
+            if let Err(error) = self.record_primary_launch_slot() {
+                let _ = session.kill();
+                return Err(error);
+            }
             // The pane was just created running this instance's tool, so there
             // is nothing to read back off it.
-            self.run_auto_confirm(&self.tool.clone());
+            self.run_auto_confirm(&self.primary_pane);
         }
 
         // Apply all configured tmux options (status bar, mouse, etc.)
@@ -1288,6 +1467,21 @@ impl Instance {
         Ok(())
     }
 
+    fn record_primary_launch_slot(&self) -> Result<()> {
+        let profile = Self::current_profile();
+        let session_name = tmux::Session::generate_name(&self.id, &self.title);
+        let pane_id = tmux::get_agent_pane_id(&session_name)
+            .ok_or_else(|| anyhow::anyhow!("primary pane id was not recorded"))?;
+        crate::db::Store::open_with_schema(&profile)?.record_launched_slot_config_if_absent(
+            &self.id,
+            0,
+            &self.primary_pane,
+            &pane_id,
+            self.xats_identity_key.as_deref().unwrap_or(""),
+            crate::db::now_unix(),
+        )
+    }
+
     /// Build the agent launch command string. Pure command construction with no
     /// side effects (no hooks, no container lifecycle management).
     ///
@@ -1296,8 +1490,7 @@ impl Instance {
     /// start/respawn path and the slot-based multi-pane resume path share one
     /// launch-context decoration pipeline.
     pub fn build_agent_command(&self, resume_token: Option<&str>) -> Option<String> {
-        let tool = self.tool.clone();
-        self.build_pane_command(&tool, resume_token, true, None)
+        self.build_pane_command(&self.primary_pane, resume_token, true, None)
     }
 
     /// Build the launch command for an extra agent pane AoE adds beside the
@@ -1325,20 +1518,23 @@ impl Instance {
     /// the only moment at which it is preventable.
     /// `cwd` is the directory the pane will be split into. Only a shell pane
     /// needs it in the command itself; an agent pane inherits it from the split.
-    pub fn build_extra_pane_command(&self, tool: &str, cwd: &str) -> Option<ExtraPaneLaunch> {
-        if tool == "shell" {
+    pub fn build_extra_pane_config_command(&self, pane: &PaneConfig) -> Option<ExtraPaneLaunch> {
+        if pane.tool == "shell" {
             return Some(ExtraPaneLaunch {
-                command: self.build_extra_shell_pane_command(cwd),
+                command: self.build_extra_shell_pane_command(&pane.working_dir),
                 identity_key: String::new(),
             });
         }
-        let identity_key = if self.is_cross_agent_team() {
+        let identity_key = if pane.cross_agent_team
+            && Self::supports_cross_agent_team_tool(&pane.tool)
+            && !self.is_sandboxed()
+        {
             Uuid::new_v4().to_string()
         } else {
             String::new()
         };
         let command = self.build_pane_command(
-            tool,
+            pane,
             None,
             false,
             Some(identity_key.as_str()).filter(|k| !k.is_empty()),
@@ -1347,6 +1543,13 @@ impl Instance {
             command,
             identity_key,
         })
+    }
+
+    #[cfg(test)]
+    fn build_extra_pane_command(&self, target_agent: &str, cwd: &str) -> Option<ExtraPaneLaunch> {
+        let mut pane = target_agent.resolve_for(self);
+        pane.working_dir = cwd.to_string();
+        self.build_extra_pane_config_command(&pane)
     }
 
     /// Record the durable slot of an extra pane this instance has just launched,
@@ -1380,8 +1583,8 @@ impl Instance {
                     &store,
                     &self.id,
                     session_name,
-                    &self.project_path,
-                    &self.tool,
+                    &self.primary_pane,
+                    self.xats_identity_key.as_deref().unwrap_or(""),
                     pane,
                 )
             })
@@ -1471,24 +1674,25 @@ impl Instance {
     /// recorded a different agent (a hand-started pane AoE only adopted) builds
     /// from its own binary even when it occupies the primary slot.
     ///
-    /// `slot_identity_key` supplies an adopted pane's xats identity key. It is
-    /// ignored for the instance's own agent pane, which uses the instance's key.
-    pub fn build_pane_command(
+    /// `slot_identity_key` supplies the durable xats identity key for the target
+    /// slot. The instance value is only a bootstrap source before slot 0 exists.
+    pub(crate) fn build_pane_command(
         &self,
-        target_agent: &str,
+        target: impl PaneConfigTarget,
         resume_token: Option<&str>,
         is_primary: bool,
         slot_identity_key: Option<&str>,
     ) -> Option<String> {
-        let agent = crate::agents::get_agent(target_agent);
-        let is_primary = is_primary && self.pane_runs_instance_tool(target_agent);
+        let pane = target.resolve_for(self);
+        let agent = crate::agents::get_agent(&pane.tool);
+        let is_primary = is_primary && self.pane_runs_instance_tool(&pane.tool);
 
         if self.is_sandboxed() {
             let sandbox = self.sandbox_info.as_ref()?;
             let container = DockerContainer::from_session_id(&self.id);
 
             let base_cmd = self.build_base_pane_command(agent, resume_token, is_primary);
-            let mut tool_cmd = if self.is_yolo_mode() {
+            let mut tool_cmd = if pane.yolo_mode {
                 if let Some(yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
                         crate::agents::YoloMode::CliFlag(flag) => {
@@ -1532,7 +1736,7 @@ impl Instance {
                     if needs_instance_id {
                         env_vars.push(("AOE_INSTANCE_ID", &self.id));
                     }
-                    if self.is_yolo_mode() {
+                    if pane.yolo_mode {
                         if let Some(ref yolo) = a.yolo {
                             match yolo {
                                 crate::agents::YoloMode::CliFlag(flag) => {
@@ -1545,22 +1749,26 @@ impl Instance {
                             }
                         }
                     }
-                    if self.cross_agent_team_pane(target_agent) {
-                        match target_agent {
+                    if pane.cross_agent_team {
+                        match pane.tool.as_str() {
                             "claude" => {
-                                if let Some(flag) = self.claude_cross_agent_team_flag() {
+                                if let Some(flag) = self.claude_cross_agent_team_flag(&pane) {
                                     cmd = format!("{} {}", cmd, flag);
                                 }
                             }
                             "codex" => {
-                                let base = self.pane_base_command(target_agent, is_primary);
-                                cmd = self.codex_xats_bootstrap_command(&cmd, &base);
+                                let base = self.pane_base_command(&pane.tool, is_primary);
+                                cmd = self.codex_xats_bootstrap_command(
+                                    &cmd,
+                                    &base,
+                                    &pane.working_dir,
+                                );
                             }
                             _ => {}
                         }
                     }
                     if let Some(key) =
-                        self.xats_identity_key_for_pane(is_primary, slot_identity_key)
+                        self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
                     {
                         env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                     }
@@ -1572,7 +1780,7 @@ impl Instance {
                 if needs_instance_id {
                     env_vars.push(("AOE_INSTANCE_ID", &self.id));
                 }
-                if self.is_yolo_mode() {
+                if pane.yolo_mode {
                     if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                         match yolo {
                             crate::agents::YoloMode::CliFlag(flag) => {
@@ -1585,21 +1793,23 @@ impl Instance {
                         }
                     }
                 }
-                if self.cross_agent_team_pane(target_agent) {
-                    match target_agent {
+                if pane.cross_agent_team {
+                    match pane.tool.as_str() {
                         "claude" => {
-                            if let Some(flag) = self.claude_cross_agent_team_flag() {
+                            if let Some(flag) = self.claude_cross_agent_team_flag(&pane) {
                                 cmd = format!("{} {}", cmd, flag);
                             }
                         }
                         "codex" => {
-                            let base = self.pane_base_command(target_agent, is_primary);
-                            cmd = self.codex_xats_bootstrap_command(&cmd, &base);
+                            let base = self.pane_base_command(&pane.tool, is_primary);
+                            cmd = self.codex_xats_bootstrap_command(&cmd, &base, &pane.working_dir);
                         }
                         _ => {}
                     }
                 }
-                if let Some(key) = self.xats_identity_key_for_pane(is_primary, slot_identity_key) {
+                if let Some(key) =
+                    self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
+                {
                     env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                 }
                 if self.expects_shell() && env_vars.is_empty() {
@@ -1743,6 +1953,15 @@ impl Instance {
         if let Some(ref mut ws) = fork.workspace_info {
             ws.cleanup_on_delete = false;
         }
+        if let Some(metadata) = fork.primary_pane.worktree.as_mut() {
+            if let Some(worktree) = metadata.worktree.as_mut() {
+                worktree.cleanup_on_delete = false;
+            }
+            if let Some(workspace) = metadata.workspace.as_mut() {
+                workspace.cleanup_on_delete = false;
+            }
+        }
+        fork.sync_legacy_primary_fields();
 
         // Give the fork its own container name derived from the new id so it
         // does not collide with the parent's container.
@@ -2030,8 +2249,16 @@ impl Instance {
         // conversation. A fresh launch of the agent that is actually in the pane
         // beats a resumed launch of one that is not.
         let pane_agent = self.pane_agent_overriding_instance_tool();
+        let pane = match pane_agent {
+            Some(agent) => {
+                let mut pane = self.primary_pane.clone();
+                pane.tool = agent.to_string();
+                pane
+            }
+            None => self.primary_pane.clone(),
+        };
         let cmd = match pane_agent {
-            Some(agent) => self.build_pane_command(agent, None, false, None),
+            Some(_) => self.build_pane_command(&pane, None, false, None),
             None => self.build_agent_command(effective_resume_token.as_deref()),
         }
         .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
@@ -2039,7 +2266,7 @@ impl Instance {
         session.kill_agent_pane_process_tree();
         session.respawn_agent_pane(&cmd, &self.project_path, !self.expects_shell())?;
 
-        self.run_auto_confirm(pane_agent.unwrap_or(&self.tool));
+        self.run_auto_confirm(&pane);
 
         self.apply_tmux_options(&Self::current_profile());
 
@@ -2084,18 +2311,21 @@ impl Instance {
         let mut confirmable_panes: Vec<String> = Vec::new();
         for slot in slots {
             let native_session_id = self.slot_resume_source(slot, mode);
+            let pane = slot.pane_config();
             let outcome = self.resume_launch_pane(
-                &slot.agent,
+                &pane,
                 &native_session_id,
                 &slot.tmux_pane,
-                &slot.cwd,
                 slot.slot == 0,
                 mode,
                 Some(slot.xats_identity_key.as_str()),
             );
             // Every Claude pane this fan-out actually relaunched raises its own
             // startup screens, not just the primary one.
-            if slot.agent == "claude" && !matches!(outcome, PaneResumeOutcome::Error(_)) {
+            if pane.tool == "claude"
+                && pane.cross_agent_team
+                && !matches!(outcome, PaneResumeOutcome::Error(_))
+            {
                 confirmable_panes.push(slot.tmux_pane.clone());
             }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
@@ -2235,16 +2465,19 @@ impl Instance {
                 )));
                 continue;
             };
+            let pane = slot.pane_config();
             let outcome = self.resume_launch_pane(
-                &slot.agent,
+                &pane,
                 &slot.native_session_id,
                 new_pane,
-                &slot.cwd,
                 slot.slot == 0,
                 mode,
                 Some(slot.xats_identity_key.as_str()),
             );
-            if slot.agent == "claude" && !matches!(outcome, PaneResumeOutcome::Error(_)) {
+            if pane.tool == "claude"
+                && pane.cross_agent_team
+                && !matches!(outcome, PaneResumeOutcome::Error(_))
+            {
                 confirmable_panes.push(new_pane.clone());
             }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
@@ -2258,12 +2491,11 @@ impl Instance {
                     err
                 );
             }
-            if let Err(e) = store.upsert_agent_slot(
+            if let Err(e) = store.upsert_agent_slot_config(
                 &slot.instance_id,
                 slot.slot,
-                &slot.agent,
+                &pane,
                 &slot.native_session_id,
-                &slot.cwd,
                 new_pane,
                 &slot.xats_identity_key,
                 now,
@@ -2957,15 +3189,6 @@ pub enum PaneResumeOutcome {
     Error(String),
 }
 
-/// Whether a string is safe to use as a bare command token (binary name) in a
-/// tmux respawn command. tmux runs the respawn argument through a shell, so a
-/// recorded value with shell metacharacters must never be executed.
-fn is_safe_command_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
 impl Instance {
     /// Build the launch command for one tracked pane from its recorded agent and
     /// persisted native session id, decorating it with the instance's full launch
@@ -2989,17 +3212,18 @@ impl Instance {
     /// ever interpolated into the resume flag.
     fn build_pane_resume_plan(
         &self,
-        agent: &str,
+        target: impl PaneConfigTarget,
         native_session_id: &str,
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
     ) -> Option<(String, bool)> {
-        let Some(def) = crate::agents::get_agent(agent) else {
+        let pane = target.resolve_for(self);
+        let Some(def) = crate::agents::get_agent(&pane.tool) else {
             // Unknown agent: only the recorded name can act as the binary, and
             // only if it is a safe command token; otherwise refuse to build a
             // command. Unknown agents cannot be decorated with launch context.
-            return is_safe_command_token(agent).then(|| (agent.to_string(), false));
+            return PaneConfig::is_safe_tool_name(&pane.tool).then(|| (pane.tool.clone(), false));
         };
 
         // `Fresh` forces the no-resume path: still build the full launch context
@@ -3009,7 +3233,7 @@ impl Instance {
             && is_valid_resume_token(native_session_id);
         let resume_token = resumed.then_some(native_session_id);
         let command =
-            self.build_pane_command(def.name, resume_token, is_primary, slot_identity_key)?;
+            self.build_pane_command(&pane, resume_token, is_primary, slot_identity_key)?;
         Some((command, resumed))
     }
 
@@ -3028,10 +3252,9 @@ impl Instance {
     #[allow(clippy::too_many_arguments)]
     fn resume_launch_pane(
         &self,
-        agent: &str,
+        pane: &PaneConfig,
         native_session_id: &str,
         tmux_pane: &str,
-        cwd: &str,
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
@@ -3040,14 +3263,17 @@ impl Instance {
         // entry's binary is the literal `shell`, which names no program, so the
         // launch path builds this pane through `build_extra_shell_pane_command`
         // and the resume path has to do the same.
-        let plan = if pane_agent_is_shell(agent) {
-            Some((self.build_extra_shell_pane_command(cwd), false))
+        let plan = if pane_agent_is_shell(&pane.tool) {
+            Some((
+                self.build_extra_shell_pane_command(&pane.working_dir),
+                false,
+            ))
         } else {
             // Build (and validate) the command before killing the pane, so a pane
             // we cannot safely respawn is left running rather than killed and
             // abandoned.
             self.build_pane_resume_plan(
-                agent,
+                pane,
                 native_session_id,
                 is_primary,
                 mode,
@@ -3055,7 +3281,7 @@ impl Instance {
             )
         };
         let Some((command, resumed)) = plan else {
-            return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{agent}'"));
+            return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{}'", pane.tool));
         };
 
         // The process tree is killed outside tmux (an agent's children can
@@ -3079,9 +3305,12 @@ impl Instance {
             ),
         }
 
-        if let Err(err) =
-            tmux::respawn_pane_target(tmux_pane, &command, cwd, !pane_agent_is_shell(agent))
-        {
+        if let Err(err) = tmux::respawn_pane_target(
+            tmux_pane,
+            &command,
+            &pane.working_dir,
+            !pane_agent_is_shell(&pane.tool),
+        ) {
             return PaneResumeOutcome::Error(err.to_string());
         }
 
@@ -4013,7 +4242,8 @@ mod tests {
     fn codex_bootstrap_names_the_configured_endpoint_everywhere() {
         let inst = codex_xats_instance();
         let endpoint = parse_codex_app_server_url("ws://localhost:8899").unwrap();
-        let cmd = inst.codex_xats_bootstrap_command_for("codex", "codex", &endpoint);
+        let cmd =
+            inst.codex_xats_bootstrap_command_for("codex", "codex", &inst.project_path, &endpoint);
 
         assert!(
             cmd.contains("ws://localhost:8899"),
@@ -4029,6 +4259,24 @@ mod tests {
             !cmd.contains("8799") && !cmd.contains("127.0.0.1"),
             "no part of the default may survive a configured endpoint: {cmd}"
         );
+    }
+
+    #[test]
+    fn codex_bootstrap_uses_the_target_pane_working_directory() {
+        let mut inst = codex_xats_instance();
+        inst.project_path = "/tmp/primary".to_string();
+        let endpoint = parse_codex_app_server_url("ws://localhost:8899").unwrap();
+        let cmd = inst.codex_xats_bootstrap_command_for(
+            "codex",
+            "codex",
+            "/tmp/secondary path",
+            &endpoint,
+        );
+        let secondary = shell_escape("/tmp/secondary path").replace('\'', "'\\''");
+        let primary = shell_escape("/tmp/primary").replace('\'', "'\\''");
+
+        assert!(cmd.contains(&format!("-C {secondary}")), "command: {cmd}");
+        assert!(!cmd.contains(&format!("-C {primary}")), "command: {cmd}");
     }
 
     /// The screen a question is drawn on changes while the question is still up
@@ -4192,6 +4440,9 @@ mod tests {
             cwd: "/tmp".to_string(),
             tmux_pane: "%1".to_string(),
             xats_identity_key: key.to_string(),
+            yolo_mode: false,
+            cross_agent_team: true,
+            worktree_info: None,
             last_seen_at: 1,
         }
     }
@@ -4211,11 +4462,9 @@ mod tests {
     }
 
     #[test]
-    fn test_primary_slot_never_mints_into_the_slot_record() {
-        // Slot 0's key lives on the instance record; minting into the slot row too
-        // would give the primary pane two homes for one value.
+    fn test_primary_slot_without_key_is_filled() {
         let inst = claude_xats_instance();
-        assert!(!inst.slot_needs_identity_key(&slot(0, "")));
+        assert!(inst.slot_needs_identity_key(&slot(0, "")));
     }
 
     #[test]
@@ -4477,6 +4726,9 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             tmux_pane: "%1".to_string(),
             xats_identity_key: String::new(),
+            yolo_mode: false,
+            cross_agent_team: true,
+            worktree_info: None,
             last_seen_at: 1,
         }
     }
@@ -4922,7 +5174,7 @@ mod tests {
         } else {
             format!("{base} {extra_args}")
         };
-        let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base);
+        let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base, &inst.project_path);
 
         let out = execute_bootstrap_script(&script, &bin, identity_key, env);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -5853,9 +6105,8 @@ mod tests {
         );
     }
 
-    /// An adopted slot 0 is described by neither key source unless one of them is
-    /// widened: the instance record holds the key for the instance's own agent,
-    /// and the slot-key path used to skip slot 0 outright.
+    /// Every adopted slot is assigned its own durable identity key before AoE
+    /// launches it, including slot 0.
     #[test]
     fn test_adopted_slot_zero_needs_its_own_identity_key() {
         let mut inst = Instance::new("test", "/tmp/test");
@@ -5864,8 +6115,8 @@ mod tests {
 
         let own = recovered_slot(0, "claude", "/tmp/test", "%0");
         assert!(
-            !inst.slot_needs_identity_key(&own),
-            "slot 0 running the instance's own agent is covered by the instance record"
+            inst.slot_needs_identity_key(&own),
+            "slot 0 stores its key in its own durable slot"
         );
 
         let adopted = recovered_slot(0, "gemini", "/tmp/test", "%0");
@@ -6015,6 +6266,9 @@ mod tests {
             cwd: cwd.to_string(),
             tmux_pane: pane.to_string(),
             xats_identity_key: String::new(),
+            yolo_mode: false,
+            cross_agent_team: false,
+            worktree_info: None,
             last_seen_at: 0,
         }
     }
@@ -6447,6 +6701,33 @@ mod tests {
         assert_eq!(inst.group_path, deserialized.group_path);
         assert_eq!(inst.tool, deserialized.tool);
         assert_eq!(inst.command, deserialized.command);
+    }
+
+    #[test]
+    fn legacy_primary_pane_paths_normalize_capabilities() {
+        let mut from_legacy = Instance::new("Test", "/tmp");
+        from_legacy.tool = "shell".to_string();
+        from_legacy.yolo_mode = true;
+        from_legacy.cross_agent_team = true;
+        from_legacy.sync_primary_pane_from_legacy();
+        assert!(!from_legacy.primary_pane.yolo_mode);
+        assert!(!from_legacy.primary_pane.cross_agent_team);
+        assert!(!from_legacy.yolo_mode);
+        assert!(!from_legacy.cross_agent_team);
+
+        let mut hydrated = Instance::new("Test", "/tmp");
+        hydrated.primary_pane = PaneConfig {
+            tool: "shell".to_string(),
+            working_dir: "/tmp".to_string(),
+            yolo_mode: true,
+            cross_agent_team: true,
+            worktree: None,
+        };
+        hydrated.hydrate_legacy_primary_pane();
+        assert!(!hydrated.primary_pane.yolo_mode);
+        assert!(!hydrated.primary_pane.cross_agent_team);
+        assert!(!hydrated.yolo_mode);
+        assert!(!hydrated.cross_agent_team);
     }
 
     #[test]

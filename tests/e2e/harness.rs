@@ -28,7 +28,6 @@ use tempfile::TempDir;
 /// ever share a tmux server -- which restores the structural per-test isolation
 /// that `socket-per-profile` would otherwise lose (every test resolves the same
 /// `default` profile, so a shared `TMUX_TMPDIR` would mean a shared socket).
-/// This is also the single place the cross-run leak sweep scans.
 fn e2e_tmux_root() -> PathBuf {
     let dir = std::env::temp_dir().join("aoe-e2e-tmux");
     let _ = std::fs::create_dir_all(&dir);
@@ -82,6 +81,68 @@ fn socket_path_in(tmpdir: &Path) -> PathBuf {
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     dir.join("default")
+}
+
+pub(crate) fn stop_private_tmux_sessions(socket: &Path) {
+    let output = Command::new("tmux")
+        .arg("-S")
+        .arg(socket)
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    for session in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|session| !session.is_empty())
+    {
+        let _ = Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["kill-session", "-t", session])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output();
+    }
+}
+
+fn stale_run_owner_is_alive(tmpdir: &Path) -> bool {
+    let Some(leaf) = tmpdir.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    let Some((pid, _)) = leaf.split_once('-') else {
+        return true;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return true;
+    };
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(true)
+}
+
+fn reap_stale_aoe_test_sessions() {
+    static REAP: Once = Once::new();
+    REAP.call_once(|| {
+        let Ok(entries) = std::fs::read_dir(e2e_tmux_root()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let tmpdir = entry.path();
+            if !tmpdir.is_dir() || stale_run_owner_is_alive(&tmpdir) {
+                continue;
+            }
+            let socket = tmpdir
+                .join(format!("tmux-{}", current_uid()))
+                .join("default");
+            stop_private_tmux_sessions(&socket);
+            let _ = std::fs::remove_dir_all(&tmpdir);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +253,6 @@ impl TuiTestHarness {
     /// so tool detection succeeds.
     pub fn new(test_name: &str) -> Self {
         reap_stale_aoe_test_sessions();
-
         let home_dir = TempDir::new().expect("failed to create temp home");
         let stub_dir = TempDir::new().expect("failed to create stub dir");
 
@@ -323,6 +383,8 @@ last_seen_version = "{}"
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
@@ -603,6 +665,8 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .output()
             .expect("failed to run aoe CLI")
@@ -1085,6 +1149,7 @@ last_seen_version = "{}"
         let mut cmd = Command::new("tmux");
         cmd.arg("-S").arg(&self.socket_path);
         cmd.args(args);
+        cmd.env_remove("TMUX").env_remove("TMUX_PANE");
         cmd.output()
     }
 }
@@ -1100,17 +1165,7 @@ impl Drop for TuiTestHarness {
             self.kill_session();
         }
 
-        // Tear down THIS test's private tmux server and remove its TMUX_TMPDIR.
-        // Each test owns a unique socket, so this touches only its own sessions
-        // (managed, fork, hand-split) -- never another test's, never the
-        // developer's live socket. `-S` (an absolute path) is authoritative over
-        // any inherited `$TMUX`, so this is safe even when the suite runs from
-        // inside a live AoE session.
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket_path)
-            .arg("kill-server")
-            .output();
+        stop_private_tmux_sessions(&self.socket_path);
         let _ = std::fs::remove_dir_all(&self.tmux_tmpdir);
 
         // Convert recording to GIF if one was produced.
@@ -1122,39 +1177,4 @@ impl Drop for TuiTestHarness {
             }
         }
     }
-}
-
-/// Clean up tmux servers leaked by prior test binaries that were SIGKILL'd (CI
-/// timeout, Ctrl+\) before `Drop` could tear down their per-test `TMUX_TMPDIR`.
-///
-/// Each test owns a private `TMUX_TMPDIR` subdir under [`e2e_tmux_root`]; on a
-/// clean exit `Drop` kill-servers and removes it. A killed run leaves the subdir
-/// (and its still-running tmux server + agent children) behind. This scans the
-/// root for leftover subdirs and kill-servers + removes each. The root only ever
-/// holds e2e-private sockets, so this can never reach the developer's sockets.
-/// Runs before this test allocates its own subdir, and at most once per binary.
-fn reap_stale_aoe_test_sessions() {
-    static REAP: Once = Once::new();
-    REAP.call_once(|| {
-        let Ok(entries) = std::fs::read_dir(e2e_tmux_root()) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let tmpdir = entry.path();
-            if !tmpdir.is_dir() {
-                continue;
-            }
-            let socket = tmpdir
-                .join(format!("tmux-{}", current_uid()))
-                .join("default");
-            if socket.exists() {
-                let _ = Command::new("tmux")
-                    .arg("-S")
-                    .arg(&socket)
-                    .arg("kill-server")
-                    .output();
-            }
-            let _ = std::fs::remove_dir_all(&tmpdir);
-        }
-    });
 }

@@ -2497,7 +2497,7 @@ fn submitting_the_add_pane_dialog_stages_the_pane_and_attaches() {
     let pending = env.view.pending_right_pane.as_ref().expect("staged pane");
     assert_eq!(pending.tool, "claude");
     assert_eq!(
-        pending.path, None,
+        pending.path, "",
         "an unset directory follows the session, resolved at the split"
     );
 }
@@ -2506,9 +2506,9 @@ fn submitting_the_add_pane_dialog_stages_the_pane_and_attaches() {
 
 #[test]
 fn an_unset_right_pane_directory_follows_the_session() {
-    let pending = crate::tui::home::PendingRightPane {
+    let pending = crate::session::PaneDraft {
         tool: "shell".to_string(),
-        path: None,
+        ..Default::default()
     };
 
     assert_eq!(pending.working_dir("/tmp/project"), "/tmp/project");
@@ -2519,9 +2519,9 @@ fn an_unset_right_pane_directory_follows_a_resolved_worktree() {
     // The session's directory is replaced by the resolved worktree path during
     // creation, after the dialog was submitted. A value snapshotted at submit
     // would still say `/tmp/repo` here.
-    let pending = crate::tui::home::PendingRightPane {
+    let pending = crate::session::PaneDraft {
         tool: "shell".to_string(),
-        path: None,
+        ..Default::default()
     };
 
     assert_eq!(
@@ -2532,9 +2532,10 @@ fn an_unset_right_pane_directory_follows_a_resolved_worktree() {
 
 #[test]
 fn a_named_right_pane_directory_is_used_as_given() {
-    let pending = crate::tui::home::PendingRightPane {
+    let pending = crate::session::PaneDraft {
         tool: "shell".to_string(),
-        path: Some("/tmp/elsewhere".to_string()),
+        path: "/tmp/elsewhere".to_string(),
+        ..Default::default()
     };
 
     assert_eq!(

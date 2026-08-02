@@ -1,12 +1,12 @@
 //! tmux session management
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use super::{
-    get_cached_pane_info, refresh_session_cache, session_exists_from_cache,
+    get_cached_pane_info, refresh_session_cache, session_exists_from_cache, tmux_command,
     utils::{
         append_pane_died_hook_args, append_remain_on_exit_args, append_store_pane_id_args,
         append_store_project_path_args, get_agent_pane_id, is_pane_dead, is_pane_running_shell,
@@ -539,7 +539,9 @@ pub fn split_window_right(
     command: &str,
     remain_on_exit: bool,
 ) -> Result<String> {
-    let mut args = vec![
+    let primary_target =
+        get_agent_pane_id(session_name).unwrap_or_else(|| format!("{}:.0", session_name));
+    let args = vec![
         "split-window".to_string(),
         "-h".to_string(),
         "-P".to_string(),
@@ -551,19 +553,6 @@ pub fn split_window_right(
         working_dir.to_string(),
         command.to_string(),
     ];
-
-    // Set remain-on-exit on the new (right) pane. After split-window the new
-    // pane is the active pane, so we can target it without an explicit pane ID
-    // by using the session name (which resolves to the active pane).
-    append_remain_on_exit_args(&mut args, session_name, remain_on_exit);
-
-    // Select the original (left) pane back so that the user lands on the agent pane
-    args.extend([
-        ";".to_string(),
-        "select-pane".to_string(),
-        "-t".to_string(),
-        format!("{}:.0", session_name),
-    ]);
 
     tracing::debug!(
         session = session_name,
@@ -580,15 +569,74 @@ pub fn split_window_right(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match stdout
+    let pane_id = match stdout
         .lines()
         .next()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(pane_id) => Ok(pane_id.to_string()),
+        Some(pane_id) => pane_id.to_string(),
         None => bail!("split-window did not report a pane id"),
+    };
+
+    if let Err(error) = set_pane_remain_on_exit(&pane_id, remain_on_exit) {
+        return Err(match kill_pane_exact(&pane_id) {
+            Ok(()) => error.context(format!("configuring pane {pane_id} after split")),
+            Err(rollback_error) => {
+                anyhow::anyhow!("{error:#}. Failed to roll back pane {pane_id}: {rollback_error:#}")
+            }
+        });
     }
+
+    let selected = match crate::tmux::tmux_command()
+        .args(["select-pane", "-t", &primary_target])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(match kill_pane_exact(&pane_id) {
+                Ok(()) => error.into(),
+                Err(rollback_error) => anyhow::anyhow!(
+                    "{error}. Failed to roll back pane {pane_id}: {rollback_error:#}"
+                ),
+            });
+        }
+    };
+    if !selected.status.success() {
+        let error = anyhow::anyhow!(
+            "Failed to select primary pane after split: {}",
+            String::from_utf8_lossy(&selected.stderr).trim()
+        );
+        return Err(match kill_pane_exact(&pane_id) {
+            Ok(()) => error,
+            Err(rollback_error) => {
+                anyhow::anyhow!("{error:#}. Failed to roll back pane {pane_id}: {rollback_error:#}")
+            }
+        });
+    }
+
+    Ok(pane_id)
+}
+
+/// Kill one pane by the exact id returned from `split-window -P`.
+pub fn kill_pane_exact(pane_id: &str) -> Result<()> {
+    let valid = pane_id
+        .strip_prefix('%')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
+    if !valid {
+        anyhow::bail!("invalid tmux pane id: {pane_id}");
+    }
+    let output = tmux_command()
+        .args(["kill-pane", "-t", pane_id])
+        .output()
+        .context("failed to kill rolled-back pane")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to kill pane {pane_id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Split the target pane horizontally and return the new pane's id.

@@ -14,7 +14,8 @@ use tui_input::Input;
 
 use crate::session::{
     config::{load_config, save_config, SortOrder},
-    expanded_groups, flatten_tree, resolve_config, Group, GroupTree, Instance, Item, Storage,
+    expanded_groups, flatten_tree, resolve_config, Group, GroupTree, Instance, Item, PaneDraft,
+    Storage,
 };
 use crate::tmux::AvailableTools;
 
@@ -86,28 +87,6 @@ pub(super) struct StableSessionIndexCache {
     pub(super) indices: HashMap<String, usize>,
 }
 
-/// A managed pane staged by session creation, launched once the session is up.
-#[derive(Clone)]
-pub struct PendingRightPane {
-    pub tool: String,
-    /// The directory the pane starts in. `None` means the session's own.
-    pub path: Option<String>,
-}
-
-impl PendingRightPane {
-    /// The directory this pane starts in, resolved against the session as it
-    /// exists now rather than as the dialog saw it.
-    ///
-    /// The fallback is late on purpose: a worktree-backed session's directory
-    /// is decided during creation, so a value snapshotted at submit would point
-    /// the pane at the original repository while the session went to the
-    /// worktree. A directory the user named is used as given, and is not
-    /// worktree-resolved, because it is not the session's repository.
-    pub fn working_dir<'a>(&'a self, session_path: &'a str) -> &'a str {
-        self.path.as_deref().unwrap_or(session_path)
-    }
-}
-
 pub struct HomeView {
     pub(super) storage: Storage,
     pub(super) instances: Vec<Instance>,
@@ -150,7 +129,7 @@ pub struct HomeView {
     /// Source and destination paths for a rename waiting on merge confirmation
     pub(super) pending_group_rename: Option<(String, String, Option<String>)>,
     /// Right pane to launch after next session attach (one-shot, consumed on use)
-    pub(super) pending_right_pane: Option<PendingRightPane>,
+    pub(super) pending_right_pane: Option<PaneDraft>,
 
     // Number jump
     pub(super) pending_jump: Option<PendingJump>,
@@ -176,7 +155,7 @@ pub struct HomeView {
     // Performance: background deletion
     pub(super) deletion_poller: DeletionPoller,
 
-    // Performance: background session creation (for sandbox)
+    // Performance: background session creation for hooks
     pub(super) creation_poller: CreationPoller,
     /// Set to true if user cancelled while creation was pending
     pub(super) creation_cancelled: bool,
@@ -532,7 +511,7 @@ impl HomeView {
         false
     }
 
-    /// Request background session creation. Used for sandbox sessions to avoid blocking UI.
+    /// Request background session creation for hook execution.
     pub fn request_creation(
         &mut self,
         data: NewSessionData,
@@ -560,6 +539,7 @@ impl HomeView {
         if self.creation_poller.is_pending() {
             self.creation_cancelled = true;
         }
+        self.pending_right_pane = None;
         self.new_dialog = None;
     }
 
@@ -575,9 +555,11 @@ impl HomeView {
         // Check if the user cancelled while waiting
         if self.creation_cancelled {
             self.creation_cancelled = false;
+            self.pending_right_pane = None;
             if let CreationResult::Success {
                 ref instance,
                 ref created_worktree,
+                ref created_workspace_worktrees,
                 ..
             } = result
             {
@@ -585,7 +567,14 @@ impl HomeView {
                     path: PathBuf::from(&wt.path),
                     main_repo_path: PathBuf::from(&wt.main_repo_path),
                 });
-                builder::cleanup_instance(instance, worktree.as_ref(), &[]);
+                let workspace_worktrees = created_workspace_worktrees
+                    .iter()
+                    .map(|worktree| CreatedWorktree {
+                        path: PathBuf::from(&worktree.path),
+                        main_repo_path: PathBuf::from(&worktree.main_repo_path),
+                    })
+                    .collect::<Vec<_>>();
+                builder::cleanup_instance(instance, worktree.as_ref(), &workspace_worktrees);
             }
             return None;
         }
@@ -594,10 +583,22 @@ impl HomeView {
             CreationResult::Success {
                 session_id,
                 instance,
+                created_worktree,
+                created_workspace_worktrees,
                 on_launch_hooks_ran,
-                ..
             } => {
                 let instance = *instance;
+                let created_worktree = created_worktree.map(|worktree| CreatedWorktree {
+                    path: PathBuf::from(worktree.path),
+                    main_repo_path: PathBuf::from(worktree.main_repo_path),
+                });
+                let created_workspace_worktrees = created_workspace_worktrees
+                    .into_iter()
+                    .map(|worktree| CreatedWorktree {
+                        path: PathBuf::from(worktree.path),
+                        main_repo_path: PathBuf::from(worktree.main_repo_path),
+                    })
+                    .collect::<Vec<_>>();
 
                 // Check if this was created for a different profile
                 let target_profile = self
@@ -606,31 +607,20 @@ impl HomeView {
                     .unwrap_or_else(|| self.storage.profile().to_string());
                 let is_cross_profile = target_profile != self.storage.profile();
 
-                if is_cross_profile {
+                let persistence = if is_cross_profile {
                     // Save to target profile's storage
-                    match Storage::new(&target_profile) {
-                        Ok(target_storage) => match target_storage.load_with_groups() {
-                            Ok((mut target_instances, target_groups)) => {
-                                target_instances.push(instance.clone());
-                                let mut target_tree =
-                                    GroupTree::new_with_groups(&target_instances, &target_groups);
-                                if !instance.group_path.is_empty() {
-                                    target_tree.create_group(&instance.group_path);
-                                }
-                                if let Err(e) =
-                                    target_storage.save_with_groups(&target_instances, &target_tree)
-                                {
-                                    tracing::error!("Failed to save to target profile: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to load target profile data: {}", e);
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to open target profile storage: {}", e);
+                    (|| -> anyhow::Result<()> {
+                        let target_storage = Storage::new(&target_profile)?;
+                        let (mut target_instances, target_groups) =
+                            target_storage.load_with_groups()?;
+                        target_instances.push(instance.clone());
+                        let mut target_tree =
+                            GroupTree::new_with_groups(&target_instances, &target_groups);
+                        if !instance.group_path.is_empty() {
+                            target_tree.create_group(&instance.group_path);
                         }
-                    }
+                        target_storage.save_with_groups(&target_instances, &target_tree)
+                    })()
                 } else {
                     self.instances.push(instance.clone());
                     self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
@@ -638,9 +628,26 @@ impl HomeView {
                         self.group_tree.create_group(&instance.group_path);
                     }
 
-                    if let Err(e) = self.save() {
-                        tracing::error!("Failed to save after creation: {}", e);
+                    self.save()
+                };
+
+                if let Err(error) = persistence {
+                    self.pending_right_pane = None;
+                    if !is_cross_profile {
+                        self.instances
+                            .retain(|candidate| candidate.id != session_id);
+                        self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
                     }
+                    builder::cleanup_instance(
+                        &instance,
+                        created_worktree.as_ref(),
+                        &created_workspace_worktrees,
+                    );
+                    if let Some(dialog) = &mut self.new_dialog {
+                        dialog.set_loading(false);
+                        dialog.set_error(format!("Failed to save session: {error:#}"));
+                    }
+                    return None;
                 }
 
                 if on_launch_hooks_ran {
@@ -653,6 +660,7 @@ impl HomeView {
                 Some(session_id)
             }
             CreationResult::Error(error) => {
+                self.pending_right_pane = None;
                 if let Some(dialog) = &mut self.new_dialog {
                     dialog.set_loading(false);
                     dialog.set_error(error);
@@ -663,7 +671,7 @@ impl HomeView {
     }
 
     /// Consume the pending right pane (one-shot, set during session creation).
-    pub fn take_pending_right_pane(&mut self) -> Option<PendingRightPane> {
+    pub fn take_pending_right_pane(&mut self) -> Option<PaneDraft> {
         self.pending_right_pane.take()
     }
 

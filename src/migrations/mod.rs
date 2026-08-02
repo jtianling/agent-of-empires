@@ -16,13 +16,14 @@ mod v005_remove_dynamic_tab_title;
 mod v006_agent_session_store;
 mod v007_instance_layout;
 mod v008_xats_identity_key;
+mod v009_pane_launch_config;
 
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 8;
+const CURRENT_VERSION: u32 = 9;
 const VERSION_FILE: &str = ".schema_version";
 
 struct Migration {
@@ -71,6 +72,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "xats_identity_key",
         run: v008_xats_identity_key::run,
+    },
+    Migration {
+        version: 9,
+        name: "pane_launch_config",
+        run: v009_pane_launch_config::run,
     },
 ];
 

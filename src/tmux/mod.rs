@@ -9,9 +9,9 @@ pub(crate) mod utils;
 
 pub use notification_monitor::write_ack_signal;
 pub use session::{
-    apply_window_layout, capture_pane_screen, kill_pane_process_tree_target, respawn_pane_target,
-    send_keys_to_pane_target, session_window_layout, set_pane_remain_on_exit, split_window_right,
-    split_window_right_capture_pane, Session,
+    apply_window_layout, capture_pane_screen, kill_pane_exact, kill_pane_process_tree_target,
+    respawn_pane_target, send_keys_to_pane_target, session_window_layout, set_pane_remain_on_exit,
+    split_window_right, split_window_right_capture_pane, Session,
 };
 pub use status_bar::{get_session_info_for_current, get_status_for_current_session};
 pub use status_detection::detect_status_from_content;

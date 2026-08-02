@@ -10,6 +10,36 @@ use crate::tui::dialogs::{DeleteOptions, ForkSessionData, GroupDeleteOptions, Ne
 use super::HomeView;
 
 impl HomeView {
+    pub(super) fn managed_worktree_branch_for(
+        &self,
+        instance: &crate::session::Instance,
+    ) -> Option<String> {
+        let from_pane = |pane: &crate::session::PaneConfig| {
+            pane.worktree.as_ref().and_then(|metadata| {
+                metadata
+                    .worktree
+                    .as_ref()
+                    .filter(|info| info.managed_by_aoe)
+                    .map(|info| info.branch.clone())
+                    .or_else(|| {
+                        metadata.workspace.as_ref().and_then(|workspace| {
+                            workspace
+                                .repos
+                                .iter()
+                                .find(|repo| repo.managed_by_aoe)
+                                .map(|repo| repo.branch.clone())
+                        })
+                    })
+            })
+        };
+        from_pane(instance.primary_pane_config()).or_else(|| {
+            crate::db::Store::open_with_schema(self.storage.profile())
+                .and_then(|store| store.read_slots_for_instance(&instance.id))
+                .ok()
+                .and_then(|slots| slots.iter().find_map(|slot| from_pane(&slot.pane_config())))
+        })
+    }
+
     pub(super) fn create_session(&mut self, data: NewSessionData) -> anyhow::Result<String> {
         let target_profile = data.profile.clone();
         let is_cross_profile = target_profile != self.storage.profile();
@@ -28,43 +58,41 @@ impl HomeView {
 
         let params = InstanceParams {
             title: data.title,
-            path: data.path,
             group: data.group,
-            tool: data.tool,
-            worktree_branch: data.worktree_branch,
-            create_new_branch: data.create_new_branch,
-            sandbox: data.sandbox,
-            sandbox_image: data.sandbox_image,
-            yolo_mode: data.yolo_mode,
-            cross_agent_team: data.cross_agent_team,
+            primary: data.primary,
+            sandbox: false,
+            sandbox_image: String::new(),
             cross_agent_team_channel: data.cross_agent_team_channel,
-            extra_env: data.extra_env,
+            extra_env: Vec::new(),
             extra_args: data.extra_args,
             command_override: data.command_override,
-            reuse_worktree: data.reuse_worktree,
-            extra_repo_paths: data.extra_repo_paths,
         };
 
         let build_result = builder::build_instance(params, &existing_titles, &target_profile)?;
         let instance = build_result.instance;
+        let created_worktree = build_result.created_worktree;
+        let created_workspace_worktrees = build_result.created_workspace_worktrees;
         let session_id = instance.id.clone();
 
-        if is_cross_profile {
+        let persistence = if is_cross_profile {
             // Save to target profile's storage
-            let target_storage = Storage::new(&target_profile)?;
-            let (mut target_instances, target_groups) = target_storage.load_with_groups()?;
-            let existing_tree = GroupTree::new_with_groups(&target_instances, &target_groups);
-            let is_new_group = !instance.group_path.is_empty()
-                && !existing_tree.group_exists(&instance.group_path);
-            target_instances.push(instance.clone());
-            let mut target_tree = GroupTree::new_with_groups(&target_instances, &target_groups);
-            if !instance.group_path.is_empty() {
-                target_tree.create_group(&instance.group_path);
-                if is_new_group {
-                    target_tree.set_default_directory(&instance.group_path, &instance.project_path);
+            (|| -> anyhow::Result<()> {
+                let target_storage = Storage::new(&target_profile)?;
+                let (mut target_instances, target_groups) = target_storage.load_with_groups()?;
+                let existing_tree = GroupTree::new_with_groups(&target_instances, &target_groups);
+                let is_new_group = !instance.group_path.is_empty()
+                    && !existing_tree.group_exists(&instance.group_path);
+                target_instances.push(instance.clone());
+                let mut target_tree = GroupTree::new_with_groups(&target_instances, &target_groups);
+                if !instance.group_path.is_empty() {
+                    target_tree.create_group(&instance.group_path);
+                    if is_new_group {
+                        target_tree
+                            .set_default_directory(&instance.group_path, &instance.project_path);
+                    }
                 }
-            }
-            target_storage.save_with_groups(&target_instances, &target_tree)?;
+                target_storage.save_with_groups(&target_instances, &target_tree)
+            })()
         } else {
             let is_new_group = !instance.group_path.is_empty()
                 && !self.group_tree.group_exists(&instance.group_path);
@@ -77,7 +105,20 @@ impl HomeView {
                         .set_default_directory(&instance.group_path, &instance.project_path);
                 }
             }
-            self.save()?;
+            self.save()
+        };
+        if let Err(error) = persistence {
+            if !is_cross_profile {
+                self.instances
+                    .retain(|candidate| candidate.id != session_id);
+                self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+            }
+            builder::cleanup_instance(
+                &instance,
+                created_worktree.as_ref(),
+                &created_workspace_worktrees,
+            );
+            return Err(error);
         }
 
         self.reload()?;
@@ -198,16 +239,9 @@ impl HomeView {
                 });
 
                 if let Some(inst) = self.get_instance(&session_id) {
-                    let delete_worktree = options.delete_worktrees
-                        && inst
-                            .worktree_info
-                            .as_ref()
-                            .is_some_and(|wt| wt.managed_by_aoe);
-                    let delete_branch = options.delete_branches
-                        && inst
-                            .worktree_info
-                            .as_ref()
-                            .is_some_and(|wt| wt.managed_by_aoe);
+                    let has_managed_worktree = self.managed_worktree_branch_for(inst).is_some();
+                    let delete_worktree = options.delete_worktrees && has_managed_worktree;
+                    let delete_branch = options.delete_branches && has_managed_worktree;
                     let delete_sandbox = options.delete_containers
                         && inst.sandbox_info.as_ref().is_some_and(|s| s.enabled);
                     let request = DeletionRequest {
@@ -234,7 +268,7 @@ impl HomeView {
     pub(super) fn group_has_managed_worktrees(&self, group_path: &str, prefix: &str) -> bool {
         self.instances.iter().any(|i| {
             (i.group_path == group_path || i.group_path.starts_with(prefix))
-                && i.worktree_info.as_ref().is_some_and(|wt| wt.managed_by_aoe)
+                && self.managed_worktree_branch_for(i).is_some()
         })
     }
 

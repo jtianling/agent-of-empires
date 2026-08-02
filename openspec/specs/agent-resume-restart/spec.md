@@ -92,50 +92,66 @@ After a resume token is used to restart an agent (whether from stored token or l
 
 ### Requirement: Slot-based multi-pane resume preserves full launch context
 
-When the `R` restart resumes tracked panes from the persisted `agent_slot` store (the multi-pane path through `resume_all_tracked_panes`), each pane's launch command SHALL be built through the instance's shared launch-context command builder with the slot's `native_session_id` injected as the resume token. The resumed command SHALL carry the same launch context that initial start and single-pane respawn apply: YOLO mode (CliFlag, EnvVar, and AlwaysYolo variants), required env vars (including `AOE_INSTANCE_ID` for hook-config agents), sandbox/Docker `exec` wrapping, the cross-agent-team flag, custom instruction, and command override. The slot path SHALL NOT rebuild a stripped command from only the binary name and resume flag.
+`R` restart、fresh restart 和 cold recovery SHALL 通过统一 pane command builder 重建每个 tracked slot。  builder SHALL 显式接收目标 slot 的 pane config 和 `native_session_id`, 并 SHALL 使用该 pane 自己的 Tool、cwd、YOLO Mode、Cross Agent Team、Worktree metadata 和 identity key。
 
-For an instance whose panes run different agents, the instance-level YOLO decision SHALL be applied per pane using that pane's own agent `YoloMode` variant. A pane with no usable resume token (empty/invalid `native_session_id`, or an agent without a `ResumeConfig`) SHALL still launch fresh **with** the full launch context rather than a bare binary. The cold-start recovery path (`recover_from_slots`) shares this per-pane resume core and SHALL apply the same launch context.
+session-level hooks、Sandbox wrapping 和 Cross Agent Team channel 等仍属 session 的上下文 SHALL 与 pane config 合并。  pane-specific Tool override、YOLO treatment、Cross Agent Team decoration 或 Worktree cwd MUST NOT 从 sibling pane 或旧 instance-level flag 推断。
 
-The existing command-injection safeguards SHALL be preserved: a slot whose recorded agent is unknown and not a safe command token, or whose `native_session_id` is not a valid resume token, SHALL be handled by the existing validation (refuse to build / degrade to fresh) and never interpolate unvalidated text into a shell command.
+没有可用 `native_session_id` 或 Tool 不支持 resume 的 pane SHALL fresh launch, 但仍 SHALL 保留自己的完整 pane config。  unknown agent 和 invalid resume token SHALL 继续通过现有输入验证拒绝或降级, 不得插入 shell command。
 
-#### Scenario: YOLO CliFlag agent keeps its flag on slot resume
-- **WHEN** the user presses `R` on a running YOLO-mode instance whose agent uses a `CliFlag` YOLO variant (e.g. Claude `--dangerously-skip-permissions`)
-- **AND** the instance has a tracked `agent_slot` with a valid `native_session_id`
-- **THEN** the resumed pane command SHALL include the agent's YOLO `CliFlag`
-- **AND** SHALL include the resume flag built from the slot's `native_session_id`
+#### Scenario: YOLO CliFlag 只用于开启的 pane
+- **WHEN**一个 tracked pane 开启 YOLO Mode 且 Tool 使用 CliFlag
+- **AND**该 pane 使用 `R` restart
+- **THEN**该 pane command SHALL 包含自己的 YOLO flag
+- **AND**未开启 YOLO 的 sibling SHALL 不包含该 flag
 
-#### Scenario: YOLO EnvVar agent keeps its env var on slot resume
-- **WHEN** the user presses `R` on a running YOLO-mode instance whose agent uses an `EnvVar` YOLO variant (e.g. opencode `OPENCODE_PERMISSION`)
-- **THEN** the resumed pane SHALL be launched with that YOLO env var set
+#### Scenario: YOLO EnvVar 只用于目标 pane
+- **WHEN**一个 tracked pane 开启 YOLO Mode 且 Tool 使用 EnvVar
+- **THEN**该 pane SHALL 使用对应 env var 启动
+- **AND**该 env var SHALL 不因 sibling 的值而添加或删除
 
-#### Scenario: Hook-config agent keeps AOE_INSTANCE_ID on slot resume
-- **WHEN** the user presses `R` on an instance whose agent has a hook config (requires `AOE_INSTANCE_ID`)
-- **THEN** the resumed pane SHALL be launched with `AOE_INSTANCE_ID` set to the instance id
+#### Scenario: Hook-config agent 保留 instance id
+- **WHEN**一个 tracked pane 的 Tool 需要 hook config
+- **THEN**该 pane SHALL 继续获得 `AOE_INSTANCE_ID`
 
-#### Scenario: Sandboxed instance stays Docker-wrapped on slot resume
-- **WHEN** the user presses `R` on a sandboxed instance with a tracked slot
-- **THEN** the resumed pane command SHALL be wrapped to run inside the instance's Docker container (`docker exec ...`) rather than executing the agent binary directly on the host
+#### Scenario: Existing sandbox session 保留 container wrapping
+- **WHEN**一个已有 sandbox session 的 tracked pane restart
+- **THEN**该 pane SHALL 继续通过 session container exec wrapper 启动
+- **AND** pane-level config SHALL 不关闭已有 Sandbox wrapping
 
-#### Scenario: Non-YOLO instance gains no YOLO flag on slot resume
-- **WHEN** the user presses `R` on a running non-YOLO instance with a tracked slot
-- **THEN** the resumed pane command SHALL NOT include any YOLO flag or YOLO env var
+#### Scenario: Non-YOLO pane 不获得 sibling flag
+- **WHEN**一个 pane 关闭 YOLO Mode, 另一个 pane 开启
+- **AND** session restart
+- **THEN**关闭 YOLO 的 pane SHALL 不获得任何 YOLO flag 或 env var
 
-#### Scenario: Heterogeneous panes apply per-agent YOLO variant
-- **WHEN** the user presses `R` on a YOLO-mode instance whose tracked slots record different agents
-- **THEN** each resumed pane SHALL apply the YOLO treatment of its own slot agent's `YoloMode` variant
+#### Scenario: Heterogeneous panes 使用各自 Tool 语义
+- **WHEN**一个 session 的 tracked slots 记录不同 Tool 和不同 YOLO Mode
+- **THEN**每个 pane SHALL 按自己的 Tool `YoloMode` variant 和 enabled 值构建
 
-#### Scenario: Degraded-fresh pane still carries launch context
-- **WHEN** a tracked slot has no usable resume token (empty/invalid `native_session_id` or an agent without `ResumeConfig`)
-- **THEN** that pane SHALL launch fresh with the instance's full launch context (YOLO, env vars, sandbox wrapping, cross-agent-team flag, custom instruction) applied
-- **AND** SHALL NOT be launched as a bare binary
+#### Scenario: Degraded fresh pane 保留自己的 launch context
+- **WHEN**一个 tracked slot 没有可用 resume token
+- **THEN**该 pane SHALL fresh launch
+- **AND** SHALL 保留自己的 cwd、YOLO Mode、Cross Agent Team、Worktree 和 identity key
 
-#### Scenario: Command-injection validation preserved
-- **WHEN** a tracked slot records an agent name that is unknown and not a safe command token, or a `native_session_id` that is not a valid resume token
-- **THEN** the system SHALL apply the existing validation (refuse to build the pane command or degrade to fresh) and SHALL NOT interpolate the unvalidated value into the shell command
+#### Scenario: Cross Agent Team 只对开启的 pane 重放
+- **WHEN**一个 session 中只有部分 pane 开启 Cross Agent Team
+- **AND** session restart 或 cold recovery
+- **THEN**只有开启的 pane SHALL 使用 tool-specific Cross Agent Team launch path
+- **AND**其他 pane SHALL 普通启动
 
-#### Scenario: Cold-start recovery applies the same launch context
-- **WHEN** an instance is recovered from persisted slots via `recover_from_slots`
-- **THEN** each rebuilt pane SHALL apply the same full launch context as the `R` slot-resume path
+#### Scenario: Worktree cwd 按 slot 恢复
+- **WHEN** primary 与 secondary slot 记录不同 Worktree cwd
+- **AND** session restart 或 cold recovery
+- **THEN**每个 pane SHALL 在自己 slot 的 cwd 中启动
+
+#### Scenario: Command injection validation preserved
+- **WHEN** slot 记录 unknown unsafe agent 或 invalid native session id
+- **THEN**系统 SHALL 使用现有验证拒绝或降级 fresh launch
+- **AND**不得把未验证值插入 shell command
+
+#### Scenario: Invalid tracked slot is visible during restart
+- **WHEN** restart 或 cold recovery 读取到一个结构性无效 slot 和至少一个有效 sibling slot
+- **THEN**系统 SHALL 继续重启或恢复有效 sibling pane
+- **AND** session error SHALL 显示 skipped pane count
 
 ### Requirement: Fan-out resume restart falls back to the instance's stored resume token
 
@@ -164,4 +180,3 @@ The fallback applies to slot 0 alone, which is the pane the instance's resume to
 - **WHEN** an instance is restarted clean
 - **AND** slot 0's record carries no native session id
 - **THEN** the pane SHALL be launched with no resume token
-

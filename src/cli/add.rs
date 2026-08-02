@@ -262,6 +262,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     }
 
     instance.yolo_mode = args.yolo || config.session.yolo_mode_default;
+    instance.sync_primary_pane_from_legacy();
 
     // Apply extra_args and command override: CLI flags take priority, then config defaults
     if let Some(ref extra) = args.extra_args {

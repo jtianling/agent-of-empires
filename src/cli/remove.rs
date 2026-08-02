@@ -6,8 +6,9 @@ use clap::Args;
 use crate::containers;
 use crate::git::cleanup::remove_managed_worktree;
 use crate::git::GitWorktree;
-use crate::session::{GroupTree, Instance, Storage};
-use std::path::PathBuf;
+use crate::session::{Config, GroupTree, Instance, PaneConfig, Storage};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct RemoveArgs {
@@ -31,10 +32,132 @@ pub struct RemoveArgs {
     keep_container: bool,
 }
 
-fn needs_worktree_cleanup(inst: &Instance, args: &RemoveArgs) -> bool {
-    inst.worktree_info
-        .as_ref()
-        .is_some_and(|wt| wt.managed_by_aoe && args.delete_worktree)
+fn pane_configs_for_cleanup(profile: &str, inst: &Instance) -> Vec<PaneConfig> {
+    let mut panes = vec![inst.primary_pane_config().clone()];
+    match crate::db::Store::open_with_schema(profile)
+        .and_then(|store| store.read_slots_for_instance(&inst.id))
+    {
+        Ok(slots) => panes.extend(slots.into_iter().map(|slot| slot.pane_config())),
+        Err(error) => eprintln!("Warning: failed to read pane metadata: {error}"),
+    }
+    let mut seen = HashSet::new();
+    panes.retain(|pane| {
+        let key = serde_json::to_string(&pane.worktree).unwrap_or_default();
+        seen.insert(key)
+    });
+    panes
+}
+
+fn remove_exact_worktree(inst: &Instance, path: &Path, main_repo: &Path, force: bool) -> bool {
+    match GitWorktree::new(main_repo.to_path_buf()) {
+        Ok(git) => match remove_managed_worktree(&git, path, main_repo, inst, force) {
+            Ok(()) => {
+                println!("  Worktree removed: {}", path.display());
+                true
+            }
+            Err(errors) => {
+                for error in errors {
+                    eprintln!("Warning: {error}");
+                }
+                eprintln!(
+                    "You may need to remove it manually with: git worktree remove {}",
+                    path.display()
+                );
+                false
+            }
+        },
+        Err(error) => {
+            eprintln!("Warning: failed to access git repository: {error}");
+            false
+        }
+    }
+}
+
+fn delete_exact_branch(main_repo: &Path, branch: &str) {
+    match GitWorktree::new(main_repo.to_path_buf()) {
+        Ok(git) => {
+            if let Err(error) = git.delete_branch(branch) {
+                eprintln!("Warning: failed to delete branch '{branch}': {error}");
+            } else {
+                println!("  Branch '{branch}' deleted");
+            }
+        }
+        Err(error) => eprintln!("Warning: failed to access git repository: {error}"),
+    }
+}
+
+fn cleanup_pane_worktrees(profile: &str, inst: &Instance, args: &RemoveArgs, config: &Config) {
+    for pane in pane_configs_for_cleanup(profile, inst) {
+        let Some(metadata) = pane.worktree.as_ref() else {
+            continue;
+        };
+        if let Some(info) = metadata.worktree.as_ref() {
+            let worktree_path = metadata.worktree_path();
+            if !info.managed_by_aoe || !info.cleanup_on_delete {
+                if info.managed_by_aoe {
+                    if let Some(path) = worktree_path {
+                        println!(
+                            "Worktree preserved at: {} (cleanup_on_delete disabled)",
+                            path.display()
+                        );
+                    }
+                }
+            } else if let Some(path) = worktree_path {
+                let main_repo = PathBuf::from(&info.main_repo_path);
+                let removed = args.delete_worktree
+                    && remove_exact_worktree(inst, path, &main_repo, args.force);
+                if !args.delete_worktree {
+                    println!(
+                        "Worktree preserved at: {} (use --delete-worktree to remove)",
+                        path.display()
+                    );
+                }
+                let delete_branch =
+                    args.delete_branch || (removed && config.worktree.delete_branch_on_cleanup);
+                if delete_branch && (!args.delete_worktree || removed) {
+                    delete_exact_branch(&main_repo, &info.branch);
+                }
+            } else {
+                eprintln!("Warning: managed pane worktree has no immutable cleanup path");
+            }
+        }
+        let Some(workspace) = metadata
+            .workspace
+            .as_ref()
+            .filter(|workspace| workspace.cleanup_on_delete)
+        else {
+            continue;
+        };
+        let mut all_owned_removed = args.delete_worktree;
+        let mut all_repos_owned = true;
+        for repo in &workspace.repos {
+            if !repo.managed_by_aoe {
+                all_repos_owned = false;
+                continue;
+            }
+            let path = PathBuf::from(&repo.worktree_path);
+            let main_repo = PathBuf::from(&repo.main_repo_path);
+            let removed =
+                args.delete_worktree && remove_exact_worktree(inst, &path, &main_repo, args.force);
+            all_owned_removed &= removed;
+            let delete_branch =
+                args.delete_branch || (removed && config.worktree.delete_branch_on_cleanup);
+            if delete_branch && (!args.delete_worktree || removed) {
+                delete_exact_branch(&main_repo, &repo.branch);
+            }
+        }
+        if all_owned_removed && all_repos_owned {
+            let workspace_dir = PathBuf::from(&workspace.workspace_dir);
+            if let Err(error) = std::fs::remove_dir(&workspace_dir) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "Warning: failed to remove workspace directory {}: {error}",
+                        workspace_dir.display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
@@ -54,82 +177,7 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
             found = true;
             removed_title = inst.title.clone();
 
-            let will_cleanup_worktree = needs_worktree_cleanup(&inst, &args);
-            // Delete branch if explicitly requested, or if worktree is being
-            // deleted and config says to also delete the branch.
-            let will_delete_branch = inst
-                .worktree_info
-                .as_ref()
-                .is_some_and(|wt| wt.managed_by_aoe)
-                && (args.delete_branch
-                    || (will_cleanup_worktree && config.worktree.delete_branch_on_cleanup));
-
-            // Track whether worktree removal succeeded (needed for branch deletion)
-            let mut worktree_removed = false;
-
-            // Handle worktree cleanup
-            if will_cleanup_worktree {
-                let wt_info = inst.worktree_info.as_ref().unwrap();
-                let worktree_path = PathBuf::from(&inst.project_path);
-                let main_repo = PathBuf::from(&wt_info.main_repo_path);
-
-                match GitWorktree::new(main_repo.clone()) {
-                    Ok(git_wt) => {
-                        match remove_managed_worktree(
-                            &git_wt,
-                            &worktree_path,
-                            &main_repo,
-                            &inst,
-                            args.force,
-                        ) {
-                            Ok(()) => {
-                                worktree_removed = true;
-                                println!("  Worktree removed");
-                            }
-                            Err(errs) => {
-                                for e in &errs {
-                                    eprintln!("Warning: {}", e);
-                                }
-                                eprintln!(
-                                    "You may need to remove it manually with: git worktree remove {}",
-                                    inst.project_path
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: failed to access git repository: {}", e);
-                    }
-                }
-            } else if let Some(wt_info) = &inst.worktree_info {
-                if wt_info.managed_by_aoe {
-                    println!(
-                        "Worktree preserved at: {} (use --delete-worktree to remove)",
-                        inst.project_path
-                    );
-                }
-            }
-
-            // Handle branch cleanup (only if worktree was removed or wasn't requested)
-            if will_delete_branch {
-                let worktree_ok = !will_cleanup_worktree || worktree_removed;
-                if worktree_ok {
-                    let wt_info = inst.worktree_info.as_ref().unwrap();
-                    let main_repo = PathBuf::from(&wt_info.main_repo_path);
-                    match GitWorktree::new(main_repo) {
-                        Ok(git_wt) => {
-                            if let Err(e) = git_wt.delete_branch(&wt_info.branch) {
-                                eprintln!("Warning: failed to delete branch: {}", e);
-                            } else {
-                                println!("  Branch '{}' deleted", wt_info.branch);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: failed to access git repository: {}", e);
-                        }
-                    }
-                }
-            }
+            cleanup_pane_worktrees(profile, &inst, &args, &config);
 
             // Capture the session's pane ids before killing it so the durable
             // store can purge their volatile capture rows.

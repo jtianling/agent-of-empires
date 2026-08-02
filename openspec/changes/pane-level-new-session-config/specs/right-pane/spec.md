@@ -1,8 +1,5 @@
-# right-pane Specification
+## MODIFIED Requirements
 
-## Purpose
-Let a session be created with a second tool beside its own, launched into a pane of its own with a working directory of its own.
-## Requirements
 ### Requirement: New session dialog includes right pane tool selector
 
 New Session SHALL 在全部 primary pane 字段和可见分割线之后展示 `Right Pane Agent`。  该字段 SHALL 不受 primary Tool 影响, SHALL 提供与 primary Tool 相同的可用 Tool 列表并在开头加入 `none`, 默认 SHALL 为 `none`。
@@ -127,27 +124,6 @@ shell right pane SHALL 通过现有安全 POSIX wrapper 使用用户配置的 sh
 - **THEN** `remain-on-exit` SHALL 对该 pane 启用
 - **AND** primary pane setting SHALL 不改变
 
-### Requirement: Agent pane tracking remains correct after right pane split
-The `@aoe_agent_pane` session option SHALL continue to point to the main (left) pane after the right pane split. Status detection, health checks, and detach behavior SHALL all target the left pane.
-
-#### Scenario: Status detection targets left pane after split
-- **WHEN** a session is created with a right pane tool
-- **AND** the agent in the left pane is running
-- **AND** `detect_status()` is called
-- **THEN** the status SHALL be determined from the left pane content, not the right pane
-
-#### Scenario: Detach from right pane returns to AoE correctly
-- **WHEN** a user is viewing the right pane of a split session
-- **AND** the user presses `Ctrl+b d` to detach (nested mode)
-- **THEN** the user SHALL return to the AoE TUI
-- **AND** the session SHALL NOT be killed or recreated on next attach
-
-#### Scenario: Detach from left pane returns to AoE correctly
-- **WHEN** a user is viewing the left pane of a split session
-- **AND** the user presses `Ctrl+b d` to detach (nested mode)
-- **THEN** the user SHALL return to the AoE TUI
-- **AND** the session SHALL NOT be killed or recreated on next attach
-
 ### Requirement: Right pane works with sandboxed sessions
 
 已有 sandbox session SHALL 继续通过现有 add-pane flow 支持 managed pane。  这些 pane SHALL 在已记录的 session container 中运行并使用 container working directory。  New Session SHALL 不提供 Sandbox, 因此它的 right pane selector SHALL 不与隐藏的新 Sandbox state 组合。
@@ -162,38 +138,7 @@ The `@aoe_agent_pane` session option SHALL continue to point to the main (left) 
 - **THEN** Sandbox checkbox SHALL 不存在
 - **AND** secondary Path SHALL 不因 invisible Sandbox value 被隐藏
 
-### Requirement: A submit confirms every directory it would have to create
-
-When a submit finds that one or more of the directories it needs does not exist, the dialog SHALL present a single confirmation naming all of them. Confirming SHALL create all of them and proceed with the submit; declining SHALL return to editing without creating any of them.
-
-A single confirmation is required rather than one per field: sequential prompts can leave the first directory created after the user declines the second, which is a state the user did not ask for and cannot see.
-
-#### Scenario: Both directories missing are confirmed together
-- **WHEN** the user submits with a session path and a right pane path that both name directories that do not exist
-- **THEN** one confirmation SHALL be shown naming both directories
-- **AND** confirming SHALL create both and create the session
-
-#### Scenario: Declining creates nothing
-- **WHEN** the confirmation for missing directories is declined
-- **THEN** no directory SHALL be created
-- **AND** the dialog SHALL return to editing
-
-#### Scenario: Only the missing directories are named
-- **WHEN** the user submits with an existing session path and a right pane path that does not exist
-- **THEN** the confirmation SHALL name only the right pane path
-
-### Requirement: Fork dialog includes a right pane path field
-
-The fork dialog SHALL include a right pane path field alongside its right pane tool selector, with the same meaning and editing behavior as the new session dialog's. An empty value SHALL mean the forked session's working directory, which is the parent's.
-
-#### Scenario: Forked right pane starts in a chosen directory
-- **WHEN** the user forks a session with a right pane tool and a right pane path set
-- **THEN** the forked session's right pane SHALL start in that directory
-- **AND** the forked session's own pane SHALL start in the parent's working directory
-
-#### Scenario: Forked right pane defaults to the parent's directory
-- **WHEN** the user forks a session with a right pane tool and no right pane path
-- **THEN** the forked session's right pane SHALL start in the parent's working directory
+## ADDED Requirements
 
 ### Requirement: Pane controls are independent
 
@@ -225,3 +170,11 @@ primary 与 secondary pane settings SHALL 独立编辑和提交。  改变一个
 #### Scenario: Secondary overlay 不改变 primary
 - **WHEN** 用户编辑 secondary Worktree sub-options
 - **THEN** primary Worktree 与 sub-options SHALL 不变
+
+## REMOVED Requirements
+
+### Requirement: YOLO field visibility considers both pane tools
+
+**Reason**: 一个共享 YOLO field 无法表达 pane-level independent config, 并会继续耦合 primary 与 secondary launch behavior。
+
+**Migration**: New Session 为每个支持 opt-in YOLO 的 pane 显示独立 YOLO Mode。  旧 session 的共享值在 migration 时复制到已有 managed pane, 保持旧 session 的启动语义。

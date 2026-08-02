@@ -26,6 +26,8 @@ pub enum CreationResult {
         instance: Box<Instance>,
         /// Worktree created during build, needed for cleanup if cancelled
         created_worktree: Option<CreatedWorktreeInfo>,
+        /// Workspace worktrees created during build, needed for exact rollback.
+        created_workspace_worktrees: Vec<CreatedWorktreeInfo>,
         /// Whether on_launch hooks were already executed in the background
         on_launch_hooks_ran: bool,
     },
@@ -102,21 +104,14 @@ impl CreationPoller {
 
         let params = InstanceParams {
             title: data.title,
-            path: data.path.clone(),
             group: data.group,
-            tool: data.tool,
-            worktree_branch: data.worktree_branch,
-            create_new_branch: data.create_new_branch,
-            sandbox: data.sandbox,
-            sandbox_image: data.sandbox_image,
-            yolo_mode: data.yolo_mode,
-            cross_agent_team: data.cross_agent_team,
+            primary: data.primary,
+            sandbox: false,
+            sandbox_image: String::new(),
             cross_agent_team_channel: data.cross_agent_team_channel,
-            extra_env: data.extra_env,
+            extra_env: Vec::new(),
             extra_args: data.extra_args,
             command_override: data.command_override,
-            reuse_worktree: data.reuse_worktree,
-            extra_repo_paths: data.extra_repo_paths,
         };
 
         let build_result = match builder::build_instance(params, &existing_titles, &profile) {
@@ -124,43 +119,16 @@ impl CreationPoller {
             Err(e) => return CreationResult::Error(format!("{:#}", e)),
         };
 
-        let mut instance = build_result.instance;
+        let instance = build_result.instance;
         let created_worktree = build_result.created_worktree;
         let created_workspace_worktrees = build_result.created_workspace_worktrees;
 
         let has_on_create = hooks.as_ref().is_some_and(|h| !h.on_create.is_empty());
         let has_on_launch = hooks.as_ref().is_some_and(|h| !h.on_launch.is_empty());
-        let mut container_started = false;
-
         // Execute on_create hooks after worktree setup, before starting
         if has_on_create {
             let hooks = hooks.as_ref().unwrap();
-            if data.sandbox {
-                // Ensure the container is running so we can exec hooks inside it.
-                // Don't create the tmux session yet -- that happens at attach time
-                // where the terminal size is available.
-                if let Err(e) = instance.get_container_for_instance() {
-                    builder::cleanup_instance(
-                        &instance,
-                        created_worktree.as_ref(),
-                        &created_workspace_worktrees,
-                    );
-                    return CreationResult::Error(format!("{:#}", e));
-                }
-                container_started = true;
-                if let Some(ref sandbox) = instance.sandbox_info {
-                    let workdir = instance.container_workdir();
-                    if let Err(e) = repo_config::execute_hooks_in_container_streamed(
-                        &hooks.on_create,
-                        &sandbox.container_name,
-                        &workdir,
-                        progress_tx,
-                    ) {
-                        tracing::warn!("on_create hook failed in container: {:#}", e);
-                        return CreationResult::Error(format!("on_create hook failed: {:#}", e));
-                    }
-                }
-            } else if let Err(e) = repo_config::execute_hooks_streamed(
+            if let Err(e) = repo_config::execute_hooks_streamed(
                 &hooks.on_create,
                 std::path::Path::new(&instance.project_path),
                 progress_tx,
@@ -178,30 +146,7 @@ impl CreationPoller {
         // This prevents blocking the UI thread when the session is first attached.
         if has_on_launch {
             let hooks = hooks.as_ref().unwrap();
-            if data.sandbox {
-                if !container_started {
-                    if let Err(e) = instance.get_container_for_instance() {
-                        let msg = format!("Container startup warning: {:#}", e);
-                        tracing::warn!("{}", msg);
-                        let _ = progress_tx.send(HookProgress::Output(msg));
-                    } else {
-                        container_started = true;
-                    }
-                }
-                if container_started {
-                    if let Some(ref sandbox) = instance.sandbox_info {
-                        let workdir = instance.container_workdir();
-                        if let Err(e) = repo_config::execute_hooks_in_container_streamed(
-                            &hooks.on_launch,
-                            &sandbox.container_name,
-                            &workdir,
-                            progress_tx,
-                        ) {
-                            tracing::warn!("on_launch hook failed in container: {}", e);
-                        }
-                    }
-                }
-            } else if let Err(e) = repo_config::execute_hooks_streamed(
+            if let Err(e) = repo_config::execute_hooks_streamed(
                 &hooks.on_launch,
                 std::path::Path::new(&instance.project_path),
                 progress_tx,
@@ -210,26 +155,17 @@ impl CreationPoller {
             }
         }
 
-        if data.sandbox && !container_started {
-            // Only ensure the container is running here if hooks didn't already
-            // start it. Don't create the tmux session yet -- that happens at attach time
-            // where the terminal size is available.
-            if let Err(e) = instance.get_container_for_instance() {
-                builder::cleanup_instance(
-                    &instance,
-                    created_worktree.as_ref(),
-                    &created_workspace_worktrees,
-                );
-                return CreationResult::Error(format!("{:#}", e));
-            }
-        }
-
         let created_worktree_info = created_worktree.as_ref().map(CreatedWorktreeInfo::from);
+        let created_workspace_worktree_info = created_workspace_worktrees
+            .iter()
+            .map(CreatedWorktreeInfo::from)
+            .collect();
 
         CreationResult::Success {
             session_id: instance.id.clone(),
             instance: Box::new(instance),
             created_worktree: created_worktree_info,
+            created_workspace_worktrees: created_workspace_worktree_info,
             on_launch_hooks_ran: has_on_launch,
         }
     }

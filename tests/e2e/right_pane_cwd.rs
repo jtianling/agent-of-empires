@@ -191,7 +191,7 @@ fn make_dir(h: &TuiTestHarness, name: &str) -> String {
 fn right_pane_line(screen: &str) -> &str {
     screen
         .lines()
-        .find(|line| line.contains("Right Pane:"))
+        .find(|line| line.contains("Right Pane Agent:"))
         .unwrap_or("")
 }
 
@@ -206,18 +206,15 @@ fn create_session_with_right_pane(
     h.wait_for("Title");
     h.type_text(title);
 
-    h.send_keys("Tab");
+    for _ in 0..3 {
+        h.send_keys("Tab");
+    }
     for _ in 0..128 {
         h.send_keys("BSpace");
     }
     h.type_text(session_dir);
 
-    let tabs_to_right_pane = if h.capture_screen().contains("Tool:") {
-        2
-    } else {
-        1
-    };
-    for _ in 0..tabs_to_right_pane {
+    for _ in 0..2 {
         h.send_keys("Tab");
     }
 

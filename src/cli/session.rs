@@ -250,9 +250,18 @@ async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
         );
     }
     let cwd = resolve_pane_working_dir(args.path.as_deref(), &inst.project_path)?;
+    let mut pane_config = inst.primary_pane_config().clone();
+    pane_config.tool = tool.clone();
+    pane_config.working_dir = cwd.clone();
+    pane_config.worktree = None;
+    pane_config.cross_agent_team &= crate::session::Instance::supports_cross_agent_team_tool(&tool);
+    if tool == "shell" {
+        pane_config.yolo_mode = false;
+        pane_config.cross_agent_team = false;
+    }
 
     let launch = inst
-        .build_extra_pane_command(&tool, &cwd)
+        .build_extra_pane_config_command(&pane_config)
         .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", tool))?;
 
     let pane_id =
@@ -265,24 +274,26 @@ async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
         &session_name,
         &crate::db::reconcile::LaunchedPane {
             pane_id: &pane_id,
-            agent: &tool,
-            cwd: &cwd,
+            config: &pane_config,
             identity_key: &launch.identity_key,
         },
     );
 
+    if let Err(e) = recorded {
+        return match crate::tmux::kill_pane_exact(&pane_id) {
+            Ok(()) => Err(e),
+            Err(rollback_error) => Err(anyhow::anyhow!(
+                "{e:#}. Failed to roll back pane {pane_id}: {rollback_error:#}"
+            )),
+        };
+    }
+    inst.auto_confirm_launched_pane(&pane_id, &pane_config);
     println!(
         "✓ Added agent pane to session: {} (pane {} of {})",
         inst.title,
         pane_count + 1,
         MAX_AGENT_PANES
     );
-    // The pane is up, so this is not a failed command, but it is degraded in a
-    // way nothing else will report. Re-running would add a second pane rather
-    // than repair this one, which is why it warns instead of failing.
-    if let Err(e) = recorded {
-        eprintln!("! {:#}", e);
-    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 //! Background deletion handler for TUI responsiveness
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -7,7 +8,7 @@ use std::thread;
 use crate::containers::DockerContainer;
 use crate::git::cleanup::remove_managed_worktree;
 use crate::git::GitWorktree;
-use crate::session::Instance;
+use crate::session::{Instance, PaneConfig, PaneWorktreeInfo};
 
 pub struct DeletionRequest {
     pub session_id: String,
@@ -62,124 +63,10 @@ impl DeletionPoller {
 
     fn perform_deletion(request: &DeletionRequest) -> DeletionResult {
         let mut errors = Vec::new();
-
-        // Track branch info for potential deletion after worktree removal
-        let branch_to_delete = if request.delete_branch {
-            request
-                .instance
-                .worktree_info
-                .as_ref()
-                .filter(|wt| wt.managed_by_aoe)
-                .map(|wt| (wt.branch.clone(), PathBuf::from(&wt.main_repo_path)))
-        } else {
-            None
-        };
-
-        // Worktree cleanup (if user opted to delete it)
-        // Must happen before branch deletion since the worktree is using the branch
-        if request.delete_worktree {
-            if let Some(wt_info) = &request.instance.worktree_info {
-                if wt_info.managed_by_aoe {
-                    let worktree_path = PathBuf::from(&request.instance.project_path);
-                    let main_repo = PathBuf::from(&wt_info.main_repo_path);
-
-                    match GitWorktree::new(main_repo.clone()) {
-                        Ok(git_wt) => {
-                            if let Err(errs) = remove_managed_worktree(
-                                &git_wt,
-                                &worktree_path,
-                                &main_repo,
-                                &request.instance,
-                                request.force_delete,
-                            ) {
-                                errors.extend(errs);
-                            }
-                        }
-                        Err(e) => {
-                            errors.push(format!("Worktree: {}", e));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Workspace cleanup (if user opted to delete worktrees and instance has workspace_info)
-        if request.delete_worktree {
-            if let Some(ws_info) = &request.instance.workspace_info {
-                if ws_info.cleanup_on_delete {
-                    for repo in &ws_info.repos {
-                        if repo.managed_by_aoe {
-                            let worktree_path = PathBuf::from(&repo.worktree_path);
-                            let main_repo = PathBuf::from(&repo.main_repo_path);
-
-                            match GitWorktree::new(main_repo.clone()) {
-                                Ok(git_wt) => {
-                                    if let Err(errs) = remove_managed_worktree(
-                                        &git_wt,
-                                        &worktree_path,
-                                        &main_repo,
-                                        &request.instance,
-                                        request.force_delete,
-                                    ) {
-                                        errors.extend(
-                                            errs.into_iter().map(|e| {
-                                                format!("Workspace ({}): {}", repo.name, e)
-                                            }),
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    errors.push(format!("Workspace ({}): {}", repo.name, e));
-                                }
-                            }
-                        }
-                    }
-                    // Remove workspace parent directory
-                    let ws_path = PathBuf::from(&ws_info.workspace_dir);
-                    if ws_path.exists() {
-                        if let Err(e) = std::fs::remove_dir_all(&ws_path) {
-                            errors.push(format!("Workspace dir: {}", e));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Branch cleanup (if user opted to delete it and worktree was successfully removed)
-        if let Some((branch, main_repo)) = branch_to_delete {
-            let worktree_ok =
-                !request.delete_worktree || !errors.iter().any(|e| e.starts_with("Worktree:"));
-            if worktree_ok {
-                match GitWorktree::new(main_repo) {
-                    Ok(git_wt) => {
-                        if let Err(e) = git_wt.delete_branch(&branch) {
-                            errors.push(format!("Branch: {}", e));
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(format!("Branch: {}", e));
-                    }
-                }
-            }
-        }
-
-        // Branch cleanup for workspace repos
-        if request.delete_branch {
-            if let Some(ws_info) = &request.instance.workspace_info {
-                let worktree_ok = !request.delete_worktree
-                    || !errors.iter().any(|e| e.starts_with("Workspace ("));
-                if worktree_ok {
-                    for repo in &ws_info.repos {
-                        if repo.managed_by_aoe {
-                            let main_repo = PathBuf::from(&repo.main_repo_path);
-                            if let Ok(git_wt) = GitWorktree::new(main_repo) {
-                                if let Err(e) = git_wt.delete_branch(&repo.branch) {
-                                    errors.push(format!("Branch ({}): {}", repo.name, e));
-                                }
-                            }
-                        }
-                    }
-                }
+        if request.delete_worktree || request.delete_branch {
+            let pane_configs = Self::pane_configs_for_deletion(request, &mut errors);
+            for pane in &pane_configs {
+                Self::cleanup_pane_worktree(request, pane, &mut errors);
             }
         }
 
@@ -220,6 +107,133 @@ impl DeletionPoller {
             } else {
                 Some(errors.join("; "))
             },
+        }
+    }
+
+    fn pane_configs_for_deletion(
+        request: &DeletionRequest,
+        errors: &mut Vec<String>,
+    ) -> Vec<PaneConfig> {
+        let mut panes = vec![request.instance.primary_pane_config().clone()];
+        match crate::db::Store::open_with_schema(&request.profile)
+            .and_then(|store| store.read_slots_for_instance(&request.instance.id))
+        {
+            Ok(slots) => panes.extend(slots.into_iter().map(|slot| slot.pane_config())),
+            Err(error) => errors.push(format!("Pane metadata: {error}")),
+        }
+        let mut seen = HashSet::new();
+        panes.retain(|pane| {
+            let key = serde_json::to_string(&pane.worktree).unwrap_or_default();
+            seen.insert(key)
+        });
+        panes
+    }
+
+    fn cleanup_pane_worktree(
+        request: &DeletionRequest,
+        pane: &PaneConfig,
+        errors: &mut Vec<String>,
+    ) {
+        let Some(PaneWorktreeInfo {
+            worktree_path,
+            worktree,
+            workspace,
+        }) = pane.worktree.as_ref()
+        else {
+            return;
+        };
+        if let Some(info) = worktree
+            .as_ref()
+            .filter(|info| info.managed_by_aoe && info.cleanup_on_delete)
+        {
+            let main_repo = PathBuf::from(&info.main_repo_path);
+            let removed = match worktree_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+            {
+                Some(_) if !request.delete_worktree => true,
+                Some(path) => match GitWorktree::new(main_repo.clone()) {
+                    Ok(git) => remove_managed_worktree(
+                        &git,
+                        &PathBuf::from(path),
+                        &main_repo,
+                        &request.instance,
+                        request.force_delete,
+                    )
+                    .map_err(|pane_errors| {
+                        errors.extend(
+                            pane_errors
+                                .into_iter()
+                                .map(|error| format!("Pane worktree {path}: {error}")),
+                        );
+                    })
+                    .is_ok(),
+                    Err(error) => {
+                        errors.push(format!("Pane worktree {path}: {error}"));
+                        false
+                    }
+                },
+                None => {
+                    errors.push("Managed pane worktree has no immutable cleanup path".to_string());
+                    false
+                }
+            };
+            if request.delete_branch && removed {
+                match GitWorktree::new(main_repo) {
+                    Ok(git) => {
+                        if let Err(error) = git.delete_branch(&info.branch) {
+                            errors.push(format!("Branch {}: {error}", info.branch));
+                        }
+                    }
+                    Err(error) => errors.push(format!("Branch {}: {error}", info.branch)),
+                }
+            }
+        }
+        let Some(workspace) = workspace.as_ref().filter(|info| info.cleanup_on_delete) else {
+            return;
+        };
+        let all_repos_owned = workspace.repos.iter().all(|repo| repo.managed_by_aoe);
+        let mut workspace_removed = true;
+        for repo in workspace.repos.iter().filter(|repo| repo.managed_by_aoe) {
+            let main_repo = PathBuf::from(&repo.main_repo_path);
+            let removed = !request.delete_worktree
+                || match GitWorktree::new(main_repo.clone()) {
+                    Ok(git) => remove_managed_worktree(
+                        &git,
+                        &PathBuf::from(&repo.worktree_path),
+                        &main_repo,
+                        &request.instance,
+                        request.force_delete,
+                    )
+                    .map_err(|repo_errors| {
+                        errors.extend(
+                            repo_errors
+                                .into_iter()
+                                .map(|error| format!("Workspace {}: {error}", repo.name)),
+                        );
+                    })
+                    .is_ok(),
+                    Err(error) => {
+                        errors.push(format!("Workspace {}: {error}", repo.name));
+                        false
+                    }
+                };
+            workspace_removed &= removed;
+            if request.delete_branch && removed {
+                if let Ok(git) = GitWorktree::new(main_repo) {
+                    if let Err(error) = git.delete_branch(&repo.branch) {
+                        errors.push(format!("Branch {}: {error}", repo.branch));
+                    }
+                }
+            }
+        }
+        if request.delete_worktree && workspace_removed && all_repos_owned {
+            let path = PathBuf::from(&workspace.workspace_dir);
+            if path.exists() {
+                if let Err(error) = std::fs::remove_dir(path) {
+                    errors.push(format!("Workspace dir: {error}"));
+                }
+            }
         }
     }
 

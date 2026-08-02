@@ -7,6 +7,7 @@ mod container_config;
 pub(crate) mod environment;
 mod groups;
 mod instance;
+mod pane;
 pub mod profile_config;
 pub mod repo_config;
 mod storage;
@@ -27,6 +28,7 @@ pub use instance::{
     Instance, PaneResumeOutcome, RestartMode, SandboxInfo, Status, StatusUpdateOptions,
     TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
 };
+pub use pane::{PaneConfig, PaneDraft, PaneWorktreeInfo, PaneWorktreeRequest};
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,
     validate_check_interval, validate_memory_limit, validate_path_exists, validate_volume_format,

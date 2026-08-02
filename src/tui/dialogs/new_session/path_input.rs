@@ -32,9 +32,13 @@ impl NewSessionDialog {
     pub(super) fn handle_path_shortcuts(&mut self, key: KeyEvent) -> bool {
         let layout = self.field_layout();
         let field = if self.focused_field == layout.path {
-            &mut self.path
+            &mut self.primary.path
         } else if self.focused_field == layout.right_pane_path {
-            &mut self.right_pane_path
+            &mut self
+                .secondary
+                .as_mut()
+                .expect("secondary path is visible")
+                .path
         } else {
             return false;
         };

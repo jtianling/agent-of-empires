@@ -13,16 +13,17 @@ pub(super) const ABSENT: usize = usize::MAX;
 
 pub(super) struct FieldLayout {
     pub(super) title: usize,
+    pub(super) group: usize,
     pub(super) path: usize,
     pub(super) tool: usize,
-    pub(super) right_pane: usize,
-    pub(super) right_pane_path: usize,
     pub(super) yolo: usize,
     pub(super) cross_agent_team: usize,
     pub(super) worktree: usize,
-    pub(super) new_branch: usize,
-    pub(super) sandbox: usize,
-    pub(super) group: usize,
+    pub(super) right_pane: usize,
+    pub(super) right_pane_path: usize,
+    pub(super) right_pane_yolo: usize,
+    pub(super) right_pane_cross_agent_team: usize,
+    pub(super) right_pane_worktree: usize,
     /// Number of focusable fields, i.e. the modulus for Tab/BackTab.
     pub(super) count: usize,
 }
@@ -48,34 +49,35 @@ impl FieldCursor {
 
 impl NewSessionDialog {
     pub(super) fn field_layout(&self) -> FieldLayout {
-        let is_terminal = self.is_terminal_selected();
-        let has_worktree = !self.worktree_branch.value().is_empty();
-
         let mut cursor = FieldCursor(0);
         let title = cursor.take();
-        let path = cursor.take();
-        let tool = cursor.take_if(self.available_tools.len() > 1);
-        let right_pane = cursor.take();
-        let right_pane_path = cursor.take_if(self.has_right_pane_path_field());
-        let yolo = cursor.take_if(self.has_yolo_field());
-        let cross_agent_team = cursor.take_if(self.has_cross_agent_team_field());
-        let worktree = cursor.take_if(!is_terminal);
-        let new_branch = cursor.take_if(!is_terminal && has_worktree);
-        let sandbox = cursor.take_if(self.docker_available);
         let group = cursor.take();
+        let tool = cursor.take_if(self.available_tools.len() > 1);
+        let path = cursor.take();
+        let yolo = cursor.take_if(self.pane_has_yolo(super::PaneTarget::Primary));
+        let cross_agent_team =
+            cursor.take_if(self.pane_has_cross_agent_team(super::PaneTarget::Primary));
+        let worktree = cursor.take();
+        let right_pane = cursor.take();
+        let right_pane_path = cursor.take_if(self.secondary.is_some());
+        let right_pane_yolo = cursor.take_if(self.pane_has_yolo(super::PaneTarget::Secondary));
+        let right_pane_cross_agent_team =
+            cursor.take_if(self.pane_has_cross_agent_team(super::PaneTarget::Secondary));
+        let right_pane_worktree = cursor.take_if(self.secondary.is_some());
 
         FieldLayout {
             title,
+            group,
             path,
             tool,
-            right_pane,
-            right_pane_path,
             yolo,
             cross_agent_team,
             worktree,
-            new_branch,
-            sandbox,
-            group,
+            right_pane,
+            right_pane_path,
+            right_pane_yolo,
+            right_pane_cross_agent_team,
+            right_pane_worktree,
             count: cursor.0,
         }
     }
