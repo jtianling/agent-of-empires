@@ -860,6 +860,38 @@ mod identity_key_tests {
         assert_eq!(primary.cwd, "/tmp/session-dir");
     }
 
+    #[test]
+    fn managed_shell_panes_record_their_launch_directory() {
+        for shell_cwd in ["/tmp/session-dir", "/tmp/other-dir"] {
+            let (_tmp, store) = store();
+            let inst = Instance::new("recon", "/tmp/session-dir");
+            let panes = [(0, "%1".to_string()), (1, "%2".to_string())];
+
+            record_launched_extra_pane_among(
+                &store,
+                &inst.id,
+                &panes,
+                Some("%1"),
+                "/tmp/session-dir",
+                "codex",
+                &LaunchedPane {
+                    pane_id: "%2",
+                    agent: "shell",
+                    cwd: shell_cwd,
+                    identity_key: "",
+                },
+            )
+            .unwrap();
+
+            let slots = store.read_slots_for_instance(&inst.id).unwrap();
+            let shell = slots.iter().find(|slot| slot.slot == 1).unwrap();
+            assert_eq!(shell.agent, "shell");
+            assert_eq!(shell.cwd, shell_cwd);
+            assert!(shell.native_session_id.is_empty());
+            assert!(shell.xats_identity_key.is_empty());
+        }
+    }
+
     /// The restart fan-out places each pane at the directory its slot recorded,
     /// so the two panes come back where they were launched. Without the
     /// assertion above, the split alone still looks correct.

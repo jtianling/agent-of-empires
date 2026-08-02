@@ -168,7 +168,7 @@ Databases created before the identity key column existed SHALL be healed by the 
 
 ### Requirement: An extra pane AoE launches has a durable slot record from launch
 
-When AoE launches an extra agent pane into a session, it SHALL write that pane's durable slot record at launch time rather than waiting for the pane's first capture. The launch-time record SHALL carry the agent, the pane id AoE just created, the working directory the pane was launched into, and the identity key it minted, and SHALL carry no native session id, because the pane has not yet reported a conversation.
+When AoE launches an extra managed pane into a session, it SHALL write that pane's durable slot record at launch time rather than waiting for the pane's first capture. The launch-time record SHALL carry the agent or shell tool, the pane id AoE just created, the working directory the pane was launched into, and any identity key it minted, and SHALL carry no native session id, because the pane has not yet reported a conversation.
 
 The working directory on that record SHALL be the launched pane's own, not the instance's. The two are equal only when the pane was launched into the session's directory. Recording the instance's directory for a pane launched elsewhere produces a record that is correct at launch and wrong at the first restart, because restart and cold-start recovery both place a pane at the directory its slot recorded.
 
@@ -176,7 +176,7 @@ AoE SHALL write the primary pane's record at that same moment when it has none, 
 
 A session that launches a single pane is unchanged: its slot record still arrives with its first capture. The launch-time write is what an extra pane needs to be tracked at all, not a general replacement for capture-driven adoption.
 
-A shell pane runs no agent, holds no identity and produces no capture, so it SHALL stay slotless when it was launched into the session's own directory: a slot would cost the session one of four and recovery would place the pane there regardless. A shell pane launched into any other directory SHALL be recorded. That directory is held nowhere else, so without a record the pane is outside the restart fan-out and absent from cold recovery entirely, and the directory the user chose would survive only until the first restart.
+Every shell pane that AoE explicitly launches as a managed pane SHALL receive a durable slot, including one launched into the session's own directory. A shell pane runs no agent, holds no identity and produces no capture, so its launch-time record remains authoritative until the pane is relaunched or removed. The slot is required because restart and cold-start recovery fan out from durable slots, not from the transient tmux layout.
 
 A shell slot SHALL be relaunched as the user's shell rather than through the agent registry's binary for `shell`, which names no program.
 
@@ -195,16 +195,24 @@ A record with no native session id SHALL be a valid state, not an error.
 - **WHEN** AoE launches an extra agent pane into a directory other than the instance's
 - **THEN** that pane's launch-time record SHALL carry the directory it was launched into
 
-#### Scenario: A shell pane in the session's directory stays slotless
+#### Scenario: A managed shell pane in the session's directory is recorded
 
-- **WHEN** AoE launches a shell pane into the session's own working directory
-- **THEN** no slot record SHALL be written for it
+- **WHEN** AoE launches a managed shell pane into the session's own working directory
+- **THEN** a durable slot record SHALL be written for it carrying that directory
+- **AND** a restart SHALL relaunch it as the user's shell in that directory
 
 #### Scenario: A shell pane with a directory of its own is recorded
 
 - **WHEN** AoE launches a shell pane into a directory other than the session's
 - **THEN** a slot record SHALL be written for it carrying that directory
 - **AND** a restart SHALL relaunch it as the user's shell in that directory
+
+#### Scenario: Cold recovery includes a managed shell pane
+
+- **WHEN** durable slots contain a primary agent pane and a managed shell pane
+- **AND** the tmux session no longer exists
+- **THEN** cold recovery SHALL recreate both panes from their slots
+- **AND** each pane SHALL start in the directory carried by its own slot
 
 #### Scenario: The primary pane beside it is tracked too
 
@@ -252,4 +260,3 @@ A record with no native session id SHALL be a valid state, not an error.
 - **WHEN** a pane whose slot records one working directory reports a capture from another
 - **THEN** the slot SHALL be updated to the captured directory
 - **AND** the slot's identity key SHALL be preserved
-

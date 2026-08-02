@@ -267,14 +267,8 @@ fn right_pane_starts_in_its_own_directory() {
 /// The restart is where the defect was observable: the split alone looks
 /// correct, and only the slot record decides where each pane comes back.
 ///
-/// Both panes run an agent rather than a shell. A shell pane is slot-recorded
-/// only when it was given a directory of its own
-/// (`Instance::record_launched_extra_pane` returns early for one that inherited
-/// the session's), so a shell version of this test would have to be written
-/// against that narrower case to mean anything: with no slots to read, the
-/// restart fan-out takes the primary-only branch and passes without the extra
-/// pane ever being respawned -- exactly the false green this test exists to
-/// avoid.
+/// Both panes run agents here so the test remains focused on separate agent
+/// directories. Managed shell lifecycle coverage lives in `codex_xats`.
 #[test]
 #[serial]
 fn a_restart_returns_both_panes_to_their_own_directories() {
@@ -325,8 +319,8 @@ fn a_restart_returns_both_panes_to_their_own_directories() {
     wait_for_pane_cwd(&h, &primary, &session_dir);
 }
 
-/// A shell pane given a directory of its own is slot-recorded, which makes the
-/// resume path reach a slot whose recorded agent is `shell` for the first time.
+/// A managed shell pane is slot-recorded, so the resume path reaches a slot
+/// whose recorded agent is `shell`.
 /// The agent registry's binary for `shell` is the literal string `shell`, which
 /// names no program: a resume that built the command from the registry would
 /// respawn the pane into a command that does not exist. So this asserts the

@@ -256,6 +256,96 @@ cross_agent_team_default = true
         let id = session["id"].as_str().expect("session id");
         format!("aoe_{}_{}", sanitize_title(title), &id[..id.len().min(8)])
     }
+
+    fn wait_for_session_name(&self, title: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if self
+                .sessions()
+                .iter()
+                .any(|session| session["title"] == title)
+            {
+                return self.session_name(title);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("session {title} was not created");
+    }
+
+    fn identity_key(&self, title: &str) -> String {
+        self.sessions()
+            .into_iter()
+            .find(|session| session["title"] == title)
+            .and_then(|session| session["xats_identity_key"].as_str().map(str::to_string))
+            .filter(|key| !key.is_empty())
+            .expect("persisted xats identity key")
+    }
+
+    fn pane_value(&self, target: &str, format: &str) -> String {
+        let output = self.tmux(&["display-message", "-p", "-t", target, format]);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn wait_for_pane_count(&self, session: &str, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if self.pane_value(session, "#{window_panes}") == expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("expected {expected} panes in {session}");
+    }
+
+    fn wait_for_pid_change(&self, target: &str, before: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let current = self.pane_value(target, "#{pane_pid}");
+            if !current.is_empty() && current != before {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("pane {target} was not respawned");
+    }
+
+    fn wait_for_recoverable(&self) {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        while Instant::now() < deadline {
+            if self.capture(&self.outer_session).contains("[recoverable]") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        panic!("session did not become recoverable");
+    }
+
+    fn slot_count(&self, title: &str) -> usize {
+        let id = self
+            .sessions()
+            .into_iter()
+            .find(|session| session["title"] == title)
+            .and_then(|session| session["id"].as_str().map(str::to_string))
+            .expect("session id");
+        let path = self.config_dir().join("profiles/default/aoe.db");
+        let (store, _) =
+            agent_of_empires::db::Store::open_with_schema_at(&path).expect("open isolated store");
+        store
+            .read_slots_for_instance(&id)
+            .expect("read durable slots")
+            .len()
+    }
+
+    fn wait_for_slot_count(&self, title: &str, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if self.slot_count(title) == expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("expected {expected} durable slots for {title}");
+    }
 }
 
 impl Drop for CodexXatsHarness {
@@ -301,6 +391,58 @@ fn write_executable(path: &Path, contents: &str) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .expect("set shim permissions");
     }
+}
+
+fn assert_codex_shell_panes(h: &CodexXatsHarness, session: &str, key: &str) {
+    let shell_target = format!("{session}:.1");
+    let shell_command = h.pane_value(&shell_target, "#{pane_start_command}");
+    let codex_environment = std::fs::read_to_string(&h.codex_log).expect("Codex environment log");
+    let expected_cwd = h.project.canonicalize().expect("canonical project");
+
+    assert!(codex_environment.contains(&format!("XATS_IDENTITY_KEY={key}\n")));
+    assert!(shell_command.contains("aoe-test-shell"));
+    assert!(shell_command.contains(" -lc "));
+    assert!(!shell_command.contains("bash -lc"));
+    assert_eq!(
+        h.pane_value(&shell_target, "#{pane_current_path}"),
+        expected_cwd.to_string_lossy()
+    );
+}
+
+fn select_dialog_tool(h: &CodexXatsHarness, field: &str, tool: &str) {
+    let selected = format!("● {tool}");
+    for _ in 0..32 {
+        let screen = h.capture(&h.outer_session);
+        let line = screen
+            .lines()
+            .find(|line| line.contains(field))
+            .unwrap_or("");
+        if line.contains(&selected) {
+            return;
+        }
+        h.send_key("Right");
+    }
+    panic!("could not select {tool} in {field}");
+}
+
+fn create_codex_shell_session(h: &CodexXatsHarness, title: &str) -> String {
+    h.send_key("n");
+    h.wait_for_screen(&h.outer_session, "Cross Agent Teams");
+    h.type_text(title);
+    h.send_key("Tab");
+
+    let tabs_to_right_pane = if h.capture(&h.outer_session).contains("Tool:") {
+        2
+    } else {
+        1
+    };
+    for _ in 0..tabs_to_right_pane {
+        h.send_key("Tab");
+    }
+    select_dialog_tool(h, "Right Pane:", "shell");
+    h.send_key("Enter");
+
+    h.wait_for_session_name(title)
 }
 
 #[test]
@@ -385,4 +527,73 @@ fn test_codex_xats_app_server_failure_is_visible() {
         !h.codex_log.exists(),
         "Codex must not launch without app-server"
     );
+}
+
+#[test]
+#[serial]
+fn test_codex_and_same_cwd_shell_restart_and_recover_together() {
+    require_tmux!();
+    let h = CodexXatsHarness::new("codex_shell_lifecycle");
+    write_executable(
+        &h.bin_dir.path().join("codex"),
+        "#!/bin/sh\nprintf 'XATS_IDENTITY_KEY=%s\\n' \"${XATS_IDENTITY_KEY-}\" > \"$CODEX_ARGS_LOG\"\nprintf '%s\\n' \"$@\" >> \"$CODEX_ARGS_LOG\"\nexec sleep 2147483647\n",
+    );
+    let title = "codex-shell-lifecycle";
+    h.spawn_tui();
+    h.wait_for_screen(&h.outer_session, "Agent of Empires");
+    let session = create_codex_shell_session(&h, title);
+    h.wait_for_pane_count(&session, "2");
+    h.wait_for_slot_count(title, 2);
+    h.wait_for_file(&h.codex_log);
+
+    let key = h.identity_key(title);
+    assert_codex_shell_panes(&h, &session, &key);
+    let codex_pid = h.pane_value(&format!("{session}:.0"), "#{pane_pid}");
+    let shell_pid = h.pane_value(&format!("{session}:.1"), "#{pane_pid}");
+
+    std::fs::remove_file(&h.codex_log).expect("clear Codex environment log");
+    h.send_key("C");
+    h.wait_for_pid_change(&format!("{session}:.0"), &codex_pid);
+    h.wait_for_pid_change(&format!("{session}:.1"), &shell_pid);
+    h.wait_for_file(&h.codex_log);
+    assert_eq!(h.identity_key(title), key);
+    assert_codex_shell_panes(&h, &session, &key);
+
+    let killed = h.tmux(&["kill-session", "-t", &session]);
+    assert!(killed.status.success(), "kill managed session: {killed:?}");
+    std::fs::remove_file(&h.codex_log).expect("clear Codex environment log");
+    h.wait_for_recoverable();
+    h.send_key("C");
+    h.wait_for_pane_count(&session, "2");
+    h.wait_for_file(&h.codex_log);
+    assert_eq!(h.identity_key(title), key);
+    assert_codex_shell_panes(&h, &session, &key);
+}
+
+#[test]
+#[serial]
+fn test_percent_shell_is_managed_but_raw_split_is_not() {
+    require_tmux!();
+    let h = CodexXatsHarness::new("percent_shell_slot");
+    let title = "percent-shell-slot";
+    h.add_codex_session(title);
+    h.start_session(title);
+    let session = h.session_name(title);
+
+    h.spawn_tui();
+    h.wait_for_screen(&h.outer_session, title);
+    h.send_key("%");
+    h.wait_for_screen(&h.outer_session, "Add Agent Pane");
+    select_dialog_tool(&h, "Agent:", "shell");
+    h.send_key("Enter");
+
+    h.wait_for_pane_count(&session, "2");
+    h.wait_for_slot_count(title, 2);
+
+    let project = h.project.to_string_lossy();
+    let split = h.tmux(&["split-window", "-h", "-t", &session, "-c", &project]);
+    assert!(split.status.success(), "create raw split: {split:?}");
+    h.wait_for_pane_count(&session, "3");
+    std::thread::sleep(Duration::from_millis(1_600));
+    assert_eq!(h.slot_count(title), 2, "raw split must stay slotless");
 }

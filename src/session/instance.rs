@@ -1314,8 +1314,7 @@ impl Instance {
     /// does when AoE relaunches a tracked pane, because this is that builder.
     ///
     /// `shell` is built here rather than through it: the registry entry names
-    /// no launchable binary, and a shell pane produces no capture and never
-    /// occupies a slot.
+    /// no launchable binary, and a shell pane produces no capture.
     ///
     /// The identity key is minted here rather than supplied by the caller. AoE
     /// builds this pane's command and so is the only party that can bind an
@@ -1360,11 +1359,9 @@ impl Instance {
     /// launch. The two are equal only when the pane was launched into the
     /// session's directory.
     ///
-    /// A shell pane that inherited the session's directory is not recorded: it
-    /// runs no agent, holds no identity and produces no capture, and recovery
-    /// would place it in that directory anyway, so a slot would only cost the
-    /// session one of four. A shell pane launched into a directory of its own
-    /// is recorded, because that directory is held nowhere else.
+    /// A managed shell pane is recorded even when it inherits the session's
+    /// directory. It produces no capture, so this launch-time record is its only
+    /// durable lifecycle source for restart and cold recovery.
     ///
     /// A failure here is reported rather than logged. The pane is already
     /// running under the key it was launched with, but nothing holds that key,
@@ -1377,19 +1374,6 @@ impl Instance {
         session_name: &str,
         pane: &crate::db::reconcile::LaunchedPane<'_>,
     ) -> Result<()> {
-        // A shell pane runs no agent, holds no identity and produces no capture,
-        // so a slot would normally only cost the session one of four.
-        //
-        // The exception is a shell pane launched somewhere other than the
-        // session's directory. That directory is recorded nowhere else: without
-        // a slot the pane is outside the restart fan-out and absent from cold
-        // recovery entirely, so the directory the user chose survives exactly
-        // until the first restart. A shell pane that simply inherited the
-        // session's directory loses nothing by staying slotless, because
-        // recovery would put it there anyway.
-        if shell_pane_needs_no_slot(pane.agent, pane.cwd, &self.project_path) {
-            return Ok(());
-        }
         crate::db::Store::open_with_schema(profile)
             .and_then(|store| {
                 crate::db::reconcile::record_launched_extra_pane(
@@ -1416,17 +1400,26 @@ impl Instance {
     /// and a login shell that resets it would otherwise land the pane
     /// elsewhere.
     fn build_extra_shell_pane_command(&self, cwd: &str) -> String {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let outer_shell = crate::session::environment::user_posix_shell();
         let inner = if self.is_sandboxed() && self.sandbox_info.is_some() {
             let container = DockerContainer::from_session_id(&self.id);
             let workdir = self.container_workdir();
-            let docker_cmd = container.exec_command(Some(&format!("-w {}", workdir)), &shell);
+            let docker_cmd = container.exec_command(Some(&format!("-w {}", workdir)), &outer_shell);
             format!("stty susp undef; exec {}", docker_cmd)
         } else {
             let escaped_dir = shell_escape(cwd);
-            format!("cd {} && stty susp undef; exec {}", escaped_dir, shell)
+            let interactive_shell = crate::session::environment::user_shell();
+            format!(
+                "cd {} && stty susp undef; exec {}",
+                escaped_dir,
+                shell_escape(&interactive_shell)
+            )
         };
-        format!("bash -lc '{}'", inner.replace('\'', "'\\''"))
+        format!(
+            "{} -lc '{}'",
+            shell_escape(&outer_shell),
+            inner.replace('\'', "'\\''")
+        )
     }
 
     /// Whether a pane running `target_agent` is the pane the instance's own
@@ -3046,9 +3039,7 @@ impl Instance {
         // A shell slot is relaunched the way it was launched. The registry
         // entry's binary is the literal `shell`, which names no program, so the
         // launch path builds this pane through `build_extra_shell_pane_command`
-        // and the resume path has to do the same. Only slots recorded for a
-        // shell pane with a directory of its own reach this, which is why it
-        // was unreachable before those slots existed.
+        // and the resume path has to do the same.
         let plan = if pane_agent_is_shell(agent) {
             Some((self.build_extra_shell_pane_command(cwd), false))
         } else {
@@ -3100,26 +3091,6 @@ impl Instance {
             PaneResumeOutcome::DegradedToFresh
         }
     }
-}
-
-/// Whether two paths name the same directory, ignoring a trailing separator.
-///
-/// Used to tell "this pane inherited the session's directory" from "this pane
-/// was given one", which is a question about what the user chose rather than
-/// about what the filesystem resolves to, so it does not canonicalize.
-fn paths_equal(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
-}
-
-/// Whether a launched shell pane can stay slotless.
-///
-/// A shell pane runs no agent, holds no identity and produces no capture, so a
-/// slot would normally only cost the session one of four. A shell pane launched
-/// somewhere other than the session's directory is the exception: that directory
-/// is recorded nowhere else, so without a slot the choice survives only until
-/// the first restart.
-fn shell_pane_needs_no_slot(agent: &str, cwd: &str, project_path: &str) -> bool {
-    pane_agent_is_shell(agent) && paths_equal(cwd, project_path)
 }
 
 /// Whether a tracked pane's recorded agent is a plain shell. Shell panes
@@ -3230,49 +3201,6 @@ fn rebuild_recovery_panes(
         }
     }
     Ok(paired)
-}
-
-#[cfg(test)]
-mod shell_slot_tests {
-    use super::shell_pane_needs_no_slot;
-
-    #[test]
-    fn an_inherited_shell_pane_stays_slotless() {
-        assert!(shell_pane_needs_no_slot(
-            "shell",
-            "/tmp/session",
-            "/tmp/session"
-        ));
-    }
-
-    #[test]
-    fn a_trailing_separator_is_still_the_same_directory() {
-        assert!(shell_pane_needs_no_slot(
-            "shell",
-            "/tmp/session/",
-            "/tmp/session"
-        ));
-    }
-
-    /// The directory the user chose exists nowhere else, so this pane has to be
-    /// slot-recorded or the choice dies at the first restart.
-    #[test]
-    fn a_shell_pane_with_its_own_directory_takes_a_slot() {
-        assert!(!shell_pane_needs_no_slot(
-            "shell",
-            "/tmp/other",
-            "/tmp/session"
-        ));
-    }
-
-    #[test]
-    fn an_agent_pane_always_takes_a_slot() {
-        assert!(!shell_pane_needs_no_slot(
-            "claude",
-            "/tmp/session",
-            "/tmp/session"
-        ));
-    }
 }
 
 #[cfg(test)]
@@ -3678,9 +3606,9 @@ mod tests {
             .command;
         let escaped_dir = shell_escape(&inst.project_path).replace('\'', "'\\''");
 
-        assert!(command.starts_with("bash -lc '"));
+        assert!(command.starts_with("'/bin/zsh' -lc '"));
         assert!(command.contains(&format!(
-            "cd {} && stty susp undef; exec /bin/zsh",
+            "cd {} && stty susp undef; exec '\\''/bin/zsh'\\''",
             escaped_dir
         )));
 
@@ -3688,6 +3616,94 @@ mod tests {
             Some(shell) => std::env::set_var("SHELL", shell),
             None => std::env::remove_var("SHELL"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn extra_shell_pane_does_not_source_a_bash_login_profile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let shell_dir = tmp.path().join("shell dir");
+        std::fs::create_dir(&shell_dir).unwrap();
+        let fake_zsh = shell_dir.join("zsh");
+        let reached = tmp.path().join("zsh-reached");
+        let bash_sourced = tmp.path().join("bash-sourced");
+        let fake_body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/sh -c \"$2\"; fi\nprintf reached > '{}'\n",
+            reached.display()
+        );
+        std::fs::write(&fake_zsh, fake_body).unwrap();
+        std::fs::set_permissions(&fake_zsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            tmp.path().join(".bash_profile"),
+            format!("printf sourced > '{}'\n", bash_sourced.display()),
+        )
+        .unwrap();
+
+        let original_shell = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", &fake_zsh);
+        let command = Instance::new("test", tmp.path().to_str().unwrap())
+            .build_extra_pane_command("shell", tmp.path().to_str().unwrap())
+            .unwrap()
+            .command;
+        match original_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &command])
+            .env("HOME", tmp.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "command failed: {output:?}");
+        assert!(reached.exists(), "the configured zsh path was not reached");
+        assert!(
+            !bash_sourced.exists(),
+            "an unrelated Bash login profile was sourced"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn extra_shell_pane_preserves_a_non_posix_interactive_shell() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_fish = tmp.path().join("user shell").join("fish");
+        std::fs::create_dir(fake_fish.parent().unwrap()).unwrap();
+        let reached = tmp.path().join("fish-reached");
+        std::fs::write(
+            &fake_fish,
+            format!("#!/bin/sh\nprintf reached > '{}'\n", reached.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_fish, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let original_shell = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", &fake_fish);
+        let command = Instance::new("test", tmp.path().to_str().unwrap())
+            .build_extra_pane_command("shell", tmp.path().to_str().unwrap())
+            .unwrap()
+            .command;
+        match original_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &command])
+            .env("HOME", tmp.path())
+            .output()
+            .unwrap();
+
+        assert!(command.starts_with("'bash' -lc '"));
+        assert!(output.status.success(), "command failed: {output:?}");
+        assert!(reached.exists(), "the configured fish path was not reached");
     }
 
     #[test]

@@ -58,7 +58,9 @@ A chosen directory SHALL be used as given. It SHALL NOT be worktree-resolved, be
 
 The directory the right pane starts in SHALL be recorded on that pane's durable slot, so restart and cold-start recovery return the pane to it rather than to the session's directory.
 
-The one exception is a `shell` right pane that simply inherited the session's directory. It runs no agent, holds no identity and produces no capture, and recovery would place it in that directory regardless, so it SHALL stay slotless rather than cost the session one of its four slots. A `shell` right pane given a directory of its own SHALL be recorded like any other, because that directory is held nowhere else. See the `agent-session-store` capability for the rule and its restart behavior.
+Every right pane that AoE launches through the New Session flow SHALL receive a durable slot at launch, including a `shell` pane that inherits the session's directory. A managed shell pane SHALL therefore participate in restart and cold-start recovery and SHALL count toward the session's four-slot limit. A raw tmux split that the user creates while attached remains outside this managed lifecycle. See the `agent-session-store` capability for the durable record rules.
+
+A `shell` right pane SHALL use the user's configured POSIX shell as its login wrapper rather than a fixed, unrelated login shell. The final host-side interactive shell SHALL preserve the user's configured shell even when the POSIX wrapper must fall back for fish, nu, or PowerShell. Both shell executable paths SHALL be safely quoted. When the user's shell is zsh, launching the right pane SHALL NOT source Bash login configuration before starting zsh.
 
 #### Scenario: Right pane tool creates horizontal split
 - **WHEN** the user submits the new session dialog with Right Pane set to a tool (e.g., "claude")
@@ -72,11 +74,28 @@ The one exception is a `shell` right pane that simply inherited the session's di
 - **THEN** the shell in the right pane SHALL start with its working directory set to `/some/project`
 - **AND** running `pwd` in the right pane SHALL output `/some/project`
 
+#### Scenario: Shell right pane uses the user's shell directly
+- **WHEN** the user's configured shell is `/bin/zsh`
+- **AND** the user creates a session whose right pane tool is "shell"
+- **THEN** the right pane SHALL reach an interactive zsh through the user-shell launch path
+- **AND** Bash login configuration SHALL NOT be sourced before zsh starts
+
+#### Scenario: A non-POSIX user shell survives the wrapper fallback
+- **WHEN** the user's configured shell is fish, nu, or PowerShell
+- **AND** the user creates a session whose right pane tool is "shell"
+- **THEN** the POSIX login wrapper MAY fall back to Bash
+- **AND** the final interactive shell SHALL still be the user's configured shell
+
+#### Scenario: Managed shell right pane is durable in the session directory
+- **WHEN** AoE launches a shell right pane with no separate right pane path
+- **THEN** the pane SHALL receive a durable slot carrying the session directory
+- **AND** restart and cold-start recovery SHALL include that shell pane
+
 #### Scenario: Right pane starts in its own chosen directory
 - **WHEN** the user creates a new session with path set to `/some/project`
 - **AND** the right pane tool is set to "shell"
 - **AND** the right pane path is set to `/some/other`
-- **THEN** the shell in the right pane SHALL start with its working directory set to `/some/other`
+- **THEN** the shell in the right pane SHALL start in `/some/other`
 - **AND** the left pane SHALL still start in `/some/project`
 
 #### Scenario: Right pane working directory matches left pane after worktree resolution
@@ -213,4 +232,3 @@ The fork dialog SHALL include a right pane path field alongside its right pane t
 #### Scenario: Forked right pane defaults to the parent's directory
 - **WHEN** the user forks a session with a right pane tool and no right pane path
 - **THEN** the forked session's right pane SHALL start in the parent's working directory
-

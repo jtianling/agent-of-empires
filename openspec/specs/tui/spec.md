@@ -380,11 +380,11 @@ The TUI home screen SHALL support the `%` keybinding to add a managed agent pane
 | Trigger | Result | Directory |
 | --- | --- | --- |
 | `prefix + %`, attached | raw tmux pane, no agent, no slot record, no identity key | forced to `@aoe_project_path` |
-| `%`, home screen | managed agent pane: agent launched, slot recorded, identity key minted | chosen in the dialog, defaulting to the session's |
+| `%`, home screen | managed agent or shell pane: tool launched, slot recorded, identity key minted when applicable | chosen in the dialog, defaulting to the session's |
 
-A `shell` pane added through `%` is slot-recorded only when it was given a directory of its own; one that inherited the session's stays slotless, per the `agent-session-store` capability. It is still a managed pane in every other respect: AoE launched it, and it is the dialog that made its directory a choice.
+A `shell` pane added through `%` SHALL always receive a durable slot, including when it inherits the session's directory. It is a managed pane because AoE launched it through a dialog that assigns its tool and directory, and restart and cold-start recovery SHALL include it. The shell slot holds no identity key and no native conversation id.
 
-A hand-made split has no interface through which to name a directory, so inheriting the session's is the only useful behavior available to it. A managed pane is created through a dialog, which is such an interface. The distinction is whether the pane was given a chance to be configured, not whether the user was attached.
+A hand-made split has no interface through which to name a directory, so inheriting the session's is the only useful behavior available to it. A managed pane is created through a dialog, which is such an interface. The distinction is whether AoE created the pane as part of its managed lifecycle, not whether the user was attached.
 
 `%` SHALL remain a home-screen keybinding only. It SHALL NOT be added to the tmux key tables, so `prefix + %` keeps its existing meaning inside attached sessions.
 
@@ -401,6 +401,11 @@ A hand-made split has no interface through which to name a directory, so inherit
 #### Scenario: The dialog offers a different agent and directory
 - **WHEN** the user presses `%` and chooses an agent other than the session's tool and a different working directory
 - **THEN** the added pane SHALL run that agent in that directory
+
+#### Scenario: Percent adds a durable shell pane in the session directory
+- **WHEN** the user presses `%`, chooses shell, and keeps the default session directory
+- **THEN** the added shell pane SHALL receive a durable slot carrying the session directory
+- **AND** restart and cold-start recovery SHALL include it
 
 #### Scenario: Percent on a session that is not running
 - **WHEN** the user presses `%` on a selected session whose tmux session does not exist
