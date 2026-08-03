@@ -505,17 +505,19 @@ impl App {
                         // own persisted native_session_id. Per-pane failures are
                         // recorded but do not abort sibling restarts.
                         let mut slots = slots;
+                        let mut identity_origins = std::collections::HashMap::new();
                         if let (Some(inst), Ok(store)) = (
                             self.home.get_instance(&id),
                             crate::db::Store::open_with_schema(&profile),
                         ) {
-                            inst.ensure_slot_identity_keys(&store, &mut slots);
+                            identity_origins = inst.ensure_slot_identity_keys(&store, &mut slots);
                         }
 
                         let mut outcomes = Vec::new();
                         self.home.mutate_instance(&id, |inst| {
                             inst.restart_in_flight = true;
-                            outcomes = inst.resume_all_tracked_panes(&slots, mode);
+                            outcomes =
+                                inst.resume_all_tracked_panes(&slots, mode, &identity_origins);
                             inst.restart_in_flight = false;
                         });
 
@@ -633,11 +635,11 @@ impl App {
         }
 
         let mut slots = slots;
-        inst.ensure_slot_identity_keys(&store, &mut slots);
+        let identity_origins = inst.ensure_slot_identity_keys(&store, &mut slots);
 
         let mut result = Ok(Vec::new());
         self.home.mutate_instance(id, |inst| {
-            result = inst.recover_from_slots(&store, &slots, mode);
+            result = inst.recover_from_slots(&store, &slots, mode, &identity_origins);
         });
 
         match result {
