@@ -25,8 +25,8 @@ pub use groups::{
 };
 pub(crate) use instance::{extract_resume_token, is_valid_resume_token};
 pub use instance::{
-    Instance, PaneResumeOutcome, RestartMode, SandboxInfo, Status, StatusUpdateOptions,
-    TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
+    IdentityKeyOrigin, Instance, PaneResumeOutcome, RestartMode, SandboxInfo, Status,
+    StatusUpdateOptions, TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
 };
 pub use pane::{PaneConfig, PaneDraft, PaneWorktreeInfo, PaneWorktreeRequest};
 pub use profile_config::{

@@ -504,6 +504,34 @@ pub fn capture_pane_screen(pane: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// The `send-keys` argv that types `text` into `pane` verbatim.
+///
+/// `-l` is what keeps a word that also names a tmux key (`Enter`, `Up`, `C-c`)
+/// from being delivered as that key instead of as the characters it spells.
+fn literal_send_args<'a>(pane: &'a str, text: &'a str) -> [&'a str; 5] {
+    ["send-keys", "-t", pane, "-l", text]
+}
+
+/// Type `text` into an explicit tmux pane target and submit it, the way a user
+/// typing into that pane would.
+///
+/// The Enter is a second send rather than part of the literal text: sent
+/// literally a newline is a character in the input, not the act of submitting
+/// it. This is the same pairing [`Session::send_keys`] uses, applied to a pane
+/// the caller names instead of the session's first pane.
+pub fn submit_text_to_pane_target(pane: &str, text: &str) -> Result<()> {
+    let output = crate::tmux::tmux_command()
+        .args(literal_send_args(pane, text))
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to submit text to pane {}: {}", pane, stderr.trim());
+    }
+
+    send_keys_to_pane_target(pane, &["Enter"])
+}
+
 /// Send raw key strings to an explicit tmux pane target. No-op for empty input.
 pub fn send_keys_to_pane_target(pane: &str, keys: &[&str]) -> Result<()> {
     if keys.is_empty() {
@@ -795,6 +823,23 @@ mod tests {
                 .args(["kill-session", "-t", &self.0])
                 .output();
         }
+    }
+
+    /// The `-l` and the pane target are the two things that make this a
+    /// submission into one named pane rather than a keystroke broadcast: without
+    /// `-l` a text like `Enter` arrives as the Enter key, and without an explicit
+    /// `-t` the send lands wherever tmux considers current.
+    #[test]
+    fn literal_send_targets_the_named_pane_and_does_not_interpret_the_text() {
+        assert_eq!(
+            literal_send_args("%42", "reconnect"),
+            ["send-keys", "-t", "%42", "-l", "reconnect"]
+        );
+        assert_eq!(
+            literal_send_args("%7", "Enter"),
+            ["send-keys", "-t", "%7", "-l", "Enter"],
+            "text that spells a key name must still travel as text"
+        );
     }
 
     /// Helper: check if tmux is available for tests that need it

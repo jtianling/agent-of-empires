@@ -1,5 +1,6 @@
 //! Session instance definition and operations
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -331,6 +332,84 @@ pub(crate) fn auto_confirm_step(screen: &str, answered: &[AutoConfirmPrompt]) ->
     match present.find(|prompt| !answered.contains(prompt)) {
         Some(prompt) => AutoConfirmStep::Answer(prompt),
         None => AutoConfirmStep::AlreadyAnswered,
+    }
+}
+
+/// Where the xats identity key a launch injects into a pane came from.
+///
+/// Only a key that predates the launch can name an identity to reclaim. One
+/// minted for this launch has no history behind it, and a pane running without a
+/// key has nothing to reclaim with -- so the three cases are kept apart rather
+/// than collapsed into "has a key".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityKeyOrigin {
+    /// The pane carries no key: Cross Agent Team is off, the session is
+    /// sandboxed, or the key could not be persisted.
+    Absent,
+    /// This launch minted the key.
+    Minted,
+    /// The key predates this launch.
+    Existing,
+}
+
+impl IdentityKeyOrigin {
+    /// Classify a key this launch did not mint.
+    fn of_existing_key(key: &str) -> Self {
+        if key.is_empty() {
+            Self::Absent
+        } else {
+            Self::Existing
+        }
+    }
+
+    /// Whether the pane may still answer to an xats identity established before
+    /// this launch.
+    fn reclaims_identity(self) -> bool {
+        matches!(self, Self::Existing)
+    }
+}
+
+/// One slot's key origin, defaulting to absent for a slot the caller did not
+/// report on. Not knowing is not evidence that the pane owns an identity.
+fn slot_identity_origin(origins: &HashMap<i64, IdentityKeyOrigin>, slot: i64) -> IdentityKeyOrigin {
+    origins
+        .get(&slot)
+        .copied()
+        .unwrap_or(IdentityKeyOrigin::Absent)
+}
+
+/// A pane a launch just started, paired with whether it may reclaim an xats
+/// identity once Claude is accepting input.
+///
+/// The flag travels with the pane because it is only knowable at launch time,
+/// and it is per pane because one relaunch can mint a key for one pane while
+/// reusing another's.
+pub(crate) struct LaunchedClaudePane {
+    pane: String,
+    reclaims_identity: bool,
+}
+
+/// What a pane is asked, verbatim, to reclaim its xats identity. The word is the
+/// xats reconnect tool's own trigger, and what a user types by hand today.
+const XATS_RECONNECT_REQUEST: &str = "reconnect";
+
+/// Ask a relaunched Claude to reclaim the xats identity its key still names.
+///
+/// Submitted as a real user turn because Claude's xats binding lives inside its
+/// MCP session: no launch argument can declare it from outside, and the startup
+/// hint that would prompt Claude to do it arrives once and goes unanswered. The
+/// key is already in the pane's environment, so the request carries no arguments
+/// and AoE never learns the agent name it restores.
+///
+/// A failure is logged and dropped. The pane is then exactly where it is today:
+/// interactive, and one manual `reconnect` away from its identity.
+fn submit_xats_reconnect(pane: &str) {
+    if let Err(err) = tmux::submit_text_to_pane_target(pane, XATS_RECONNECT_REQUEST) {
+        tracing::warn!(
+            "Could not ask pane {} to reclaim its xats identity: {}",
+            pane,
+            err
+        );
     }
 }
 
@@ -885,9 +964,20 @@ impl Instance {
     /// Mint this instance's primary-pane xats identity key if Cross Agent Team is
     /// enabled and it has none yet. Write-once: every later launch reuses it, which
     /// is what lets a launch that discards the conversation keep the identity.
-    fn ensure_xats_identity_key(&mut self) {
-        if self.is_cross_agent_team() && self.xats_identity_key.is_none() {
-            self.xats_identity_key = Some(Uuid::new_v4().to_string());
+    ///
+    /// Reports where the key the launch will inject came from, which is the only
+    /// moment that distinction exists: afterwards the key is simply present, and
+    /// nothing on it says whether this launch wrote it.
+    fn ensure_xats_identity_key(&mut self) -> IdentityKeyOrigin {
+        if !self.is_cross_agent_team() {
+            return IdentityKeyOrigin::Absent;
+        }
+        match self.xats_identity_key.as_deref() {
+            None => {
+                self.xats_identity_key = Some(Uuid::new_v4().to_string());
+                IdentityKeyOrigin::Minted
+            }
+            Some(key) => IdentityKeyOrigin::of_existing_key(key),
         }
     }
 
@@ -905,29 +995,59 @@ impl Instance {
     /// This is where a hand-started pane first gets a key: adoption is
     /// observe-first, so AoE never built that pane's original command and could
     /// not have injected one earlier.
+    ///
+    /// Reports each slot's key origin, keyed by slot index rather than by
+    /// position: callers reorder the slots before launching them.
     pub fn ensure_slot_identity_keys(
         &self,
         store: &crate::db::Store,
         slots: &mut [crate::db::AgentSlot],
-    ) {
-        for slot in slots.iter_mut().filter(|s| self.slot_needs_identity_key(s)) {
-            let key = Uuid::new_v4().to_string();
-            match store.upsert_agent_slot_config(
-                &slot.instance_id,
-                slot.slot,
-                &slot.pane_config(),
-                &slot.native_session_id,
-                &slot.tmux_pane,
-                &key,
-                slot.last_seen_at,
-            ) {
-                Ok(()) => slot.xats_identity_key = key,
-                Err(e) => tracing::warn!(
+    ) -> HashMap<i64, IdentityKeyOrigin> {
+        slots
+            .iter_mut()
+            .map(|slot| {
+                let origin = if self.slot_needs_identity_key(slot) {
+                    Self::mint_slot_identity_key(store, slot, &self.title)
+                } else {
+                    IdentityKeyOrigin::of_existing_key(&slot.xats_identity_key)
+                };
+                (slot.slot, origin)
+            })
+            .collect()
+    }
+
+    /// Mint and persist one slot's key.
+    ///
+    /// A key that could not be persisted is reported as absent, not as minted: it
+    /// will not be there next launch, so nothing may be built on it having been
+    /// this pane's. The slot keeps its empty key and the next launch mints again.
+    fn mint_slot_identity_key(
+        store: &crate::db::Store,
+        slot: &mut crate::db::AgentSlot,
+        title: &str,
+    ) -> IdentityKeyOrigin {
+        let key = Uuid::new_v4().to_string();
+        match store.upsert_agent_slot_config(
+            &slot.instance_id,
+            slot.slot,
+            &slot.pane_config(),
+            &slot.native_session_id,
+            &slot.tmux_pane,
+            &key,
+            slot.last_seen_at,
+        ) {
+            Ok(()) => {
+                slot.xats_identity_key = key;
+                IdentityKeyOrigin::Minted
+            }
+            Err(e) => {
+                tracing::warn!(
                     "Could not persist xats identity key for slot {} of '{}': {}",
                     slot.slot,
-                    self.title,
+                    title,
                     e
-                ),
+                );
+                IdentityKeyOrigin::Absent
             }
         }
     }
@@ -977,7 +1097,31 @@ impl Instance {
         !self.is_sandboxed() && pane.tool == "claude" && pane.cross_agent_team
     }
 
-    fn run_auto_confirm(&self, target: impl PaneConfigTarget) {
+    /// Whether a pane this launch started should be asked to reclaim an xats
+    /// identity once it is ready.
+    ///
+    /// Same gate as the startup screens: only a non-sandboxed Claude pane in
+    /// Cross Agent Team mode has an xats identity at all. On top of that, only a
+    /// key the launch reused can name one -- a pane whose key was minted here is
+    /// launching for the first time, and asking it to reclaim would either find
+    /// nothing or take a name the user has not chosen yet.
+    fn reclaims_xats_identity(&self, pane: &PaneConfig, origin: IdentityKeyOrigin) -> bool {
+        self.agent_pane_has_claude_prompts(pane) && origin.reclaims_identity()
+    }
+
+    fn launched_claude_pane(
+        &self,
+        pane_id: String,
+        config: &PaneConfig,
+        origin: IdentityKeyOrigin,
+    ) -> LaunchedClaudePane {
+        LaunchedClaudePane {
+            reclaims_identity: self.reclaims_xats_identity(config, origin),
+            pane: pane_id,
+        }
+    }
+
+    fn run_auto_confirm(&self, target: impl PaneConfigTarget, origin: IdentityKeyOrigin) {
         let pane = target.resolve_for(self);
         if !self.agent_pane_has_claude_prompts(&pane) {
             return;
@@ -986,13 +1130,22 @@ impl Instance {
         let Some(agent_pane) = tmux::get_agent_pane_id(&session_name) else {
             return;
         };
-        self.auto_confirm_panes(&[agent_pane]);
+        self.auto_confirm_panes(&[self.launched_claude_pane(agent_pane, &pane, origin)]);
     }
 
     pub fn auto_confirm_launched_pane(&self, pane_id: &str, pane: &PaneConfig) {
-        if self.agent_pane_has_claude_prompts(pane) {
-            self.auto_confirm_panes(&[pane_id.to_string()]);
+        if !self.agent_pane_has_claude_prompts(pane) {
+            return;
         }
+        // This entry point serves a pane being added, whose key was minted for
+        // it moments ago (see `build_extra_pane_command`). There is no earlier
+        // identity behind it, and the one a sibling holds is not this pane's to
+        // reclaim.
+        self.auto_confirm_panes(&[self.launched_claude_pane(
+            pane_id.to_string(),
+            pane,
+            IdentityKeyOrigin::Minted,
+        )]);
     }
 
     #[cfg(test)]
@@ -1033,21 +1186,31 @@ impl Instance {
     /// one that will never come. Per-question answering is what makes that wait
     /// safe: watching longer cannot produce a second Enter for a question
     /// already answered.
-    fn auto_confirm_panes(&self, panes: &[String]) {
+    ///
+    /// The readiness signal is also what gates the xats reconnect request: a pane
+    /// that carried its key in from a previous launch is asked to reclaim its
+    /// identity there, and only there. Having run out of known questions does not
+    /// stand in for it -- that says only that AoE has nothing left to ask, while
+    /// Claude may still be starting, and a request submitted then is delivered to
+    /// whatever the pane is doing instead. A pane that never becomes ready is
+    /// left alone, as it is today.
+    fn auto_confirm_panes(&self, panes: &[LaunchedClaudePane]) {
         if panes.is_empty() {
             return;
         }
 
         struct PaneConfirm<'a> {
             pane: &'a str,
+            reclaims_identity: bool,
             answered: Vec<AutoConfirmPrompt>,
             settled: bool,
         }
 
         let mut tracked: Vec<PaneConfirm> = panes
             .iter()
-            .map(|pane| PaneConfirm {
-                pane: pane.as_str(),
+            .map(|entry| PaneConfirm {
+                pane: entry.pane.as_str(),
+                reclaims_identity: entry.reclaims_identity,
                 answered: Vec::new(),
                 settled: false,
             })
@@ -1076,6 +1239,11 @@ impl Instance {
                     // are behind it. This is the completion signal; waiting out
                     // the deadline here would make every launch pay for it.
                     entry.settled = true;
+                    if entry.reclaims_identity {
+                        // Settled panes are skipped from here on, so this runs
+                        // at most once per pane.
+                        submit_xats_reconnect(entry.pane);
+                    }
                     continue;
                 }
                 let AutoConfirmStep::Answer(prompt) = step else {
@@ -1362,7 +1530,7 @@ impl Instance {
         launch: SessionLaunch,
     ) -> Result<()> {
         self.clear_resume_token();
-        self.ensure_xats_identity_key();
+        let identity_origin = self.ensure_xats_identity_key();
         let session = self.tmux_session()?;
 
         if session.exists() {
@@ -1446,7 +1614,7 @@ impl Instance {
             }
             // The pane was just created running this instance's tool, so there
             // is nothing to read back off it.
-            self.run_auto_confirm(&self.primary_pane);
+            self.run_auto_confirm(&self.primary_pane, identity_origin);
         }
 
         // Apply all configured tmux options (status bar, mouse, etc.)
@@ -2227,7 +2395,7 @@ impl Instance {
     }
 
     fn respawn_single_pane_inner(&mut self, mode: RestartMode) -> Result<()> {
-        self.ensure_xats_identity_key();
+        let identity_origin = self.ensure_xats_identity_key();
         // `Fresh` bypasses `resolved_resume_token` entirely so the command never
         // carries the stored `resume_token`; `Resume` keeps the existing fallback.
         let effective_resume_token = match mode {
@@ -2266,7 +2434,7 @@ impl Instance {
         session.kill_agent_pane_process_tree();
         session.respawn_agent_pane(&cmd, &self.project_path, !self.expects_shell())?;
 
-        self.run_auto_confirm(&pane);
+        self.run_auto_confirm(&pane, identity_origin);
 
         self.apply_tmux_options(&Self::current_profile());
 
@@ -2286,10 +2454,18 @@ impl Instance {
     /// does not abort the remaining panes. Returns the per-pane outcomes (one per
     /// slot). When the instance has no tracked slots the caller falls back to the
     /// single-pane respawn behavior.
+    ///
+    /// `identity_origins` is what the caller's [`ensure_slot_identity_keys`]
+    /// reported, keyed by slot index: a slot missing from it is treated as
+    /// keyless, so an unread store costs a reconnect rather than sending one to a
+    /// pane that may not own the identity.
+    ///
+    /// [`ensure_slot_identity_keys`]: Self::ensure_slot_identity_keys
     pub fn resume_all_tracked_panes(
         &mut self,
         slots: &[crate::db::AgentSlot],
         mode: RestartMode,
+        identity_origins: &HashMap<i64, IdentityKeyOrigin>,
     ) -> Vec<PaneResumeOutcome> {
         self.status = Status::Restarting;
         self.last_error = None;
@@ -2308,7 +2484,7 @@ impl Instance {
 
         let mut outcomes = Vec::with_capacity(slots.len());
         let mut primary_respawned = false;
-        let mut confirmable_panes: Vec<String> = Vec::new();
+        let mut confirmable_panes: Vec<LaunchedClaudePane> = Vec::new();
         for slot in slots {
             let native_session_id = self.slot_resume_source(slot, mode);
             let pane = slot.pane_config();
@@ -2326,7 +2502,11 @@ impl Instance {
                 && pane.cross_agent_team
                 && !matches!(outcome, PaneResumeOutcome::Error(_))
             {
-                confirmable_panes.push(slot.tmux_pane.clone());
+                confirmable_panes.push(self.launched_claude_pane(
+                    slot.tmux_pane.clone(),
+                    &pane,
+                    slot_identity_origin(identity_origins, slot.slot),
+                ));
             }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
                 primary_respawned = true;
@@ -2398,6 +2578,7 @@ impl Instance {
         store: &crate::db::Store,
         slots: &[crate::db::AgentSlot],
         mode: RestartMode,
+        identity_origins: &HashMap<i64, IdentityKeyOrigin>,
     ) -> Result<Vec<PaneResumeOutcome>> {
         if slots.is_empty() {
             anyhow::bail!("no persisted slots to recover");
@@ -2456,7 +2637,7 @@ impl Instance {
         // which launches succeeded, and a pane whose launch failed has no Claude
         // in it to raise a startup screen -- handing it to auto-confirm would
         // spend the full timeout waiting for a prompt that cannot come.
-        let mut confirmable_panes: Vec<String> = Vec::new();
+        let mut confirmable_panes: Vec<LaunchedClaudePane> = Vec::new();
         for (slot, maybe_pane) in &paired {
             let Some(new_pane) = maybe_pane else {
                 outcomes.push(PaneResumeOutcome::Error(format!(
@@ -2478,7 +2659,11 @@ impl Instance {
                 && pane.cross_agent_team
                 && !matches!(outcome, PaneResumeOutcome::Error(_))
             {
-                confirmable_panes.push(new_pane.clone());
+                confirmable_panes.push(self.launched_claude_pane(
+                    new_pane.clone(),
+                    &pane,
+                    slot_identity_origin(identity_origins, slot.slot),
+                ));
             }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
                 primary_launched = true;
@@ -4357,12 +4542,12 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         inst.cross_agent_team = false;
-        inst.run_auto_confirm("claude");
+        inst.run_auto_confirm("claude", IdentityKeyOrigin::Existing);
 
         // Also a no-op for non-claude even if the flag is set.
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
-        inst.run_auto_confirm("codex");
+        inst.run_auto_confirm("codex", IdentityKeyOrigin::Existing);
     }
 
     /// A command override says the pane is meant to run something other than
@@ -4834,6 +5019,160 @@ mod tests {
             fork.xats_identity_key, inst.xats_identity_key,
             "a fork must mint its own identity key"
         );
+    }
+
+    /// A session whose Cross Agent Team state is set through the pane config the
+    /// launch paths read, rather than the legacy mirror fields.
+    fn xats_pane_instance(tool: &str) -> Instance {
+        let mut inst = Instance::new("test", "/tmp/project path");
+        inst.set_primary_pane_config(PaneConfig::new(tool, "/tmp/project path", false, true));
+        inst
+    }
+
+    fn temp_store() -> (tempfile::TempDir, crate::db::Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _) = crate::db::Store::open_with_schema_at(&tmp.path().join("aoe.db")).unwrap();
+        (tmp, store)
+    }
+
+    /// The distinction the reconnect decision rests on. It exists only at launch
+    /// time: once the key is written, nothing on it says which launch wrote it.
+    #[test]
+    fn identity_key_origin_separates_the_launch_that_minted_it() {
+        let mut inst = xats_pane_instance("claude");
+        assert_eq!(inst.ensure_xats_identity_key(), IdentityKeyOrigin::Minted);
+        assert_eq!(
+            inst.ensure_xats_identity_key(),
+            IdentityKeyOrigin::Existing,
+            "a later launch reuses the key, which is what makes an identity \
+             reclaimable"
+        );
+    }
+
+    #[test]
+    fn a_session_without_cross_agent_team_reports_no_identity_key() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        assert_eq!(inst.ensure_xats_identity_key(), IdentityKeyOrigin::Absent);
+    }
+
+    #[test]
+    fn slot_identity_keys_are_minted_once_then_reported_as_existing() {
+        let (_tmp, store) = temp_store();
+        let inst = xats_pane_instance("claude");
+        let mut slots = vec![slot(0, "")];
+
+        let first = inst.ensure_slot_identity_keys(&store, &mut slots);
+        assert_eq!(first.get(&0), Some(&IdentityKeyOrigin::Minted));
+        assert!(!slots[0].xats_identity_key.is_empty());
+
+        let second = inst.ensure_slot_identity_keys(&store, &mut slots);
+        assert_eq!(second.get(&0), Some(&IdentityKeyOrigin::Existing));
+    }
+
+    /// One relaunch can mint for one pane and reuse another's, so the decision
+    /// cannot be taken once for the batch. The slot that reused its key is asked
+    /// to reclaim; its sibling, launching for the first time, is not.
+    #[test]
+    fn one_relaunch_separates_the_slot_that_reused_its_key_from_its_sibling() {
+        let (_tmp, store) = temp_store();
+        let inst = xats_pane_instance("claude");
+        let mut slots = vec![slot(0, "key-from-an-earlier-launch"), slot(1, "")];
+
+        let origins = inst.ensure_slot_identity_keys(&store, &mut slots);
+
+        assert_eq!(origins.get(&0), Some(&IdentityKeyOrigin::Existing));
+        assert_eq!(origins.get(&1), Some(&IdentityKeyOrigin::Minted));
+
+        let pane = PaneConfig::new("claude", "/tmp", false, true);
+        assert!(inst.reclaims_xats_identity(&pane, slot_identity_origin(&origins, 0)));
+        assert!(!inst.reclaims_xats_identity(&pane, slot_identity_origin(&origins, 1)));
+    }
+
+    /// A slot the caller never reported on is not evidence that its pane owns an
+    /// identity, so it is left alone rather than asked to reclaim one.
+    #[test]
+    fn an_unreported_slot_is_never_asked_to_reclaim_an_identity() {
+        let origins = HashMap::new();
+        assert_eq!(slot_identity_origin(&origins, 0), IdentityKeyOrigin::Absent);
+    }
+
+    /// A key that did not reach the store will not be there next launch, so
+    /// nothing may be built on it having been this pane's. An out-of-range slot
+    /// is the store's own rejection, not a stubbed one.
+    #[test]
+    fn a_key_that_could_not_be_persisted_is_not_reported_as_reusable() {
+        let (_tmp, store) = temp_store();
+        let inst = xats_pane_instance("claude");
+        let rejected = crate::db::MAX_SLOT + 1;
+        let mut slots = vec![slot(rejected, "")];
+
+        let origins = inst.ensure_slot_identity_keys(&store, &mut slots);
+
+        assert_eq!(origins.get(&rejected), Some(&IdentityKeyOrigin::Absent));
+        assert!(
+            slots[0].xats_identity_key.is_empty(),
+            "an unpersisted key must not be handed to the launch either"
+        );
+        assert!(!origins[&rejected].reclaims_identity());
+    }
+
+    #[test]
+    fn a_relaunched_claude_pane_reusing_its_key_reclaims_its_identity() {
+        let inst = xats_pane_instance("claude");
+        let pane = PaneConfig::new("claude", "/tmp", false, true);
+        assert!(inst.reclaims_xats_identity(&pane, IdentityKeyOrigin::Existing));
+    }
+
+    /// Codex binds through pane pre-registration before its process starts, so it
+    /// never needs asking, and text typed at it lands in its conversation.
+    #[test]
+    fn a_codex_pane_is_never_asked_to_reclaim_an_identity() {
+        let inst = xats_pane_instance("codex");
+        let pane = PaneConfig::new("codex", "/tmp", false, true);
+        assert!(!inst.reclaims_xats_identity(&pane, IdentityKeyOrigin::Existing));
+    }
+
+    #[test]
+    fn a_pane_without_cross_agent_team_is_never_asked_to_reclaim_an_identity() {
+        let inst = xats_pane_instance("claude");
+        let pane = PaneConfig::new("claude", "/tmp", false, false);
+        assert!(!inst.reclaims_xats_identity(&pane, IdentityKeyOrigin::Existing));
+    }
+
+    #[test]
+    fn a_sandboxed_session_is_never_asked_to_reclaim_an_identity() {
+        let mut inst = xats_pane_instance("claude");
+        inst.sandbox_info = Some(SandboxInfo {
+            enabled: true,
+            container_id: None,
+            image: "test-image".to_string(),
+            container_name: "test".to_string(),
+            created_at: None,
+            extra_env: None,
+            custom_instruction: None,
+        });
+        let pane = PaneConfig::new("claude", "/tmp", false, true);
+        assert!(!inst.reclaims_xats_identity(&pane, IdentityKeyOrigin::Existing));
+    }
+
+    /// Fork and new-from-selection both start keyless, so their first launch
+    /// mints. Asking either to reclaim would put two live panes behind one xats
+    /// name, which is the state the daemon cannot resolve.
+    #[test]
+    fn a_freshly_minted_key_is_never_asked_to_reclaim_an_identity() {
+        let mut inst = xats_pane_instance("claude");
+        inst.ensure_xats_identity_key();
+        inst.resume_token = Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string());
+
+        let mut fork = inst.create_fork("forked".to_string(), None).unwrap();
+        let forked = fork.ensure_xats_identity_key();
+        assert_eq!(forked, IdentityKeyOrigin::Minted);
+        assert!(!fork.reclaims_xats_identity(fork.primary_pane_config(), forked));
+
+        let mut built = xats_pane_instance("claude");
+        let first = built.ensure_xats_identity_key();
+        assert_eq!(first, IdentityKeyOrigin::Minted);
+        assert!(!built.reclaims_xats_identity(built.primary_pane_config(), first));
     }
 
     #[test]
