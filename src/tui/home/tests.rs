@@ -1014,6 +1014,33 @@ fn test_codex_fork_not_ready_hint_points_to_resume_restart() {
 
 #[test]
 #[serial]
+fn test_managed_host_opencode_fork_fails_closed() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let storage = Storage::new("test").unwrap();
+    let mut inst = Instance::new("opencodesession", "/tmp/opencode");
+    let mut pane = inst.primary_pane_config().clone();
+    pane.tool = "opencode".to_string();
+    inst.set_primary_pane_config(pane);
+    storage.save(&[inst]).unwrap();
+    let tools = AvailableTools::with_tools(&["opencode"]);
+    let mut view =
+        HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
+    view.update_selected();
+
+    view.handle_key(key(KeyCode::Char('f')));
+
+    let dialog = view
+        .info_dialog
+        .as_ref()
+        .expect("Fork Not Supported dialog");
+    assert_eq!(dialog.title(), "Fork Not Supported");
+    assert!(dialog.message().contains("exact-session runtime fork"));
+    assert!(view.fork_dialog.is_none());
+}
+
+#[test]
+#[serial]
 fn test_has_dialog_returns_true_for_rename_dialog() {
     let mut env = create_test_env_with_sessions(1);
     env.view.update_selected();

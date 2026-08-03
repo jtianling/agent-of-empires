@@ -135,7 +135,7 @@ pub struct SessionConfig {
     #[serde(default = "default_cross_agent_team_channel")]
     pub cross_agent_team_channel: String,
 
-    /// Per-agent extra arguments appended after the binary (e.g., opencode = "--port 8080")
+    /// Per-agent extra arguments appended after the binary (e.g., opencode = "--model provider/model")
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub agent_extra_args: HashMap<String, String>,
 

@@ -18,11 +18,36 @@ pub mod reconcile;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 /// Highest valid agent slot index. Slots are constrained to `0..=MAX_SLOT`
 /// (at most four panes tracked per session).
 pub const MAX_SLOT: i64 = 3;
+
+/// Largest integer that round-trips exactly through JSON-based control planes.
+pub const MAX_XATS_RUNTIME_GENERATION: i64 = 9_007_199_254_740_991;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimePreparationMode {
+    Fresh,
+    Resume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedSlotRuntime {
+    pub generation: i64,
+    pub native_session_id: String,
+    pub xats_identity_key: String,
+}
+
+enum AvailableExtraSlot {
+    Missing(i64),
+    Stale {
+        slot: i64,
+        generation: i64,
+        tmux_pane: String,
+    },
+}
 
 /// How long an event row is kept. The stream is diagnostic only; nothing in the
 /// codebase reads it back, so the window just has to cover a plausible debugging
@@ -569,6 +594,207 @@ impl Store {
             .slots)
     }
 
+    /// Atomically advance one slot's xats runtime generation. Fresh preparation
+    /// clears that slot's conversation in the same statement; resume preserves it.
+    pub fn prepare_opencode_runtime(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        mode: RuntimePreparationMode,
+    ) -> Result<PreparedSlotRuntime> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        let clear_session = mode == RuntimePreparationMode::Fresh;
+        let transaction = self.conn.unchecked_transaction()?;
+        let (prepared, old_tmux_pane) = transaction
+            .query_row(
+                "UPDATE agent_slot SET \
+                 xats_runtime_generation = xats_runtime_generation + 1, \
+                 native_session_id = CASE WHEN ?3 THEN '' ELSE native_session_id END \
+                 WHERE instance_id = ?1 AND slot = ?2 \
+                   AND xats_runtime_generation >= 0 \
+                   AND xats_runtime_generation < ?4 \
+                 RETURNING xats_runtime_generation, native_session_id, xats_identity_key, \
+                           tmux_pane",
+                rusqlite::params![
+                    instance_id,
+                    slot,
+                    clear_session,
+                    MAX_XATS_RUNTIME_GENERATION
+                ],
+                |row| {
+                    Ok((
+                        PreparedSlotRuntime {
+                            generation: row.get(0)?,
+                            native_session_id: row.get(1)?,
+                            xats_identity_key: row.get(2)?,
+                        },
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "preparing OpenCode runtime for instance '{}' slot {}",
+                    instance_id, slot
+                )
+            })?;
+        if clear_session && !old_tmux_pane.is_empty() {
+            transaction.execute(
+                "DELETE FROM pane_live WHERE tmux_pane = ?1",
+                [old_tmux_pane],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(prepared)
+    }
+
+    pub fn prepare_new_opencode_runtime(
+        &self,
+        instance_id: &str,
+        pane: &crate::session::PaneConfig,
+        identity_key: &str,
+        live_pane_ids: &[String],
+        last_seen_at: i64,
+    ) -> Result<(i64, PreparedSlotRuntime)> {
+        pane.validate()?;
+        if pane.tool != "opencode" {
+            anyhow::bail!("new OpenCode runtime slot requires an OpenCode pane");
+        }
+        let worktree_info = serialize_pane_worktree(pane.worktree.as_ref())?;
+        let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let available = select_available_extra_slot(&transaction, instance_id, live_pane_ids)?;
+        let (slot, generation) = write_new_opencode_slot(
+            &transaction,
+            available,
+            instance_id,
+            pane,
+            identity_key,
+            &worktree_info,
+            last_seen_at,
+        )?;
+        transaction.commit()?;
+        Ok((
+            slot,
+            PreparedSlotRuntime {
+                generation,
+                native_session_id: String::new(),
+                xats_identity_key: identity_key.to_string(),
+            },
+        ))
+    }
+
+    /// Bind a pane id to a slot provisioned before tmux create/split without
+    /// disturbing its prepared generation or exact session state.
+    pub fn bind_prepared_slot_pane(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        generation: i64,
+        identity_key: &str,
+        tmux_pane: &str,
+        last_seen_at: i64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE agent_slot SET tmux_pane = ?1, last_seen_at = ?2 \
+             WHERE instance_id = ?3 AND slot = ?4 AND agent = 'opencode' \
+               AND xats_runtime_generation = ?5 AND xats_identity_key = ?6 \
+               AND tmux_pane = '' AND native_session_id = ''",
+            rusqlite::params![
+                tmux_pane,
+                last_seen_at,
+                instance_id,
+                slot,
+                generation,
+                identity_key,
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!(
+                "prepared slot {} for instance '{}' was not found",
+                slot,
+                instance_id
+            );
+        }
+        Ok(())
+    }
+
+    pub fn rollback_unbound_opencode_slot(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        generation: i64,
+        identity_key: &str,
+    ) -> Result<()> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        let changed = self.conn.execute(
+            "DELETE FROM agent_slot \
+             WHERE instance_id = ?1 AND slot = ?2 AND agent = 'opencode' \
+               AND tmux_pane = '' AND native_session_id = '' \
+               AND xats_runtime_generation = ?3 \
+               AND xats_identity_key = ?4",
+            rusqlite::params![instance_id, slot, generation, identity_key],
+        )?;
+        if changed != 1 {
+            anyhow::bail!(
+                "prepared OpenCode slot {} for instance '{}' no longer matches rollback token",
+                slot,
+                instance_id
+            );
+        }
+        Ok(())
+    }
+
+    /// Record the exact OpenCode session only while the target slot still owns
+    /// the generation that launched this runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_opencode_runtime_session(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        generation: i64,
+        tmux_pane: &str,
+        native_session_id: &str,
+        cwd: &str,
+        updated_at: i64,
+    ) -> Result<bool> {
+        if !(0..=MAX_SLOT).contains(&slot) {
+            anyhow::bail!("slot {} out of range 0..={}", slot, MAX_SLOT);
+        }
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agent_slot SET native_session_id = ?1, tmux_pane = ?2, \
+             last_seen_at = ?4 \
+             WHERE instance_id = ?5 AND slot = ?6 AND agent = 'opencode' \
+               AND xats_runtime_generation = ?7 AND cwd = ?3 AND tmux_pane = ?2",
+            rusqlite::params![
+                native_session_id,
+                tmux_pane,
+                cwd,
+                updated_at,
+                instance_id,
+                slot,
+                generation
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO pane_live (tmux_pane, agent, native_session_id, cwd, updated_at) \
+             VALUES (?1, 'opencode', ?2, ?3, ?4) \
+             ON CONFLICT(tmux_pane) DO UPDATE SET \
+             agent = excluded.agent, native_session_id = excluded.native_session_id, \
+             cwd = excluded.cwd, updated_at = excluded.updated_at",
+            rusqlite::params![tmux_pane, native_session_id, cwd, updated_at],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     /// Read slots and report records that could not safely be recovered.
     pub fn read_slots_for_instance_with_diagnostics(
         &self,
@@ -600,7 +826,8 @@ impl Store {
     fn read_raw_slots_for_instance(&self, instance_id: &str) -> Result<(Vec<RawAgentSlot>, usize)> {
         let mut stmt = self.conn.prepare(
             "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, \
-             xats_identity_key, yolo_mode, cross_agent_team, worktree_info, last_seen_at \
+             xats_identity_key, xats_runtime_generation, yolo_mode, cross_agent_team, \
+             worktree_info, last_seen_at \
              FROM agent_slot WHERE instance_id = ?1 ORDER BY slot",
         )?;
         let rows = stmt.query_map([instance_id], |r| {
@@ -612,10 +839,11 @@ impl Store {
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
-                r.get::<_, bool>(7)?,
+                r.get::<_, i64>(7)?,
                 r.get::<_, bool>(8)?,
-                r.get::<_, String>(9)?,
-                r.get::<_, i64>(10)?,
+                r.get::<_, bool>(9)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, i64>(11)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -641,6 +869,7 @@ impl Store {
                 cwd,
                 tmux_pane,
                 xats_identity_key,
+                xats_runtime_generation,
                 yolo_mode,
                 cross_agent_team,
                 worktree_json,
@@ -654,6 +883,7 @@ impl Store {
                 cwd,
                 tmux_pane,
                 xats_identity_key,
+                xats_runtime_generation,
                 yolo_mode,
                 cross_agent_team,
                 worktree_json,
@@ -700,6 +930,7 @@ impl Store {
             cwd: row.cwd,
             tmux_pane: row.tmux_pane,
             xats_identity_key: row.xats_identity_key,
+            xats_runtime_generation: row.xats_runtime_generation,
             yolo_mode: normalized.yolo_mode,
             cross_agent_team: normalized.cross_agent_team,
             worktree_info: normalized.worktree,
@@ -866,6 +1097,7 @@ struct RawAgentSlot {
     cwd: String,
     tmux_pane: String,
     xats_identity_key: String,
+    xats_runtime_generation: i64,
     yolo_mode: bool,
     cross_agent_team: bool,
     worktree_json: String,
@@ -895,6 +1127,7 @@ pub struct AgentSlot {
     /// has none. Every managed pane, including primary, owns its key through its
     /// durable slot record.
     pub xats_identity_key: String,
+    pub xats_runtime_generation: i64,
     pub yolo_mode: bool,
     pub cross_agent_team: bool,
     pub worktree_info: Option<crate::session::PaneWorktreeInfo>,
@@ -911,6 +1144,151 @@ impl AgentSlot {
             worktree: self.worktree_info.clone(),
         }
     }
+}
+
+fn select_available_extra_slot(
+    conn: &Connection,
+    instance_id: &str,
+    live_pane_ids: &[String],
+) -> Result<AvailableExtraSlot> {
+    let mut statement = conn.prepare(
+        "SELECT slot, xats_runtime_generation, tmux_pane FROM agent_slot \
+         WHERE instance_id = ?1 AND slot BETWEEN 1 AND ?2 ORDER BY slot",
+    )?;
+    let rows = statement
+        .query_map(rusqlite::params![instance_id, MAX_SLOT], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for slot in 1..=MAX_SLOT {
+        if !rows.iter().any(|(candidate, _, _)| *candidate == slot) {
+            return Ok(AvailableExtraSlot::Missing(slot));
+        }
+    }
+    rows.into_iter()
+        .find(|(_, generation, tmux_pane)| {
+            !tmux_pane.is_empty()
+                && *generation < MAX_XATS_RUNTIME_GENERATION
+                && !live_pane_ids.iter().any(|live| live == tmux_pane)
+        })
+        .map(|(slot, generation, tmux_pane)| AvailableExtraSlot::Stale {
+            slot,
+            generation,
+            tmux_pane,
+        })
+        .ok_or_else(|| anyhow::anyhow!("no available managed pane slot"))
+}
+
+fn write_new_opencode_slot(
+    transaction: &Transaction<'_>,
+    available: AvailableExtraSlot,
+    instance_id: &str,
+    pane: &crate::session::PaneConfig,
+    identity_key: &str,
+    worktree_info: &str,
+    last_seen_at: i64,
+) -> Result<(i64, i64)> {
+    match available {
+        AvailableExtraSlot::Missing(slot) => insert_new_opencode_slot(
+            transaction,
+            instance_id,
+            slot,
+            pane,
+            identity_key,
+            worktree_info,
+            last_seen_at,
+        ),
+        AvailableExtraSlot::Stale {
+            slot,
+            generation,
+            tmux_pane,
+        } => replace_stale_opencode_slot(
+            transaction,
+            instance_id,
+            slot,
+            generation,
+            &tmux_pane,
+            pane,
+            identity_key,
+            worktree_info,
+            last_seen_at,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_new_opencode_slot(
+    transaction: &Transaction<'_>,
+    instance_id: &str,
+    slot: i64,
+    pane: &crate::session::PaneConfig,
+    identity_key: &str,
+    worktree_info: &str,
+    last_seen_at: i64,
+) -> Result<(i64, i64)> {
+    transaction.execute(
+        "INSERT INTO agent_slot \
+         (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
+          xats_runtime_generation, yolo_mode, cross_agent_team, worktree_info, \
+          pane_config_version, last_seen_at) \
+         VALUES (?1, ?2, 'opencode', '', ?3, '', ?4, 1, ?5, ?6, ?7, 1, ?8)",
+        rusqlite::params![
+            instance_id,
+            slot,
+            pane.working_dir,
+            identity_key,
+            pane.yolo_mode,
+            pane.cross_agent_team,
+            worktree_info,
+            last_seen_at,
+        ],
+    )?;
+    Ok((slot, 1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_stale_opencode_slot(
+    transaction: &Transaction<'_>,
+    instance_id: &str,
+    slot: i64,
+    generation: i64,
+    tmux_pane: &str,
+    pane: &crate::session::PaneConfig,
+    identity_key: &str,
+    worktree_info: &str,
+    last_seen_at: i64,
+) -> Result<(i64, i64)> {
+    let next_generation = generation + 1;
+    let changed = transaction.execute(
+        "UPDATE agent_slot SET agent = 'opencode', native_session_id = '', cwd = ?1, \
+         tmux_pane = '', xats_identity_key = ?2, xats_runtime_generation = ?3, \
+         yolo_mode = ?4, cross_agent_team = ?5, worktree_info = ?6, \
+         pane_config_version = 1, last_seen_at = ?7 \
+         WHERE instance_id = ?8 AND slot = ?9 AND xats_runtime_generation = ?10 \
+           AND tmux_pane = ?11",
+        rusqlite::params![
+            pane.working_dir,
+            identity_key,
+            next_generation,
+            pane.yolo_mode,
+            pane.cross_agent_team,
+            worktree_info,
+            last_seen_at,
+            instance_id,
+            slot,
+            generation,
+            tmux_pane,
+        ],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("stale OpenCode slot reservation lost its compare-and-swap");
+    }
+    transaction.execute("DELETE FROM pane_live WHERE tmux_pane = ?1", [tmux_pane])?;
+    Ok((slot, next_generation))
 }
 
 fn serialize_pane_worktree(info: Option<&crate::session::PaneWorktreeInfo>) -> Result<String> {
@@ -967,6 +1345,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             cwd                TEXT NOT NULL,
             tmux_pane          TEXT NOT NULL DEFAULT '',
             xats_identity_key  TEXT NOT NULL DEFAULT '',
+            xats_runtime_generation INTEGER NOT NULL DEFAULT 0
+                CHECK (xats_runtime_generation >= 0 AND xats_runtime_generation <= 9007199254740991),
             yolo_mode          INTEGER NOT NULL DEFAULT 0,
             cross_agent_team   INTEGER NOT NULL DEFAULT 0,
             worktree_info      TEXT NOT NULL DEFAULT '',
@@ -1062,6 +1442,10 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
     for (column, definition) in [
         ("tmux_pane", "TEXT NOT NULL DEFAULT ''"),
         ("xats_identity_key", "TEXT NOT NULL DEFAULT ''"),
+        (
+            "xats_runtime_generation",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (xats_runtime_generation >= 0 AND xats_runtime_generation <= 9007199254740991)",
+        ),
         ("yolo_mode", "INTEGER NOT NULL DEFAULT 0"),
         ("cross_agent_team", "INTEGER NOT NULL DEFAULT 0"),
         ("worktree_info", "TEXT NOT NULL DEFAULT ''"),
@@ -1337,6 +1721,7 @@ mod tests {
         for column in [
             "tmux_pane",
             "xats_identity_key",
+            "xats_runtime_generation",
             "yolo_mode",
             "cross_agent_team",
             "worktree_info",
@@ -1350,6 +1735,7 @@ mod tests {
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].native_session_id, "sess");
         assert_eq!(slots[0].tmux_pane, "");
+        assert_eq!(slots[0].xats_runtime_generation, 0);
     }
 
     #[test]
@@ -1891,5 +2277,301 @@ mod tests {
         );
         assert!(slots[1].xats_identity_key.is_empty());
         assert!(slots[1].worktree_info.is_none());
+    }
+
+    #[test]
+    fn opencode_runtime_preparation_is_per_slot_and_mode_aware() {
+        let (_tmp, store) = temp_store();
+        for slot in 0..=2 {
+            store
+                .upsert_agent_slot(
+                    "inst",
+                    slot,
+                    "opencode",
+                    &format!("ses_{slot}"),
+                    "/tmp",
+                    &format!("%{slot}"),
+                    &format!("key-{slot}"),
+                    1,
+                )
+                .unwrap();
+        }
+
+        let resumed = store
+            .prepare_opencode_runtime("inst", 1, RuntimePreparationMode::Resume)
+            .unwrap();
+        assert_eq!(resumed.generation, 1);
+        assert_eq!(resumed.native_session_id, "ses_1");
+        assert_eq!(resumed.xats_identity_key, "key-1");
+
+        store
+            .upsert_pane_live("%1", "opencode", "ses_1", "/tmp", 2)
+            .unwrap();
+        let fresh = store
+            .prepare_opencode_runtime("inst", 1, RuntimePreparationMode::Fresh)
+            .unwrap();
+        assert_eq!(fresh.generation, 2);
+        assert!(fresh.native_session_id.is_empty());
+        assert_eq!(fresh.xats_identity_key, "key-1");
+        assert!(store.read_pane_live("%1").unwrap().is_none());
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].xats_runtime_generation, 0);
+        assert_eq!(slots[1].xats_runtime_generation, 2);
+        assert_eq!(slots[2].xats_runtime_generation, 0);
+        assert_eq!(slots[0].native_session_id, "ses_0");
+        assert_eq!(slots[2].native_session_id, "ses_2");
+    }
+
+    #[test]
+    fn new_opencode_runtime_reservations_do_not_reuse_pending_slots() {
+        let (_tmp, store) = temp_store();
+        let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, false);
+
+        let (first_slot, first) = store
+            .prepare_new_opencode_runtime("inst", &pane, "", &[], 1)
+            .unwrap();
+        let (second_slot, second) = store
+            .prepare_new_opencode_runtime("inst", &pane, "", &[], 2)
+            .unwrap();
+
+        assert_eq!((first_slot, first.generation), (1, 1));
+        assert_eq!((second_slot, second.generation), (2, 1));
+    }
+
+    #[test]
+    fn new_opencode_runtime_reclaims_only_a_non_live_bound_slot() {
+        let (_tmp, store) = temp_store();
+        for (slot, tmux_pane) in [(1, "%dead"), (2, "%live-2"), (3, "%live-3")] {
+            store
+                .upsert_agent_slot(
+                    "inst",
+                    slot,
+                    "claude",
+                    "old-session",
+                    "/old",
+                    tmux_pane,
+                    "old-key",
+                    1,
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE agent_slot SET xats_runtime_generation = 7 \
+                 WHERE instance_id = 'inst' AND slot = 1",
+                [],
+            )
+            .unwrap();
+        store
+            .upsert_pane_live("%dead", "claude", "old-session", "/old", 1)
+            .unwrap();
+        let pane = crate::session::PaneConfig::new("opencode", "/new", false, true);
+        let live = ["%live-2".to_string(), "%live-3".to_string()];
+
+        let (slot, prepared) = store
+            .prepare_new_opencode_runtime("inst", &pane, "new-key", &live, 2)
+            .unwrap();
+
+        assert_eq!((slot, prepared.generation), (1, 8));
+        let row = &store.read_slots_for_instance("inst").unwrap()[0];
+        assert_eq!(row.agent, "opencode");
+        assert!(row.native_session_id.is_empty());
+        assert!(row.tmux_pane.is_empty());
+        assert_eq!(row.xats_identity_key, "new-key");
+        assert!(store.read_pane_live("%dead").unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_opencode_runtime_reservations_get_distinct_slots() {
+        use std::sync::{Arc, Barrier};
+
+        let (tmp, first_store) = temp_store();
+        let second_store = Store::open_at(&tmp.path().join("aoe.db")).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let prepare = |store: Store, key: &'static str, barrier: Arc<Barrier>| {
+            std::thread::spawn(move || {
+                let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, true);
+                barrier.wait();
+                store
+                    .prepare_new_opencode_runtime("inst", &pane, key, &[], 1)
+                    .unwrap()
+                    .0
+            })
+        };
+        let first = prepare(first_store, "key-a", Arc::clone(&barrier));
+        let second = prepare(second_store, "key-b", Arc::clone(&barrier));
+        barrier.wait();
+
+        let mut slots = [first.join().unwrap(), second.join().unwrap()];
+        slots.sort();
+        assert_eq!(slots, [1, 2]);
+    }
+
+    #[test]
+    fn prepared_opencode_bind_requires_exact_reservation_token() {
+        let (_tmp, store) = temp_store();
+        let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, true);
+        let (slot, prepared) = store
+            .prepare_new_opencode_runtime("inst", &pane, "key", &[], 1)
+            .unwrap();
+
+        assert!(store
+            .bind_prepared_slot_pane("inst", slot, prepared.generation + 1, "key", "%1", 2,)
+            .is_err());
+        assert!(store
+            .bind_prepared_slot_pane("inst", slot, prepared.generation, "other-key", "%1", 2,)
+            .is_err());
+        store
+            .bind_prepared_slot_pane("inst", slot, prepared.generation, "key", "%1", 2)
+            .unwrap();
+        assert_eq!(
+            store.read_slots_for_instance("inst").unwrap()[0].tmux_pane,
+            "%1"
+        );
+    }
+
+    #[test]
+    fn ordinary_upserts_and_capture_preserve_runtime_generation() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 0, "opencode", "ses_old", "/tmp", "%1", "key", 1)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE agent_slot SET xats_runtime_generation = 8 \
+                 WHERE instance_id = 'inst' AND slot = 0",
+                [],
+            )
+            .unwrap();
+
+        store
+            .upsert_agent_slot_capture("inst", 0, "opencode", "ses_new", "/tmp", "%1", "", 2)
+            .unwrap();
+        store
+            .upsert_agent_slot("inst", 0, "opencode", "ses_new", "/tmp", "%1", "key", 3)
+            .unwrap();
+
+        let slot = &store.read_slots_for_instance("inst").unwrap()[0];
+        assert_eq!(slot.xats_runtime_generation, 8);
+        assert_eq!(slot.native_session_id, "ses_new");
+    }
+
+    #[test]
+    fn exact_opencode_capture_rejects_stale_generation() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 0, "opencode", "ses_old", "/tmp", "%1", "key", 1)
+            .unwrap();
+        let prepared = store
+            .prepare_opencode_runtime("inst", 0, RuntimePreparationMode::Fresh)
+            .unwrap();
+
+        assert!(!store
+            .record_opencode_runtime_session(
+                "inst",
+                0,
+                prepared.generation - 1,
+                "%1",
+                "ses_stale",
+                "/tmp",
+                2,
+            )
+            .unwrap());
+        assert!(store.read_pane_live("%1").unwrap().is_none());
+        assert!(store.read_slots_for_instance("inst").unwrap()[0]
+            .native_session_id
+            .is_empty());
+
+        assert!(!store
+            .record_opencode_runtime_session(
+                "inst",
+                0,
+                prepared.generation,
+                "%2",
+                "ses_wrong_pane",
+                "/tmp",
+                3,
+            )
+            .unwrap());
+        assert!(store
+            .record_opencode_runtime_session(
+                "inst",
+                0,
+                prepared.generation,
+                "%1",
+                "ses_current",
+                "/tmp",
+                4,
+            )
+            .unwrap());
+        let slot = &store.read_slots_for_instance("inst").unwrap()[0];
+        assert_eq!(slot.native_session_id, "ses_current");
+        assert_eq!(slot.tmux_pane, "%1");
+    }
+
+    #[test]
+    fn prepared_opencode_slot_rollback_requires_exact_unbound_generation() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 1, "opencode", "", "/tmp", "", "key", 1)
+            .unwrap();
+        let prepared = store
+            .prepare_opencode_runtime("inst", 1, RuntimePreparationMode::Fresh)
+            .unwrap();
+
+        assert!(store
+            .rollback_unbound_opencode_slot("inst", 1, prepared.generation - 1, "key")
+            .is_err());
+        assert_eq!(store.read_slots_for_instance("inst").unwrap().len(), 1);
+
+        store
+            .conn
+            .execute(
+                "UPDATE agent_slot SET native_session_id = 'ses_ready' \
+                 WHERE instance_id = 'inst' AND slot = 1",
+                [],
+            )
+            .unwrap();
+        assert!(store
+            .rollback_unbound_opencode_slot("inst", 1, prepared.generation, "key")
+            .is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE agent_slot SET native_session_id = '' \
+                 WHERE instance_id = 'inst' AND slot = 1",
+                [],
+            )
+            .unwrap();
+
+        store
+            .rollback_unbound_opencode_slot("inst", 1, prepared.generation, "key")
+            .unwrap();
+        assert!(store.read_slots_for_instance("inst").unwrap().is_empty());
+    }
+
+    #[test]
+    fn schema_healing_does_not_reset_existing_generation() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 0, "opencode", "ses_a", "/tmp", "%1", "key", 1)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE agent_slot SET xats_runtime_generation = 17 \
+                 WHERE instance_id = 'inst' AND slot = 0",
+                [],
+            )
+            .unwrap();
+        ensure_schema(&store.conn).unwrap();
+        ensure_schema(&store.conn).unwrap();
+        assert_eq!(
+            store.read_slots_for_instance("inst").unwrap()[0].xats_runtime_generation,
+            17
+        );
     }
 }

@@ -35,7 +35,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("T", "Attach to terminal"),
                 ("n", "New session"),
                 ("N", "New from selection"),
-                ("f", "Fork session (claude/codex/opencode)"),
+                ("f", "Fork session (claude/codex/sandboxed opencode)"),
                 ("%", "Add agent pane, then attach"),
                 ("x", "Stop session"),
                 ("R", "Resume/recover panes, then attach"),

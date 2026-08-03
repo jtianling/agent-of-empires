@@ -66,7 +66,7 @@ struct HookStdin {
 /// this process. Such a call is therefore always unanswerable, so the check is
 /// in force only for a capture that carries a profile. It fails open, not shut,
 /// but it does not guard a hand-started agent that inherited no profile.
-fn pane_hosts_this_process(pane: &str) -> Option<bool> {
+pub(crate) fn pane_hosts_this_process(pane: &str) -> Option<bool> {
     let output = crate::tmux::tmux_command()
         .args(["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"])
         .output()

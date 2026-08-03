@@ -76,6 +76,67 @@ mod pane_level_command_tests {
     }
 
     #[test]
+    fn opencode_registry_launches_secondary_through_runtime_wrapper() {
+        let instance = Instance::new("test", "/tmp");
+        let pane = PaneConfig::new("opencode", "/tmp", false, false);
+        let command = instance
+            .build_pane_command(&pane, None, false, None)
+            .unwrap();
+
+        assert!(command.contains("__opencode-runtime"));
+        assert!(command.contains("--slot 1"));
+        assert!(!command.contains("opencode session list"));
+    }
+
+    #[test]
+    fn same_cwd_opencode_slots_keep_exact_runtime_values() {
+        let instance = Instance::new("test", "/tmp/shared");
+        let pane = PaneConfig::new("opencode", "/tmp/shared", false, true);
+        let left = OpenCodeRuntimeContext {
+            slot: 0,
+            generation: 4,
+            native_session_id: "ses_left".to_string(),
+            identity_key: "left-key".to_string(),
+        };
+        let right = OpenCodeRuntimeContext {
+            slot: 1,
+            generation: 9,
+            native_session_id: "ses_right".to_string(),
+            identity_key: "right-key".to_string(),
+        };
+
+        let left_command = instance
+            .build_pane_command_with_runtime(
+                &pane,
+                Some("ses_left"),
+                true,
+                Some("left-key"),
+                Some(&left),
+            )
+            .unwrap();
+        let right_command = instance
+            .build_pane_command_with_runtime(
+                &pane,
+                Some("ses_right"),
+                false,
+                Some("right-key"),
+                Some(&right),
+            )
+            .unwrap();
+
+        assert!(left_command.contains("--slot 0 --generation 4"));
+        assert!(left_command.contains("--resume-session"));
+        assert!(left_command.contains("ses_left"));
+        assert!(left_command.contains("left-key"));
+        assert!(!left_command.contains("ses_right"));
+        assert!(right_command.contains("--slot 1 --generation 9"));
+        assert!(right_command.contains("--resume-session"));
+        assert!(right_command.contains("ses_right"));
+        assert!(right_command.contains("right-key"));
+        assert!(!right_command.contains("ses_left"));
+    }
+
+    #[test]
     fn fresh_resume_plan_keeps_target_pane_flags() {
         let instance = Instance::new("test", "/tmp");
         let pane = PaneConfig::new("claude", "/tmp/right", true, true);
@@ -820,7 +881,7 @@ impl Instance {
     }
 
     pub fn supports_cross_agent_team_tool(tool: &str) -> bool {
-        matches!(tool, "claude" | "codex")
+        matches!(tool, "claude" | "codex" | "opencode")
     }
 
     /// Whether this instance launches with tool-specific Cross Agent Team behavior.
@@ -1421,8 +1482,36 @@ impl Instance {
             }
         }
 
+        let opencode_runtime = if launch == SessionLaunch::Agent
+            && self.primary_pane.tool == "opencode"
+            && !self.is_sandboxed()
+        {
+            if self.has_command_override() {
+                anyhow::bail!("Managed host OpenCode does not support a custom command override");
+            }
+            let store = crate::db::Store::open_with_schema(&Self::current_profile())?;
+            Some(self.prepare_opencode_runtime_context(
+                &store,
+                0,
+                &self.primary_pane,
+                "",
+                self.xats_identity_key.as_deref().unwrap_or(""),
+                RestartMode::Fresh,
+            )?)
+        } else {
+            None
+        };
         let cmd = match launch {
-            SessionLaunch::Agent => self.build_agent_command(None),
+            SessionLaunch::Agent => match opencode_runtime.as_ref() {
+                Some(runtime) => self.build_pane_command_with_runtime(
+                    &self.primary_pane,
+                    None,
+                    true,
+                    Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
+                    Some(runtime),
+                ),
+                None => self.build_agent_command(None),
+            },
             SessionLaunch::Placeholder => None,
         };
         tracing::debug!(
@@ -1440,7 +1529,7 @@ impl Instance {
         )?;
 
         if launch == SessionLaunch::Agent {
-            if let Err(error) = self.record_primary_launch_slot() {
+            if let Err(error) = self.record_primary_launch_slot(opencode_runtime.as_ref()) {
                 let _ = session.kill();
                 return Err(error);
             }
@@ -1467,19 +1556,34 @@ impl Instance {
         Ok(())
     }
 
-    fn record_primary_launch_slot(&self) -> Result<()> {
+    fn record_primary_launch_slot(
+        &self,
+        opencode_runtime: Option<&OpenCodeRuntimeContext>,
+    ) -> Result<()> {
         let profile = Self::current_profile();
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
         let pane_id = tmux::get_agent_pane_id(&session_name)
             .ok_or_else(|| anyhow::anyhow!("primary pane id was not recorded"))?;
-        crate::db::Store::open_with_schema(&profile)?.record_launched_slot_config_if_absent(
-            &self.id,
-            0,
-            &self.primary_pane,
-            &pane_id,
-            self.xats_identity_key.as_deref().unwrap_or(""),
-            crate::db::now_unix(),
-        )
+        let store = crate::db::Store::open_with_schema(&profile)?;
+        if let Some(runtime) = opencode_runtime {
+            store.bind_prepared_slot_pane(
+                &self.id,
+                runtime.slot,
+                runtime.generation,
+                &runtime.identity_key,
+                &pane_id,
+                crate::db::now_unix(),
+            )
+        } else {
+            store.record_launched_slot_config_if_absent(
+                &self.id,
+                0,
+                &self.primary_pane,
+                &pane_id,
+                self.xats_identity_key.as_deref().unwrap_or(""),
+                crate::db::now_unix(),
+            )
+        }
     }
 
     /// Build the agent launch command string. Pure command construction with no
@@ -1523,6 +1627,8 @@ impl Instance {
             return Some(ExtraPaneLaunch {
                 command: self.build_extra_shell_pane_command(&pane.working_dir),
                 identity_key: String::new(),
+                prepared_slot: None,
+                prepared_generation: None,
             });
         }
         let identity_key = if pane.cross_agent_team
@@ -1542,6 +1648,167 @@ impl Instance {
         Some(ExtraPaneLaunch {
             command,
             identity_key,
+            prepared_slot: None,
+            prepared_generation: None,
+        })
+    }
+
+    pub fn prepare_extra_pane_config_command(
+        &self,
+        profile: &str,
+        session_name: &str,
+        pane: &PaneConfig,
+    ) -> Result<ExtraPaneLaunch> {
+        if pane.tool != "opencode" || self.is_sandboxed() {
+            return self
+                .build_extra_pane_config_command(pane)
+                .ok_or_else(|| anyhow::anyhow!("No launch command for pane tool '{}'", pane.tool));
+        }
+        let store = crate::db::Store::open_with_schema(profile)?;
+        let identity_key = if pane.cross_agent_team {
+            Uuid::new_v4().to_string()
+        } else {
+            String::new()
+        };
+        let live_pane_ids = crate::db::reconcile::live_session_pane_ids(session_name)?;
+        let (slot, prepared) = store.prepare_new_opencode_runtime(
+            &self.id,
+            pane,
+            &identity_key,
+            &live_pane_ids,
+            crate::db::now_unix(),
+        )?;
+        let runtime = OpenCodeRuntimeContext {
+            slot,
+            generation: prepared.generation,
+            native_session_id: prepared.native_session_id,
+            identity_key: prepared.xats_identity_key,
+        };
+        if pane.cross_agent_team {
+            let reserved = crate::opencode_xats::reserve(&runtime.identity_key, runtime.generation);
+            if let Err(error) = reserved {
+                let cleanup = store.rollback_unbound_opencode_slot(
+                    &self.id,
+                    slot,
+                    runtime.generation,
+                    &runtime.identity_key,
+                );
+                return Err(append_rollback_error(error, cleanup));
+            }
+        }
+        let command = self.build_pane_command_with_runtime(
+            pane,
+            None,
+            false,
+            Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
+            Some(&runtime),
+        );
+        let command = match command {
+            Some(command) => command,
+            None => {
+                let error = anyhow::anyhow!("Could not build OpenCode runtime command");
+                let cleanup = store.rollback_unbound_opencode_slot(
+                    &self.id,
+                    slot,
+                    runtime.generation,
+                    &runtime.identity_key,
+                );
+                return Err(append_rollback_error(error, cleanup));
+            }
+        };
+        Ok(ExtraPaneLaunch {
+            command,
+            identity_key: runtime.identity_key,
+            prepared_slot: Some(slot),
+            prepared_generation: Some(runtime.generation),
+        })
+    }
+
+    pub fn rollback_prepared_extra_pane(
+        &self,
+        profile: &str,
+        launch: &ExtraPaneLaunch,
+    ) -> Result<()> {
+        let (Some(slot), Some(generation)) = (launch.prepared_slot, launch.prepared_generation)
+        else {
+            return Ok(());
+        };
+        crate::db::Store::open_with_schema(profile)?.rollback_unbound_opencode_slot(
+            &self.id,
+            slot,
+            generation,
+            &launch.identity_key,
+        )
+    }
+
+    fn prepare_opencode_runtime_context(
+        &self,
+        store: &crate::db::Store,
+        slot: i64,
+        pane: &PaneConfig,
+        tmux_pane: &str,
+        identity_key: &str,
+        mode: RestartMode,
+    ) -> Result<OpenCodeRuntimeContext> {
+        if pane.tool != "opencode" || self.is_sandboxed() {
+            anyhow::bail!("OpenCode runtime preparation requires a host OpenCode pane");
+        }
+        let now = crate::db::now_unix();
+        store.record_launched_slot_config_if_absent(
+            &self.id,
+            slot,
+            pane,
+            tmux_pane,
+            identity_key,
+            now,
+        )?;
+        let existing = store
+            .read_slots_for_instance(&self.id)?
+            .into_iter()
+            .find(|row| row.slot == slot)
+            .ok_or_else(|| anyhow::anyhow!("OpenCode slot {slot} was not provisioned"))?;
+        let identity_key = if existing.xats_identity_key.is_empty() {
+            identity_key
+        } else {
+            &existing.xats_identity_key
+        };
+        store.upsert_agent_slot_config(
+            &self.id,
+            slot,
+            pane,
+            &existing.native_session_id,
+            tmux_pane,
+            identity_key,
+            now,
+        )?;
+        if mode == RestartMode::Resume {
+            crate::opencode_runtime::validate_session_id(&existing.native_session_id)
+                .with_context(|| format!("OpenCode slot {slot} has no valid session to resume"))?;
+        }
+        let prepared = store.prepare_opencode_runtime(
+            &self.id,
+            slot,
+            match mode {
+                RestartMode::Fresh => crate::db::RuntimePreparationMode::Fresh,
+                RestartMode::Resume => crate::db::RuntimePreparationMode::Resume,
+            },
+        )?;
+        debug_assert!(
+            mode != RestartMode::Resume
+                || crate::opencode_runtime::validate_session_id(&prepared.native_session_id)
+                    .is_ok()
+        );
+        if pane.cross_agent_team {
+            if prepared.xats_identity_key.is_empty() {
+                anyhow::bail!("OpenCode Cross Agent Team slot {slot} has no identity key");
+            }
+            crate::opencode_xats::reserve(&prepared.xats_identity_key, prepared.generation)?;
+        }
+        Ok(OpenCodeRuntimeContext {
+            slot,
+            generation: prepared.generation,
+            native_session_id: prepared.native_session_id,
+            identity_key: prepared.xats_identity_key,
         })
     }
 
@@ -1683,6 +1950,23 @@ impl Instance {
         is_primary: bool,
         slot_identity_key: Option<&str>,
     ) -> Option<String> {
+        self.build_pane_command_with_runtime(
+            target,
+            resume_token,
+            is_primary,
+            slot_identity_key,
+            None,
+        )
+    }
+
+    fn build_pane_command_with_runtime(
+        &self,
+        target: impl PaneConfigTarget,
+        resume_token: Option<&str>,
+        is_primary: bool,
+        slot_identity_key: Option<&str>,
+        opencode_runtime: Option<&OpenCodeRuntimeContext>,
+    ) -> Option<String> {
         let pane = target.resolve_for(self);
         let agent = crate::agents::get_agent(&pane.tool);
         let is_primary = is_primary && self.pane_runs_instance_tool(&pane.tool);
@@ -1727,11 +2011,20 @@ impl Instance {
             ))
         } else {
             let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
-            let has_override = is_primary && !self.command.is_empty();
+            let has_override = is_primary && self.has_command_override();
 
             if !has_override {
-                agent.filter(|a| a.supports_host_launch).map(|a| {
-                    let mut cmd = self.build_base_pane_command(Some(a), resume_token, is_primary);
+                agent.filter(|a| a.supports_host_launch).and_then(|a| {
+                    let mut cmd = if a.name == "opencode" {
+                        self.build_opencode_runtime_command(
+                            &pane,
+                            resume_token,
+                            is_primary,
+                            opencode_runtime,
+                        )?
+                    } else {
+                        self.build_base_pane_command(Some(a), resume_token, is_primary)
+                    };
                     let mut env_vars: Vec<(&str, &str)> = Vec::new();
                     if needs_instance_id {
                         env_vars.push(("AOE_INSTANCE_ID", &self.id));
@@ -1772,7 +2065,7 @@ impl Instance {
                     {
                         env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                     }
-                    wrap_command_ignore_suspend_with_env(&cmd, &env_vars)
+                    Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
                 })
             } else {
                 let mut cmd = self.build_base_pane_command(agent, resume_token, is_primary);
@@ -1822,6 +2115,69 @@ impl Instance {
                 Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
             }
         }
+    }
+
+    fn build_opencode_runtime_command(
+        &self,
+        pane: &PaneConfig,
+        resume_session: Option<&str>,
+        is_primary: bool,
+        runtime: Option<&OpenCodeRuntimeContext>,
+    ) -> Option<String> {
+        let fallback = OpenCodeRuntimeContext {
+            slot: if is_primary { 0 } else { 1 },
+            generation: 0,
+            native_session_id: resume_session.unwrap_or_default().to_string(),
+            identity_key: String::new(),
+        };
+        let runtime = runtime.unwrap_or(&fallback);
+        if pane.cross_agent_team && runtime.generation == 0 {
+            return None;
+        }
+        let executable = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.to_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| "aoe".to_string());
+        let mut parts = vec![
+            shell_escape(&executable),
+            "__opencode-runtime".to_string(),
+            "--instance-id".to_string(),
+            shell_escape(&self.id),
+            "--slot".to_string(),
+            runtime.slot.to_string(),
+            "--generation".to_string(),
+            runtime.generation.to_string(),
+            "--working-directory".to_string(),
+            shell_escape(&pane.working_dir),
+        ];
+        let exact_session = resume_session
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                (!runtime.native_session_id.is_empty())
+                    .then_some(runtime.native_session_id.as_str())
+            });
+        if let Some(session_id) = exact_session {
+            if crate::opencode_runtime::validate_session_id(session_id).is_err() {
+                return None;
+            }
+            parts.push("--resume-session".to_string());
+            parts.push(shell_escape(session_id));
+        }
+        if pane.cross_agent_team {
+            parts.push("--cross-agent-team".to_string());
+        }
+        if is_primary && !self.extra_args.is_empty() {
+            let extra = crate::opencode_runtime::parse_and_validate_extra_args(&self.extra_args)
+                .map_err(|error| {
+                    tracing::error!("Invalid OpenCode extra args: {error:#}");
+                })
+                .ok()?;
+            if !extra.is_empty() {
+                parts.push("--".to_string());
+                parts.extend(extra.iter().map(|arg| shell_escape(arg)));
+            }
+        }
+        Some(parts.join(" "))
     }
 
     /// Build the bare tool command (binary + resume/fork/session-id flags +
@@ -1983,7 +2339,7 @@ impl Instance {
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", self.tool))?;
         if agent.fork_template.is_none() {
             anyhow::bail!(
-                "Fork is not supported for agent '{}'. Supported: claude, codex, opencode.",
+                "Fork is not supported for agent '{}'. Supported: claude, codex, and sandboxed opencode.",
                 self.tool
             );
         }
@@ -2016,6 +2372,9 @@ impl Instance {
                         "No active codex session to fork yet. Press 'R' (resume restart) on the parent to capture a resume token, then try again."
                     )
                 }),
+            "opencode" if !self.is_sandboxed() => anyhow::bail!(
+                "Fork is not supported for managed host OpenCode until exact-session runtime fork is available"
+            ),
             "opencode" => self.resolve_opencode_session_id(),
             other => anyhow::bail!("Fork is not supported for agent '{}'", other),
         }
@@ -2257,9 +2616,53 @@ impl Instance {
             }
             None => self.primary_pane.clone(),
         };
-        let cmd = match pane_agent {
-            Some(_) => self.build_pane_command(&pane, None, false, None),
-            None => self.build_agent_command(effective_resume_token.as_deref()),
+        let opencode_runtime = if pane.tool == "opencode" && !self.is_sandboxed() {
+            if pane_agent.is_none() && self.has_command_override() {
+                anyhow::bail!("Managed host OpenCode does not support a custom command override");
+            }
+            let profile = Self::current_profile();
+            let store = crate::db::Store::open_with_schema(&profile)?;
+            let pane_id =
+                tmux::get_agent_pane_id(&tmux::Session::generate_name(&self.id, &self.title))
+                    .ok_or_else(|| anyhow::anyhow!("primary pane id was not recorded"))?;
+            if !store
+                .read_slots_for_instance(&self.id)?
+                .iter()
+                .any(|slot| slot.slot == 0)
+            {
+                store.upsert_agent_slot_config(
+                    &self.id,
+                    0,
+                    &pane,
+                    effective_resume_token.as_deref().unwrap_or(""),
+                    &pane_id,
+                    self.xats_identity_key.as_deref().unwrap_or(""),
+                    crate::db::now_unix(),
+                )?;
+            }
+            Some(self.prepare_opencode_runtime_context(
+                &store,
+                0,
+                &pane,
+                &pane_id,
+                self.xats_identity_key.as_deref().unwrap_or(""),
+                mode,
+            )?)
+        } else {
+            None
+        };
+        let cmd = match opencode_runtime.as_ref() {
+            Some(runtime) => self.build_pane_command_with_runtime(
+                &pane,
+                Some(runtime.native_session_id.as_str()).filter(|id| !id.is_empty()),
+                pane_agent.is_none(),
+                Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
+                Some(runtime),
+            ),
+            None => match pane_agent {
+                Some(_) => self.build_pane_command(&pane, None, false, None),
+                None => self.build_agent_command(effective_resume_token.as_deref()),
+            },
         }
         .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
 
@@ -2310,15 +2713,53 @@ impl Instance {
         let mut primary_respawned = false;
         let mut confirmable_panes: Vec<String> = Vec::new();
         for slot in slots {
-            let native_session_id = self.slot_resume_source(slot, mode);
             let pane = slot.pane_config();
+            let mut native_session_id = self.slot_resume_source(slot, mode);
+            let mut identity_key = slot.xats_identity_key.clone();
+            let opencode_runtime = if pane.tool == "opencode" && !self.is_sandboxed() {
+                if slot.slot == 0 && self.has_command_override() {
+                    outcomes.push(PaneResumeOutcome::Error(
+                        "Managed host OpenCode does not support a custom command override"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                let store = match crate::db::Store::open_with_schema(&Self::current_profile()) {
+                    Ok(store) => store,
+                    Err(error) => {
+                        outcomes.push(PaneResumeOutcome::Error(format!("{error:#}")));
+                        continue;
+                    }
+                };
+                match self.prepare_opencode_runtime_context(
+                    &store,
+                    slot.slot,
+                    &pane,
+                    &slot.tmux_pane,
+                    &slot.xats_identity_key,
+                    mode,
+                ) {
+                    Ok(runtime) => {
+                        native_session_id = runtime.native_session_id.clone();
+                        identity_key = runtime.identity_key.clone();
+                        Some(runtime)
+                    }
+                    Err(error) => {
+                        outcomes.push(PaneResumeOutcome::Error(format!("{error:#}")));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let outcome = self.resume_launch_pane(
                 &pane,
                 &native_session_id,
                 &slot.tmux_pane,
                 slot.slot == 0,
                 mode,
-                Some(slot.xats_identity_key.as_str()),
+                Some(identity_key.as_str()).filter(|key| !key.is_empty()),
+                opencode_runtime.as_ref(),
             );
             // Every Claude pane this fan-out actually relaunched raises its own
             // startup screens, not just the primary one.
@@ -2466,13 +2907,45 @@ impl Instance {
                 continue;
             };
             let pane = slot.pane_config();
+            let mut native_session_id = slot.native_session_id.clone();
+            let mut identity_key = slot.xats_identity_key.clone();
+            let opencode_runtime = if pane.tool == "opencode" && !self.is_sandboxed() {
+                if slot.slot == 0 && self.has_command_override() {
+                    outcomes.push(PaneResumeOutcome::Error(
+                        "Managed host OpenCode does not support a custom command override"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                match self.prepare_opencode_runtime_context(
+                    store,
+                    slot.slot,
+                    &pane,
+                    new_pane,
+                    &slot.xats_identity_key,
+                    mode,
+                ) {
+                    Ok(runtime) => {
+                        native_session_id = runtime.native_session_id.clone();
+                        identity_key = runtime.identity_key.clone();
+                        Some(runtime)
+                    }
+                    Err(error) => {
+                        outcomes.push(PaneResumeOutcome::Error(format!("{error:#}")));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let outcome = self.resume_launch_pane(
                 &pane,
-                &slot.native_session_id,
+                &native_session_id,
                 new_pane,
                 slot.slot == 0,
                 mode,
-                Some(slot.xats_identity_key.as_str()),
+                Some(identity_key.as_str()).filter(|key| !key.is_empty()),
+                opencode_runtime.as_ref(),
             );
             if pane.tool == "claude"
                 && pane.cross_agent_team
@@ -2495,9 +2968,9 @@ impl Instance {
                 &slot.instance_id,
                 slot.slot,
                 &pane,
-                &slot.native_session_id,
+                &native_session_id,
                 new_pane,
-                &slot.xats_identity_key,
+                &identity_key,
                 now,
             ) {
                 tracing::error!(
@@ -3175,6 +3648,25 @@ pub struct ExtraPaneLaunch {
     /// Empty when the pane gets no identity: Cross Agent Team is off, or the
     /// pane runs a shell, which registers no identity at all.
     pub identity_key: String,
+    pub prepared_slot: Option<i64>,
+    pub prepared_generation: Option<i64>,
+}
+
+fn append_rollback_error(error: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => anyhow::anyhow!(
+            "{error:#}. Failed to roll back prepared OpenCode slot: {cleanup_error:#}"
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenCodeRuntimeContext {
+    slot: i64,
+    generation: i64,
+    native_session_id: String,
+    identity_key: String,
 }
 
 /// Outcome of resuming a single tracked pane.
@@ -3210,6 +3702,7 @@ impl Instance {
     /// value with shell metacharacters would otherwise be a command-injection
     /// vector. Only a `native_session_id` that passes `is_valid_resume_token` is
     /// ever interpolated into the resume flag.
+    #[cfg(test)]
     fn build_pane_resume_plan(
         &self,
         target: impl PaneConfigTarget,
@@ -3217,6 +3710,25 @@ impl Instance {
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
+    ) -> Option<(String, bool)> {
+        self.build_pane_resume_plan_with_runtime(
+            target,
+            native_session_id,
+            is_primary,
+            mode,
+            slot_identity_key,
+            None,
+        )
+    }
+
+    fn build_pane_resume_plan_with_runtime(
+        &self,
+        target: impl PaneConfigTarget,
+        native_session_id: &str,
+        is_primary: bool,
+        mode: RestartMode,
+        slot_identity_key: Option<&str>,
+        opencode_runtime: Option<&OpenCodeRuntimeContext>,
     ) -> Option<(String, bool)> {
         let pane = target.resolve_for(self);
         let Some(def) = crate::agents::get_agent(&pane.tool) else {
@@ -3232,8 +3744,13 @@ impl Instance {
             && def.resume.is_some()
             && is_valid_resume_token(native_session_id);
         let resume_token = resumed.then_some(native_session_id);
-        let command =
-            self.build_pane_command(&pane, resume_token, is_primary, slot_identity_key)?;
+        let command = self.build_pane_command_with_runtime(
+            &pane,
+            resume_token,
+            is_primary,
+            slot_identity_key,
+            opencode_runtime,
+        )?;
         Some((command, resumed))
     }
 
@@ -3258,7 +3775,17 @@ impl Instance {
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
+        opencode_runtime: Option<&OpenCodeRuntimeContext>,
     ) -> PaneResumeOutcome {
+        if pane.tool == "opencode"
+            && mode == RestartMode::Resume
+            && crate::opencode_runtime::validate_session_id(native_session_id).is_err()
+        {
+            return PaneResumeOutcome::Error(format!(
+                "OpenCode pane has no valid session to resume: '{}'",
+                native_session_id
+            ));
+        }
         // A shell slot is relaunched the way it was launched. The registry
         // entry's binary is the literal `shell`, which names no program, so the
         // launch path builds this pane through `build_extra_shell_pane_command`
@@ -3272,12 +3799,13 @@ impl Instance {
             // Build (and validate) the command before killing the pane, so a pane
             // we cannot safely respawn is left running rather than killed and
             // abandoned.
-            self.build_pane_resume_plan(
+            self.build_pane_resume_plan_with_runtime(
                 pane,
                 native_session_id,
                 is_primary,
                 mode,
                 slot_identity_key,
+                opencode_runtime,
             )
         };
         let Some((command, resumed)) = plan else {
@@ -3341,7 +3869,8 @@ pub(crate) fn extract_resume_token(output: &str, pattern: &str) -> Option<String
 }
 
 pub(crate) fn is_valid_resume_token(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    crate::opencode_runtime::validate_session_id(s).is_ok()
+        || (!s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
 }
 
 /// Pure recoverability predicate: an instance is recoverable when it has
@@ -4403,6 +4932,8 @@ mod tests {
         inst.tool = "codex".to_string();
         inst.command = "codex".to_string();
         inst.cross_agent_team = true;
+        inst.primary_pane.tool = "codex".to_string();
+        inst.primary_pane.cross_agent_team = true;
         inst
     }
 
@@ -4410,6 +4941,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/project path");
         inst.tool = "claude".to_string();
         inst.cross_agent_team = true;
+        inst.primary_pane.cross_agent_team = true;
         inst
     }
 
@@ -4440,6 +4972,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             tmux_pane: "%1".to_string(),
             xats_identity_key: key.to_string(),
+            xats_runtime_generation: 0,
             yolo_mode: false,
             cross_agent_team: true,
             worktree_info: None,
@@ -4726,6 +5259,7 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             tmux_pane: "%1".to_string(),
             xats_identity_key: String::new(),
+            xats_runtime_generation: 0,
             yolo_mode: false,
             cross_agent_team: true,
             worktree_info: None,
@@ -4840,7 +5374,7 @@ mod tests {
     fn test_cross_agent_team_supported_tool_helpers() {
         assert!(Instance::supports_cross_agent_team_tool("claude"));
         assert!(Instance::supports_cross_agent_team_tool("codex"));
-        assert!(!Instance::supports_cross_agent_team_tool("opencode"));
+        assert!(Instance::supports_cross_agent_team_tool("opencode"));
 
         let mut inst = codex_xats_instance();
         assert!(inst.is_cross_agent_team());
@@ -4848,6 +5382,7 @@ mod tests {
         // Claude pane adopted into it -- the instance's tool decides neither.
         assert!(inst.cross_agent_team_pane("codex"));
         assert!(inst.cross_agent_team_pane("claude"));
+        assert!(inst.cross_agent_team_pane("opencode"));
         assert!(!inst.cross_agent_team_pane("gemini"));
 
         inst.sandbox_info = Some(SandboxInfo {
@@ -6266,6 +6801,7 @@ mod tests {
             cwd: cwd.to_string(),
             tmux_pane: pane.to_string(),
             xats_identity_key: String::new(),
+            xats_runtime_generation: 0,
             yolo_mode: false,
             cross_agent_team: false,
             worktree_info: None,
@@ -6383,9 +6919,8 @@ mod tests {
     #[test]
     fn test_slot_resume_yolo_envvar_sets_env_var() {
         // A YOLO EnvVar agent resumed via the slot path must set the YOLO env var.
-        // opencode is sandbox-only on the real host path, so the host EnvVar branch
-        // is reached here through a command override equal to the binary (a real,
-        // reachable configuration that still exercises the EnvVar decoration).
+        // A legacy command equal to the registered binary still uses the managed
+        // host runtime and exercises the EnvVar decoration.
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "opencode".to_string();
         inst.command = "opencode".to_string();
@@ -7108,6 +7643,15 @@ mod tests {
             msg.contains("No active codex session"),
             "expected missing-token error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_create_fork_rejects_managed_host_opencode() {
+        let parent = parent_instance("opencode", Some("ses_parent"));
+        let error = parent
+            .create_fork("unsupported".to_string(), None)
+            .expect_err("managed host OpenCode fork should fail closed");
+        assert!(error.to_string().contains("exact-session runtime fork"));
     }
 
     #[test]

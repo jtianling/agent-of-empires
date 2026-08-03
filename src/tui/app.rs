@@ -1050,13 +1050,16 @@ impl App {
 
         // Splitting anyway would leave an empty pane the user has to close,
         // with nothing saying why it is empty.
-        let Some(launch) = inst.build_extra_pane_config_command(pane) else {
-            let detail = Self::append_pane_cleanup_error(
-                format!("No launch command for right pane tool '{}'.", pane.tool),
-                crate::session::builder::cleanup_resolved_pane(&resolved),
-            );
-            self.report_pane_not_created(&detail);
-            return false;
+        let launch = match inst.prepare_extra_pane_config_command(&profile, &session_name, pane) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let detail = Self::append_pane_cleanup_error(
+                    format!("{error:#}"),
+                    crate::session::builder::cleanup_resolved_pane(&resolved),
+                );
+                self.report_pane_not_created(&detail);
+                return false;
+            }
         };
 
         // The directory can be one the user typed, so a split that fails is
@@ -1072,6 +1075,10 @@ impl App {
             Err(e) => {
                 let detail = Self::append_pane_cleanup_error(
                     format!("{e:#}"),
+                    inst.rollback_prepared_extra_pane(&profile, &launch),
+                );
+                let detail = Self::append_pane_cleanup_error(
+                    detail,
                     crate::session::builder::cleanup_resolved_pane(&resolved),
                 );
                 self.report_pane_not_created(&detail);
@@ -1090,20 +1097,27 @@ impl App {
                 pane_id: &pane_id,
                 config: pane,
                 identity_key: &launch.identity_key,
+                prepared_slot: launch.prepared_slot,
+                prepared_generation: launch.prepared_generation,
             },
         );
 
         if let Err(e) = recorded {
             tracing::error!("{:#}", e);
             let detail = match crate::tmux::kill_pane_exact(&pane_id) {
-                Ok(()) => Self::append_pane_cleanup_error(
-                    format!("{e:#}"),
-                    crate::session::builder::cleanup_resolved_pane(&resolved),
-                ),
+                Ok(()) => format!("{e:#}"),
                 Err(rollback_error) => {
                     format!("{e:#}. Failed to roll back pane {pane_id}: {rollback_error:#}")
                 }
             };
+            let detail = Self::append_pane_cleanup_error(
+                detail,
+                inst.rollback_prepared_extra_pane(&profile, &launch),
+            );
+            let detail = Self::append_pane_cleanup_error(
+                detail,
+                crate::session::builder::cleanup_resolved_pane(&resolved),
+            );
             self.report_pane_not_created(&detail);
             return false;
         }

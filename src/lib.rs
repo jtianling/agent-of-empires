@@ -7,6 +7,8 @@ pub mod db;
 pub mod git;
 pub mod hooks;
 pub mod migrations;
+pub mod opencode_runtime;
+pub mod opencode_xats;
 pub mod process;
 pub mod session;
 pub mod sound;

@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::db::{Store, MAX_SLOT};
 use crate::session::Instance;
@@ -124,6 +124,9 @@ pub struct LaunchedPane<'a> {
     pub config: &'a crate::session::PaneConfig,
     /// The identity key minted for this pane, empty when it gets none.
     pub identity_key: &'a str,
+    /// Slot provisioned before the pane process started.
+    pub prepared_slot: Option<i64>,
+    pub prepared_generation: Option<i64>,
 }
 
 /// Record the durable slots of an extra agent pane AoE has just launched and of
@@ -199,6 +202,20 @@ fn record_launched_extra_pane_among(
         }
     }
 
+    match (pane.prepared_slot, pane.prepared_generation) {
+        (Some(prepared_slot), Some(prepared_generation)) => {
+            return store.bind_prepared_slot_pane(
+                instance_id,
+                prepared_slot,
+                prepared_generation,
+                pane.identity_key,
+                pane.pane_id,
+                now,
+            );
+        }
+        (None, None) => {}
+        _ => anyhow::bail!("prepared pane is missing its slot reservation token"),
+    }
     let Some(assignment) = assigned.iter().find(|a| a.pane_id == pane.pane_id) else {
         anyhow::bail!("pane {} was assigned no slot", pane.pane_id);
     };
@@ -221,9 +238,20 @@ pub fn session_pane_ids(session_name: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn live_session_pane_ids(session_name: &str) -> Result<Vec<String>> {
+    Ok(try_list_session_panes(session_name)?
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect())
+}
+
 /// List a tmux session's panes as `(pane_index, pane_id)` sorted by pane index.
 /// Returns an empty vec if the session does not exist or tmux is unavailable.
 fn list_session_panes(session_name: &str) -> Vec<(u32, String)> {
+    try_list_session_panes(session_name).unwrap_or_default()
+}
+
+fn try_list_session_panes(session_name: &str) -> Result<Vec<(u32, String)>> {
     let output = crate::tmux::tmux_command()
         .args([
             "list-panes",
@@ -232,12 +260,14 @@ fn list_session_panes(session_name: &str) -> Vec<(u32, String)> {
             "-F",
             "#{pane_index} #{pane_id}",
         ])
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
+        .output()
+        .with_context(|| format!("listing panes for tmux session '{session_name}'"))?;
     if !output.status.success() {
-        return Vec::new();
+        anyhow::bail!(
+            "tmux list-panes failed for session '{}': {}",
+            session_name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut panes: Vec<(u32, String)> = text
@@ -250,7 +280,7 @@ fn list_session_panes(session_name: &str) -> Vec<(u32, String)> {
         })
         .collect();
     panes.sort_by_key(|(idx, _)| *idx);
-    panes
+    Ok(panes)
 }
 
 /// Reconcile all managed instances of the active profile.
@@ -958,6 +988,8 @@ mod identity_key_tests {
                 pane_id: "%2",
                 config: &launched,
                 identity_key: "launched-key",
+                prepared_slot: None,
+                prepared_generation: None,
             },
         )
         .unwrap();
@@ -991,6 +1023,8 @@ mod identity_key_tests {
                     pane_id: "%2",
                     config: &launched,
                     identity_key: "",
+                    prepared_slot: None,
+                    prepared_generation: None,
                 },
             )
             .unwrap();
@@ -1026,6 +1060,8 @@ mod identity_key_tests {
                 pane_id: "%2",
                 config: &launched,
                 identity_key: "launched-key",
+                prepared_slot: None,
+                prepared_generation: None,
             },
         )
         .unwrap();

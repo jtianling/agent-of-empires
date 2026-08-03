@@ -81,6 +81,14 @@ async fn main() -> Result<()> {
             cli::record_pane::run(&profile, args);
             return Ok(());
         }
+        Some(Commands::OpenCodeRuntime(args)) => {
+            let profile = session::resolve_profile(cli.profile);
+            std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);
+            agent_of_empires::tmux::init_tmux_socket_name(Some(
+                agent_of_empires::tmux::socket_name_for_profile(&profile),
+            ));
+            return agent_of_empires::opencode_runtime::run(&profile, args).await;
+        }
         _ => {}
     }
 

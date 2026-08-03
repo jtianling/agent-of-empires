@@ -34,11 +34,12 @@ pub enum SessionCommands {
     Current(CurrentArgs),
 
     /// Fork a session using the agent's native fork-session command.
+    /// Managed host OpenCode is rejected until exact-session runtime fork is available.
     ///
     /// Creates a new session that shares the parent's working directory and
     /// config, and whose first launch runs `claude --resume ... --fork-session`,
-    /// `codex fork ...`, or `opencode --session ... --fork` depending on the
-    /// parent's tool. Only claude, codex, and opencode support forking.
+    /// `codex fork ...`, or sandboxed `opencode --session ... --fork` depending
+    /// on the parent's tool. Managed host OpenCode does not support forking.
     Fork(ForkArgs),
 
     /// Add an agent pane to a running session.
@@ -260,12 +261,20 @@ async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
         pane_config.cross_agent_team = false;
     }
 
-    let launch = inst
-        .build_extra_pane_config_command(&pane_config)
-        .ok_or_else(|| anyhow::anyhow!("Could not build launch command for '{}'", tool))?;
+    let launch = inst.prepare_extra_pane_config_command(profile, &session_name, &pane_config)?;
 
-    let pane_id =
-        crate::tmux::split_window_right(&session_name, &cwd, &launch.command, tool != "shell")?;
+    let pane_id = match crate::tmux::split_window_right(
+        &session_name,
+        &cwd,
+        &launch.command,
+        tool != "shell",
+    ) {
+        Ok(pane_id) => pane_id,
+        Err(error) => {
+            let cleanup = inst.rollback_prepared_extra_pane(profile, &launch);
+            return Err(append_prepared_pane_cleanup_error(error, cleanup));
+        }
+    };
 
     // The key the launch minted lives on the pane's slot record, so every later
     // relaunch reuses it instead of handing xats a key no identity holds.
@@ -276,16 +285,23 @@ async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
             pane_id: &pane_id,
             config: &pane_config,
             identity_key: &launch.identity_key,
+            prepared_slot: launch.prepared_slot,
+            prepared_generation: launch.prepared_generation,
         },
     );
 
     if let Err(e) = recorded {
-        return match crate::tmux::kill_pane_exact(&pane_id) {
-            Ok(()) => Err(e),
-            Err(rollback_error) => Err(anyhow::anyhow!(
-                "{e:#}. Failed to roll back pane {pane_id}: {rollback_error:#}"
-            )),
+        let mut error = match crate::tmux::kill_pane_exact(&pane_id) {
+            Ok(()) => e,
+            Err(rollback_error) => {
+                anyhow::anyhow!("{e:#}. Failed to roll back pane {pane_id}: {rollback_error:#}")
+            }
         };
+        error = append_prepared_pane_cleanup_error(
+            error,
+            inst.rollback_prepared_extra_pane(profile, &launch),
+        );
+        return Err(error);
     }
     inst.auto_confirm_launched_pane(&pane_id, &pane_config);
     println!(
@@ -295,6 +311,18 @@ async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
         MAX_AGENT_PANES
     );
     Ok(())
+}
+
+fn append_prepared_pane_cleanup_error(
+    error: anyhow::Error,
+    cleanup: anyhow::Result<()>,
+) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => anyhow::anyhow!(
+            "{error:#}. Failed to roll back prepared OpenCode slot: {cleanup_error:#}"
+        ),
+    }
 }
 
 async fn start_session(profile: &str, args: SessionIdArgs) -> Result<()> {

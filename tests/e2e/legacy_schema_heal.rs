@@ -27,7 +27,7 @@ use crate::harness::TuiTestHarness;
 
 /// Mirror the migration system's CURRENT_VERSION so pinning `.schema_version`
 /// keeps the migrations from running in the test's isolated HOME.
-const CURRENT_SCHEMA_VERSION: &str = "6";
+const CURRENT_SCHEMA_VERSION: &str = "10";
 
 macro_rules! require_sqlite3 {
     () => {

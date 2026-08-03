@@ -282,6 +282,12 @@ mod tests {
     }
 
     #[test]
+    fn opencode_can_enable_cross_agent_team_per_pane() {
+        let pane = PaneConfig::new("opencode", "/tmp", false, true);
+        assert!(pane.cross_agent_team);
+    }
+
+    #[test]
     fn unsupported_tools_cannot_retain_hidden_yolo_state() {
         let pane = PaneConfig::new("shell", "/tmp", true, false);
         assert!(!pane.yolo_mode);

@@ -326,6 +326,29 @@ fn profile_defaults_initialize_each_supported_pane() {
 }
 
 #[test]
+fn opencode_panes_expose_independent_cross_agent_team_controls() {
+    let mut config = Config::default();
+    config.session.cross_agent_team_default = true;
+    let mut dialog = NewSessionDialog::new_with_config(
+        vec!["opencode", "shell"],
+        std::env::temp_dir().to_string_lossy().to_string(),
+        config,
+    );
+    dialog.set_right_pane_selection(1);
+
+    let layout = dialog.field_layout();
+    assert_ne!(layout.cross_agent_team, ABSENT);
+    assert_ne!(layout.right_pane_cross_agent_team, ABSENT);
+    assert!(dialog.primary.cross_agent_team);
+    assert!(dialog.secondary.as_ref().unwrap().cross_agent_team);
+
+    dialog.focused_field = layout.right_pane_cross_agent_team;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(dialog.primary.cross_agent_team);
+    assert!(!dialog.secondary.as_ref().unwrap().cross_agent_team);
+}
+
+#[test]
 fn both_missing_pane_directories_share_one_confirmation() {
     let temp = tempfile::tempdir().unwrap();
     let primary = temp.path().join("primary");

@@ -20,6 +20,7 @@ use super::status::StatusArgs;
 use super::tmux::TmuxCommands;
 use super::uninstall::UninstallArgs;
 use super::worktree::WorktreeCommands;
+use crate::opencode_runtime::OpenCodeRuntimeArgs;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -105,6 +106,10 @@ pub enum Commands {
     /// Internal: capture a pane's native session id from a hook (hidden).
     #[command(name = "__record-pane", hide = true)]
     RecordPane(RecordPaneArgs),
+
+    /// Internal: own one exact OpenCode server/session runtime (hidden).
+    #[command(name = "__opencode-runtime", hide = true)]
+    OpenCodeRuntime(OpenCodeRuntimeArgs),
 
     /// Generate shell completions
     Completion {

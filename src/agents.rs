@@ -178,12 +178,17 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("opencode"),
         yolo: Some(YoloMode::EnvVar("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)),
         instruction_flag: None,
-        set_default_command: true,
-        supports_host_launch: false,
+        set_default_command: false,
+        supports_host_launch: true,
         detect_status: status_detection::detect_opencode_status,
         container_env: &[],
         hook_config: None,
-        resume: None,
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: r"(ses_[A-Za-z0-9_-]+)",
+            resume_flag: "--session {}",
+            timeout_secs: 10,
+        }),
         fork_template: Some("--session {} --fork"),
         session_id_flag: None,
         sets_own_title: false,
@@ -463,6 +468,17 @@ mod tests {
     #[test]
     fn test_get_agent_unknown() {
         assert!(get_agent("unknown").is_none());
+    }
+
+    #[test]
+    fn opencode_supports_host_launch_and_exact_session_resume() {
+        let opencode = get_agent("opencode").unwrap();
+        assert!(opencode.supports_host_launch);
+        assert!(!opencode.set_default_command);
+        assert_eq!(
+            opencode.resume.as_ref().unwrap().resume_flag,
+            "--session {}"
+        );
     }
 
     #[test]

@@ -901,7 +901,7 @@ fn build_session_fields(
             key: FieldKey::AgentExtraArgs,
             label: "Agent Extra Args",
             description:
-                "Per-agent extra arguments appended after the binary (e.g. opencode=--port 8080)",
+                "Per-agent extra arguments appended after the binary (e.g. opencode=--model provider/model)",
             value: FieldValue::List(extra_args_list),
             category: SettingsCategory::Session,
             has_override: extra_args_override,

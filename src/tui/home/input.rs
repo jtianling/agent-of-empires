@@ -677,12 +677,20 @@ impl HomeView {
                     return None;
                 };
 
+                if inst.tool == "opencode" && !inst.is_sandboxed() {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "Fork Not Supported",
+                        "Managed host OpenCode fork is unavailable until exact-session runtime fork is supported.",
+                    ));
+                    return None;
+                }
+
                 let agent = crate::agents::get_agent(&inst.tool);
                 if agent.and_then(|a| a.fork_template).is_none() {
                     self.info_dialog = Some(InfoDialog::new(
                         "Fork Not Supported",
                         &format!(
-                            "Fork is only supported for claude, codex, and opencode.\nSelected session uses: {}",
+                            "Fork is only supported for claude, codex, and sandboxed opencode.\nSelected session uses: {}",
                             inst.tool
                         ),
                     ));

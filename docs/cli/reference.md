@@ -197,7 +197,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `rename` — Rename a session
 * `capture` — Capture tmux pane output
 * `current` — Auto-detect current session
-* `fork` — Fork a session using the agent's native fork-session command
+* `fork` — Fork a session using the agent's native fork-session command. Managed host OpenCode is rejected until exact-session runtime fork is available
 * `add-agent-pane` — Add an agent pane to a running session
 
 
@@ -318,9 +318,9 @@ Auto-detect current session
 
 ## `aoe session fork`
 
-Fork a session using the agent's native fork-session command.
+Fork a session using the agent's native fork-session command. Managed host OpenCode is rejected until exact-session runtime fork is available.
 
-Creates a new session that shares the parent's working directory and config, and whose first launch runs `claude --resume ... --fork-session`, `codex fork ...`, or `opencode --session ... --fork` depending on the parent's tool. Only claude, codex, and opencode support forking.
+Creates a new session that shares the parent's working directory and config, and whose first launch runs `claude --resume ... --fork-session`, `codex fork ...`, or sandboxed `opencode --session ... --fork` depending on the parent's tool. Managed host OpenCode does not support forking.
 
 **Usage:** `aoe session fork [OPTIONS] <IDENTIFIER>`
 
