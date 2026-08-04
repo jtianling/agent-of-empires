@@ -80,11 +80,7 @@ async fn run_with_server(profile: &str, args: &OpenCodeRuntimeArgs, base_url: &s
     }
 
     let status = Command::new("opencode")
-        .arg("attach")
-        .arg(base_url)
-        .arg("--session")
-        .arg(&session_id)
-        .args(&args.extra_args)
+        .args(attach_args(base_url, &session_id, &args.extra_args))
         .current_dir(&args.working_directory)
         .env_remove("OPENCODE_SERVER_PASSWORD")
         .env_remove("OPENCODE_SERVER_USERNAME")
@@ -139,22 +135,65 @@ pub fn parse_and_validate_extra_args(value: &str) -> Result<Vec<String>> {
 }
 
 fn validate_extra_args(args: &[String]) -> Result<()> {
-    const RESERVED: &[&str] = &[
-        "--hostname",
-        "--port",
-        "--session",
-        "-s",
-        "--continue",
-        "-c",
-        "--fork",
-    ];
-    for arg in args {
-        let option = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
-        if RESERVED.contains(&option) {
-            bail!("OpenCode extra args conflict with runtime-owned option '{option}'");
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        match argument.as_str() {
+            "--print-logs" | "--pure" | "--mini" | "--no-replay" => index += 1,
+            "--log-level" => {
+                validate_log_level(
+                    args.get(index + 1)
+                        .context("--log-level requires a value")?,
+                )?;
+                index += 2;
+            }
+            "--replay-limit" => {
+                validate_replay_limit(
+                    args.get(index + 1)
+                        .context("--replay-limit requires a value")?,
+                )?;
+                index += 2;
+            }
+            _ => {
+                if let Some(value) = argument.strip_prefix("--log-level=") {
+                    validate_log_level(value)?;
+                } else if let Some(value) = argument.strip_prefix("--replay-limit=") {
+                    validate_replay_limit(value)?;
+                } else {
+                    bail!(
+                        "OpenCode attach does not support extra argument \
+                         '{argument}'"
+                    );
+                }
+                index += 1;
+            }
         }
     }
     Ok(())
+}
+
+fn validate_log_level(value: &str) -> Result<()> {
+    if !matches!(value, "DEBUG" | "INFO" | "WARN" | "ERROR") {
+        bail!("invalid OpenCode attach log level '{value}'");
+    }
+    Ok(())
+}
+
+fn validate_replay_limit(value: &str) -> Result<()> {
+    value
+        .parse::<u64>()
+        .with_context(|| format!("invalid OpenCode attach replay limit '{value}'"))?;
+    Ok(())
+}
+
+fn attach_args(base_url: &str, session_id: &str, extra_args: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "attach".to_string(),
+        base_url.to_string(),
+        "--session".to_string(),
+        session_id.to_string(),
+    ];
+    args.extend_from_slice(extra_args);
+    args
 }
 
 pub fn validate_session_id(value: &str) -> Result<()> {
@@ -387,13 +426,20 @@ mod tests {
     }
 
     #[test]
-    fn runtime_owned_options_are_rejected_in_both_forms() {
+    fn only_attach_safe_options_are_accepted() {
         for value in [
             "--hostname 0.0.0.0",
             "--port=4096",
             "--session ses_other",
+            "-sses_other",
             "--continue",
             "--fork",
+            "--dir /tmp/other",
+            "--password secret",
+            "--username other",
+            "--model anthropic/test",
+            "--agent build",
+            "--prompt hello",
         ] {
             assert!(
                 parse_and_validate_extra_args(value).is_err(),
@@ -401,8 +447,25 @@ mod tests {
             );
         }
         assert_eq!(
-            parse_and_validate_extra_args("--model 'anthropic/test model'").unwrap(),
-            ["--model", "anthropic/test model"]
+            parse_and_validate_extra_args("--mini --log-level DEBUG --replay-limit=50",).unwrap(),
+            ["--mini", "--log-level", "DEBUG", "--replay-limit=50"]
+        );
+    }
+
+    #[test]
+    fn attach_argv_keeps_runtime_tuple_before_validated_options() {
+        let extra = parse_and_validate_extra_args("--mini --log-level DEBUG").unwrap();
+        assert_eq!(
+            attach_args("http://127.0.0.1:8123", "ses_exact", &extra),
+            [
+                "attach",
+                "http://127.0.0.1:8123",
+                "--session",
+                "ses_exact",
+                "--mini",
+                "--log-level",
+                "DEBUG",
+            ]
         );
     }
 

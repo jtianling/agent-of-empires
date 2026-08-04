@@ -900,8 +900,10 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::AgentExtraArgs,
             label: "Agent Extra Args",
-            description:
-                "Per-agent extra arguments appended after the binary (e.g. opencode=--model provider/model)",
+            description: concat!(
+                "Per-agent launch arguments ",
+                "(OpenCode supports attach-safe options such as --mini)",
+            ),
             value: FieldValue::List(extra_args_list),
             category: SettingsCategory::Session,
             has_override: extra_args_override,

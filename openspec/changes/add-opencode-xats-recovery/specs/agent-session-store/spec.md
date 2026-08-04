@@ -24,7 +24,17 @@
 - **WHEN** every extra slot has a durable row but one bound pane is absent from the current live pane set
 - **THEN** a new OpenCode pane reservation SHALL atomically replace that stale row
 - **AND** SHALL advance its generation and clear the old pane capture
-- **AND** SHALL NOT reclaim any unbound pending row or currently live pane row
+- **AND** SHALL NOT reclaim any unexpired pending row or currently live pane row
+
+#### Scenario: Expired pending slot is reclaimed
+- **WHEN** every extra slot is occupied and one unbound OpenCode reservation has exceeded its 5 minute lease
+- **THEN** a new reservation SHALL atomically replace that pending row with a higher generation
+- **AND** an earlier bind or rollback token SHALL no longer match the replacement
+
+#### Scenario: Pane bound after live snapshot is protected
+- **WHEN** a reservation captures the live pane set and another connection subsequently binds a pending slot
+- **THEN** the first reservation SHALL NOT reclaim that newly bound row using its older live snapshot
+- **AND** the bound row generation, identity key and pane id SHALL remain unchanged
 
 #### Scenario: Fresh preparation clears only the target conversation
 - **WHEN** a Cross Agent Team OpenCode slot is prepared for `Shift+C`

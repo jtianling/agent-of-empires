@@ -13,10 +13,11 @@
 ## 3. auto-confirm 承载就绪信号与条件提交
 
 - [x] 3.1 把 `auto_confirm_panes` 的入参由裸 pane id 扩展为携带 "是否需要恢复身份" 标记的条目
-- [x] 3.2 仅在 `shows_claude_input_prompt` 为真的那条 settle 分支上提交 `reconnect`; 另一条 settle 分支 (已知确认屏全部答完) 不得提交
+- [x] 3.2 仅在 `shows_claude_input_prompt` 为真的 settle 分支上提交 `reconnect`; 需要恢复身份的 pane 在已知确认屏全部答完后不得提前 settle
 - [x] 3.3 每个 pane 至多提交一次, 且只提交给调用方本次启动的 pane
 - [x] 3.4 提交失败只记 warn, 不使 session 失败, 不影响同批其他 pane
 - [x] 3.5 pane 直到超时都未就绪时不提交, 保持既有的 "不报错, 留可交互" 行为
+- [x] 3.6 补单元测试证明需要恢复身份的 pane 答完全部已知确认屏后仍等待 ready, 不会漏发 `reconnect`
 
 ## 4. 五个调用点各自提供判据
 

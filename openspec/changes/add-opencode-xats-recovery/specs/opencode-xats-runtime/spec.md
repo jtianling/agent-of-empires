@@ -57,7 +57,7 @@ After the OpenCode server has produced or loaded the exact session, the runtime 
 
 ### Requirement: Runtime owns child lifecycle and reserved arguments
 
-The AoE runtime SHALL terminate the OpenCode server it created when attach exits or startup fails.  It SHALL validate external extra arguments and reject values that conflict with runtime-owned hostname, port, session, continue or fork selection.
+The AoE runtime SHALL terminate the OpenCode server it created when attach exits or startup fails.  It SHALL allow only attach-supported extra arguments that do not override runtime-owned endpoint, directory, authentication or session selection.  It SHALL reject default-TUI-only and unknown arguments before server startup or slot generation advancement.
 
 #### Scenario: Attach exit cleans the server
 - **WHEN** the attached OpenCode TUI exits
@@ -67,6 +67,20 @@ The AoE runtime SHALL terminate the OpenCode server it created when attach exits
 #### Scenario: Conflicting argument is rejected
 - **WHEN** a managed runtime receives a user extra argument that can override endpoint or session selection
 - **THEN** it SHALL fail before server startup with a diagnostic naming the conflicting option
+
+#### Scenario: Default TUI argument is rejected before launch
+- **WHEN** a managed runtime receives `--model`, `--agent`, `--prompt` or another argument unsupported by `opencode attach`
+- **THEN** it SHALL fail before server startup or slot generation advancement
+- **AND** SHALL NOT create a shell pane as a fallback
+
+#### Scenario: Paired xats CLI is bounded
+- **WHEN** a reserve or commit control-plane child does not exit within 5 seconds
+- **OR** its direct child exits but a background descendant keeps stdout or stderr open
+- **OR** an output reader cannot be created
+- **THEN** AoE SHALL terminate the entire owned process group
+- **AND** SHALL use a bounded cleanup window to reap the direct child and output readers
+- **AND** SHALL keep the control-plane child stdin closed
+- **AND** SHALL return a bounded failure diagnostic instead of blocking pane launch indefinitely
 
 #### Scenario: Managed host fork fails closed
 - **WHEN** the user requests fork for a managed host OpenCode session

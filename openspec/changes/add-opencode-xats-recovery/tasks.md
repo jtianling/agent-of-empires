@@ -2,7 +2,7 @@
 
 - [x] 1.1 将 OpenCode 设为 host-launch agent, 配置 `--session {}` resume, 并让 primary/secondary command builder 走统一注册表路径
 - [x] 1.2 将 OpenCode 加入 per-pane Cross Agent Team capability, 保持 checkbox、默认值和 sibling 状态独立
-- [x] 1.3 为 OpenCode runtime-owned 参数增加边界验证, 拒绝覆盖 endpoint 或 session selection 的 extra args
+- [x] 1.3 为 OpenCode extra args 增加 attach-safe allowlist, 在 generation 推进前拒绝默认 TUI 专属、未知或 runtime-owned 参数
 
 ## 2. Durable slot generation 与 migration
 
@@ -15,7 +15,7 @@
 
 - [x] 3.1 新增配对 `cross-agent-teams-mcp` CLI runner 与结构化结果验证, identity key 只通过环境传递
 - [x] 3.2 实现启动前 `reserve-opencode-runtime`, 区分 reserved、already_reserved、need_register 与 fail-closed 错误
-- [x] 3.3 实现 session-ready 后 `commit-opencode-runtime`, 包含 bounded retry、partial-state 诊断和 protocol mismatch 硬失败
+- [x] 3.3 实现 session-ready 后 `commit-opencode-runtime`, 包含 bounded retry、owned process group 与 output drain 硬超时、partial-state 诊断和 protocol mismatch 硬失败
 - [x] 3.4 为 CLI argv、日志脱敏、状态解析和错误分层增加聚焦测试
 
 ## 4. OpenCode server/attach runtime
@@ -24,7 +24,7 @@
 - [x] 4.2 在 loopback 独立端口启动 `opencode serve`, 等待 health, 并显式处理 bind、timeout 和 child exit
 - [x] 4.3 Fresh 通过 `POST /session` 创建准确 session, Resume 通过 exact `GET /session/<id>` 验证 session, 全部响应使用 schema 验证
 - [x] 4.4 在 attach 前写 `pane_live` 和 matching durable slot session id, 使用 pane ancestry 检查与有界 slot materialization wait
-- [x] 4.5 运行 `opencode attach <base_url> --session <id>`, 透传非冲突参数, 并在 attach 退出或错误时只清理 owned server child
+- [x] 4.5 运行 `opencode attach <base_url> --session <id>`, 仅透传 attach-safe 参数, 并在 attach 退出或错误时只清理 owned server child
 
 ## 5. Launch、restart 与 recovery 集成
 
@@ -41,7 +41,7 @@
 - [x] 6.3 添加 C/R/recovery 聚焦测试, 证明 C 更换 session、R 保留 session、旧 generation 不进入新命令
 - [x] 6.4 运行 `cargo fmt --check`、`cargo check`、`cargo clippy` 及不触碰实时 tmux 的聚焦测试, 记录因实时 session 跳过的 E2E 边界
 - [x] 6.5 添加 fake loopback HTTP、fake xats executable 与 owned child 测试, 验证 session API、配对 argv/env 和 cleanup 错误传播
-- [x] 6.6 添加并发 extra-pane reservation 与 exact bind token 测试, 证明 pending slot 不会复用
-- [x] 6.7 添加 stale bound slot reclaim 测试, 证明关闭的 extra pane slot 可复用且 pending/live row 不被覆盖
+- [x] 6.6 添加并发 extra-pane reservation 与 exact bind token 测试, 证明租约内 pending slot 不会复用
+- [x] 6.7 添加 stale bound、expired pending 与 post-snapshot bind 测试, 证明关闭或崩溃遗留的 extra pane slot 可安全复用, 且旧 live snapshot 不覆盖刚绑定的 row
 
-> 验证边界: 已完成格式、编译、静态检查、35 个 OpenCode 聚焦测试、5 个 generation 聚焦测试及 4 个 C/R action 聚焦测试。  当前环境存在实时 tmux session, 按安全规则未运行 tmux E2E 和全量测试。
+> 验证边界: 已完成格式、编译、静态检查、40 个 OpenCode 聚焦测试、5 个 generation 聚焦测试、post-snapshot bind 回归测试及 4 个 C/R action 聚焦测试。  当前环境存在实时 tmux session, 按安全规则未运行 tmux E2E 和全量测试。

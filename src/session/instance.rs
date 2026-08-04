@@ -90,6 +90,35 @@ mod pane_level_command_tests {
     }
 
     #[test]
+    fn an_agent_launch_requires_a_built_command() {
+        let error = require_launch_command(SessionLaunch::Agent, None, "opencode").unwrap_err();
+        assert!(format!("{error:#}").contains("Could not build opencode launch command"));
+        assert_eq!(
+            require_launch_command(SessionLaunch::Placeholder, None, "opencode",).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_opencode_attach_args_cannot_degrade_to_a_shell_launch() {
+        let mut instance = Instance::new("test", "/tmp");
+        instance.tool = "opencode".to_string();
+        instance.extra_args = "--model anthropic/test".to_string();
+        let pane = PaneConfig::new("opencode", "/tmp", false, false);
+        let runtime = OpenCodeRuntimeContext {
+            slot: 0,
+            generation: 1,
+            native_session_id: String::new(),
+            identity_key: String::new(),
+        };
+        let command =
+            instance.build_pane_command_with_runtime(&pane, None, true, None, Some(&runtime));
+
+        let error = require_launch_command(SessionLaunch::Agent, command, "opencode").unwrap_err();
+        assert!(format!("{error:#}").contains("Could not build opencode launch command"));
+    }
+
+    #[test]
     fn same_cwd_opencode_slots_keep_exact_runtime_values() {
         let instance = Instance::new("test", "/tmp/shared");
         let pane = PaneConfig::new("opencode", "/tmp/shared", false, true);
@@ -255,15 +284,21 @@ const AUTO_CONFIRM_MARKERS: &[(&str, AutoConfirmPrompt)] = &[
     ("trust this folder", AutoConfirmPrompt::WorkspaceTrust),
 ];
 
-/// Every startup question auto-confirm knows how to answer. A pane that has
-/// answered all of them cannot be asked anything else, which is one of the two
-/// signals that finish a pane without a timer; the other is Claude's own input
-/// prompt appearing (see `shows_claude_input_prompt`), which is what finishes a
-/// launch that raises fewer questions than this list holds.
+/// Every startup question auto-confirm knows how to answer. A pane that does not
+/// need identity recovery can finish after answering all of them. A pane that
+/// does need recovery must still wait for Claude's input prompt before AoE can
+/// safely submit reconnect.
 const AUTO_CONFIRM_PROMPTS: &[AutoConfirmPrompt] = &[
     AutoConfirmPrompt::DevelopmentChannels,
     AutoConfirmPrompt::WorkspaceTrust,
 ];
+
+fn settles_after_answer(reclaims_identity: bool, answered: &[AutoConfirmPrompt]) -> bool {
+    !reclaims_identity
+        && AUTO_CONFIRM_PROMPTS
+            .iter()
+            .all(|known| answered.contains(known))
+}
 
 /// What to do with one pane, given what it shows and what has already been
 /// answered for it. Pure, so the "same question redrawn many times is answered
@@ -1317,9 +1352,8 @@ impl Instance {
                     Ok(()) => {
                         entry.answered.push(prompt);
                         answered_this_round = true;
-                        entry.settled = AUTO_CONFIRM_PROMPTS
-                            .iter()
-                            .all(|known| entry.answered.contains(known));
+                        entry.settled =
+                            settles_after_answer(entry.reclaims_identity, &entry.answered);
                     }
                     Err(err) => {
                         // One unreachable pane must not strand its siblings on
@@ -1682,6 +1716,7 @@ impl Instance {
             },
             SessionLaunch::Placeholder => None,
         };
+        let cmd = require_launch_command(launch, cmd, &self.primary_pane.tool)?;
         tracing::debug!(
             "agent cmd: {}",
             cmd.as_ref().map_or_else(
@@ -1838,12 +1873,14 @@ impl Instance {
         } else {
             String::new()
         };
+        let live_snapshot_at = crate::db::now_unix();
         let live_pane_ids = crate::db::reconcile::live_session_pane_ids(session_name)?;
         let (slot, prepared) = store.prepare_new_opencode_runtime(
             &self.id,
             pane,
             &identity_key,
             &live_pane_ids,
+            live_snapshot_at,
             crate::db::now_unix(),
         )?;
         let runtime = OpenCodeRuntimeContext {
@@ -1920,6 +1957,11 @@ impl Instance {
     ) -> Result<OpenCodeRuntimeContext> {
         if pane.tool != "opencode" || self.is_sandboxed() {
             anyhow::bail!("OpenCode runtime preparation requires a host OpenCode pane");
+        }
+        // Validate user input before advancing the slot generation.
+        if slot == 0 && self.pane_runs_instance_tool(&pane.tool) && !self.extra_args.is_empty() {
+            crate::opencode_runtime::parse_and_validate_extra_args(&self.extra_args)
+                .context("validating managed OpenCode attach arguments")?;
         }
         let now = crate::db::now_unix();
         store.record_launched_slot_config_if_absent(
@@ -3806,6 +3848,17 @@ enum SessionLaunch {
     Placeholder,
 }
 
+fn require_launch_command(
+    launch: SessionLaunch,
+    command: Option<String>,
+    tool: &str,
+) -> Result<Option<String>> {
+    if launch == SessionLaunch::Agent && command.is_none() {
+        anyhow::bail!("Could not build {tool} launch command");
+    }
+    Ok(command)
+}
+
 /// Whether the multi-pane fan-out resumes each pane from its persisted
 /// `native_session_id` (`Resume`) or restarts every pane fresh with no resume
 /// flag (`Fresh`). `Fresh` forces the no-resume path for every pane while still
@@ -5044,6 +5097,17 @@ mod tests {
                 AutoConfirmPrompt::WorkspaceTrust
             ]
         );
+    }
+
+    #[test]
+    fn identity_recovery_waits_for_ready_after_all_prompts_are_answered() {
+        let answered = [
+            AutoConfirmPrompt::DevelopmentChannels,
+            AutoConfirmPrompt::WorkspaceTrust,
+        ];
+
+        assert!(!settles_after_answer(true, &answered));
+        assert!(settles_after_answer(false, &answered));
     }
 
     /// A question already answered reports itself as such rather than as absent,

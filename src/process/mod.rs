@@ -108,6 +108,37 @@ pub fn kill_process_tree(pid: u32) {
     }
 }
 
+pub fn configure_owned_process_group(command: &mut std::process::Command) {
+    #[cfg(target_os = "linux")]
+    linux::configure_owned_process_group(command);
+
+    #[cfg(target_os = "macos")]
+    macos::configure_owned_process_group(command);
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = command;
+}
+
+pub fn kill_owned_process_group(pid: u32) -> std::io::Result<()> {
+    if is_unsafe_kill_root(pid) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to kill an unsafe process group",
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    return linux::kill_owned_process_group(pid);
+
+    #[cfg(target_os = "macos")]
+    return macos::kill_owned_process_group(pid);
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

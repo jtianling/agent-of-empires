@@ -27,6 +27,9 @@ pub const MAX_SLOT: i64 = 3;
 /// Largest integer that round-trips exactly through JSON-based control planes.
 pub const MAX_XATS_RUNTIME_GENERATION: i64 = 9_007_199_254_740_991;
 
+/// Unbound extra-pane reservations become reclaimable after this lease.
+const PENDING_SLOT_LEASE_SECS: i64 = 5 * 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimePreparationMode {
     Fresh,
@@ -656,6 +659,7 @@ impl Store {
         pane: &crate::session::PaneConfig,
         identity_key: &str,
         live_pane_ids: &[String],
+        live_snapshot_at: i64,
         last_seen_at: i64,
     ) -> Result<(i64, PreparedSlotRuntime)> {
         pane.validate()?;
@@ -664,7 +668,13 @@ impl Store {
         }
         let worktree_info = serialize_pane_worktree(pane.worktree.as_ref())?;
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let available = select_available_extra_slot(&transaction, instance_id, live_pane_ids)?;
+        let available = select_available_extra_slot(
+            &transaction,
+            instance_id,
+            live_pane_ids,
+            live_snapshot_at,
+            last_seen_at,
+        )?;
         let (slot, generation) = write_new_opencode_slot(
             &transaction,
             available,
@@ -1150,9 +1160,11 @@ fn select_available_extra_slot(
     conn: &Connection,
     instance_id: &str,
     live_pane_ids: &[String],
+    live_snapshot_at: i64,
+    now: i64,
 ) -> Result<AvailableExtraSlot> {
     let mut statement = conn.prepare(
-        "SELECT slot, xats_runtime_generation, tmux_pane FROM agent_slot \
+        "SELECT slot, xats_runtime_generation, tmux_pane, last_seen_at FROM agent_slot \
          WHERE instance_id = ?1 AND slot BETWEEN 1 AND ?2 ORDER BY slot",
     )?;
     let rows = statement
@@ -1161,25 +1173,33 @@ fn select_available_extra_slot(
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for slot in 1..=MAX_SLOT {
-        if !rows.iter().any(|(candidate, _, _)| *candidate == slot) {
+        if !rows.iter().any(|(candidate, _, _, _)| *candidate == slot) {
             return Ok(AvailableExtraSlot::Missing(slot));
         }
     }
+    let pending_cutoff = now.saturating_sub(PENDING_SLOT_LEASE_SECS);
     rows.into_iter()
-        .find(|(_, generation, tmux_pane)| {
-            !tmux_pane.is_empty()
-                && *generation < MAX_XATS_RUNTIME_GENERATION
-                && !live_pane_ids.iter().any(|live| live == tmux_pane)
+        .find(|(_, generation, tmux_pane, last_seen_at)| {
+            if *generation >= MAX_XATS_RUNTIME_GENERATION {
+                return false;
+            }
+            if tmux_pane.is_empty() {
+                return *last_seen_at <= pending_cutoff;
+            }
+            *last_seen_at < live_snapshot_at && !live_pane_ids.iter().any(|live| live == tmux_pane)
         })
-        .map(|(slot, generation, tmux_pane)| AvailableExtraSlot::Stale {
-            slot,
-            generation,
-            tmux_pane,
-        })
+        .map(
+            |(slot, generation, tmux_pane, _)| AvailableExtraSlot::Stale {
+                slot,
+                generation,
+                tmux_pane,
+            },
+        )
         .ok_or_else(|| anyhow::anyhow!("no available managed pane slot"))
 }
 
@@ -2329,14 +2349,55 @@ mod tests {
         let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, false);
 
         let (first_slot, first) = store
-            .prepare_new_opencode_runtime("inst", &pane, "", &[], 1)
+            .prepare_new_opencode_runtime("inst", &pane, "", &[], 1, 1)
             .unwrap();
         let (second_slot, second) = store
-            .prepare_new_opencode_runtime("inst", &pane, "", &[], 2)
+            .prepare_new_opencode_runtime("inst", &pane, "", &[], 2, 2)
+            .unwrap();
+        let (third_slot, third) = store
+            .prepare_new_opencode_runtime("inst", &pane, "", &[], 3, 3)
             .unwrap();
 
         assert_eq!((first_slot, first.generation), (1, 1));
         assert_eq!((second_slot, second.generation), (2, 1));
+        assert_eq!((third_slot, third.generation), (3, 1));
+        assert!(store
+            .prepare_new_opencode_runtime(
+                "inst",
+                &pane,
+                "",
+                &[],
+                PENDING_SLOT_LEASE_SECS,
+                PENDING_SLOT_LEASE_SECS,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn new_opencode_runtime_reclaims_an_expired_pending_slot() {
+        let (_tmp, store) = temp_store();
+        let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, true);
+        for key in ["key-a", "key-b", "key-c"] {
+            store
+                .prepare_new_opencode_runtime("inst", &pane, key, &[], 1, 1)
+                .unwrap();
+        }
+
+        let (slot, prepared) = store
+            .prepare_new_opencode_runtime(
+                "inst",
+                &pane,
+                "replacement-key",
+                &[],
+                PENDING_SLOT_LEASE_SECS + 1,
+                PENDING_SLOT_LEASE_SECS + 1,
+            )
+            .unwrap();
+
+        assert_eq!((slot, prepared.generation), (1, 2));
+        let row = &store.read_slots_for_instance("inst").unwrap()[0];
+        assert!(row.tmux_pane.is_empty());
+        assert_eq!(row.xats_identity_key, "replacement-key");
     }
 
     #[test]
@@ -2371,7 +2432,7 @@ mod tests {
         let live = ["%live-2".to_string(), "%live-3".to_string()];
 
         let (slot, prepared) = store
-            .prepare_new_opencode_runtime("inst", &pane, "new-key", &live, 2)
+            .prepare_new_opencode_runtime("inst", &pane, "new-key", &live, 2, 2)
             .unwrap();
 
         assert_eq!((slot, prepared.generation), (1, 8));
@@ -2381,6 +2442,44 @@ mod tests {
         assert!(row.tmux_pane.is_empty());
         assert_eq!(row.xats_identity_key, "new-key");
         assert!(store.read_pane_live("%dead").unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_live_snapshot_cannot_reclaim_a_pane_bound_after_capture() {
+        let (tmp, snapshot_store) = temp_store();
+        let binder = Store::open_at(&tmp.path().join("aoe.db")).unwrap();
+        let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, true);
+        let (slot, prepared) = snapshot_store
+            .prepare_new_opencode_runtime("inst", &pane, "new-key", &[], 1, 1)
+            .unwrap();
+        for (slot, tmux_pane) in [(2, "%live-2"), (3, "%live-3")] {
+            snapshot_store
+                .upsert_agent_slot(
+                    "inst", slot, "opencode", "ses_live", "/tmp", tmux_pane, "live-key", 1,
+                )
+                .unwrap();
+        }
+
+        let live_snapshot_at = 10;
+        binder
+            .bind_prepared_slot_pane("inst", slot, prepared.generation, "new-key", "%new", 11)
+            .unwrap();
+        let live = ["%live-2".to_string(), "%live-3".to_string()];
+
+        assert!(snapshot_store
+            .prepare_new_opencode_runtime(
+                "inst",
+                &pane,
+                "replacement-key",
+                &live,
+                live_snapshot_at,
+                12,
+            )
+            .is_err());
+        let row = &snapshot_store.read_slots_for_instance("inst").unwrap()[0];
+        assert_eq!(row.tmux_pane, "%new");
+        assert_eq!(row.xats_runtime_generation, prepared.generation);
+        assert_eq!(row.xats_identity_key, "new-key");
     }
 
     #[test]
@@ -2395,7 +2494,7 @@ mod tests {
                 let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, true);
                 barrier.wait();
                 store
-                    .prepare_new_opencode_runtime("inst", &pane, key, &[], 1)
+                    .prepare_new_opencode_runtime("inst", &pane, key, &[], 1, 1)
                     .unwrap()
                     .0
             })
@@ -2414,7 +2513,7 @@ mod tests {
         let (_tmp, store) = temp_store();
         let pane = crate::session::PaneConfig::new("opencode", "/tmp", false, true);
         let (slot, prepared) = store
-            .prepare_new_opencode_runtime("inst", &pane, "key", &[], 1)
+            .prepare_new_opencode_runtime("inst", &pane, "key", &[], 1, 1)
             .unwrap();
 
         assert!(store

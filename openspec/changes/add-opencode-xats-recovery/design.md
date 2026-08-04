@@ -40,7 +40,7 @@ Fresh runtime 通过 loopback server 的 `POST /session` 创建 conversation, �
 
 `agent_slot` 新增正整数 `xats_runtime_generation`, legacy row 从 0 开始。  每次启用 Cross Agent Team 的 OpenCode slot 启动前, AoE 在 store 中原子递增 generation。  Fresh 同一事务清空旧 `native_session_id`, resume 保留它。
 
-新增 OpenCode pane 会先严格读取当前 tmux live pane 集合, 再在 SQLite immediate transaction 中原子选择 extra slot。  缺失 row 优先并以 generation 1 插入; slots 已满时, 只 CAS 替换已绑定但不在 live 集合中的 stale row, generation 在旧值上递增。  `tmux_pane=''` 的 pending row 即占位, 并发 add 不会复用。  split 后的 bind 和失败 rollback 都使用原始 `(slot, generation, identity_key)` token, 且只匹配仍未绑定、session 为空的 row。
+新增 OpenCode pane 会先记录 live snapshot 时间水位, 再严格读取当前 tmux live pane 集合, 最后在 SQLite immediate transaction 中原子选择 extra slot。  缺失 row 优先并以 generation 1 插入; slots 已满时, CAS 替换已绑定但不在 live 集合中、且 `last_seen_at` 早于 snapshot 水位的 stale row, 或超过 5 分钟租约的 unbound pending row, generation 在旧值上递增。  水位之后刚绑定的 pane 和租约内的 `tmux_pane=''` pending row 继续占位, 并发 add 不会复用。  split 后的 bind 和失败 rollback 都使用原始 `(slot, generation, identity_key)` token, 且只匹配仍未绑定、session 为空的 row。
 
 AoE 随后同步执行 `cross-agent-teams-mcp reserve-opencode-runtime --identity-key-env XATS_IDENTITY_KEY --runtime-generation N`, key 只从子进程环境读取。  CLI 默认输出单行 JSON envelope, 不接受额外 `--json`。  reserve 必须在 tmux respawn/create 前成功。  `need_register` 是首次 identity 的允许状态, 其他非成功状态阻止该 pane 启动。
 
@@ -50,7 +50,7 @@ AoE 随后同步执行 `cross-agent-teams-mcp reserve-opencode-runtime --identit
 
 wrapper 得到准确 `(base_url, session_id)` 后执行 `cross-agent-teams-mcp commit-opencode-runtime --identity-key-env XATS_IDENTITY_KEY --runtime-generation N --base-url <url> --session-id <id>`, 同样只通过环境传 identity key。  xats 负责 exact probe、CAS、recovery prompt 和后续 MCP reconnect。  unknown key 允许 attach, 等用户首次正常注册; 其他失败由 wrapper 输出诊断并停止 runtime。
 
-AoE 只消费 xats 已对齐的状态机, 不把 `Clear`/`Resume` mode 传入 xats。  paired CLI 通过 PATH 中的 `cross-agent-teams-mcp` 发现, CLI/daemon protocol mismatch 必须由 CLI 非零失败, AoE 不使用 `npx @latest` 或旧参数 fallback。
+AoE 只消费 xats 已对齐的状态机, 不把 `Clear`/`Resume` mode 传入 xats。  paired CLI 通过 PATH 中的 `cross-agent-teams-mcp` 发现, 每次调用关闭 stdin 并进入独立 process group, 并发读取 stdout/stderr, 5 秒 deadline 覆盖 direct child、后台后代和 output drain。  reader 创建失败也会进入同一有界清理路径, 不会 panic 或遗留 child。  超时后 AoE 终止整个 owned process group, 再有界回收 direct child 与 reader。  CLI/daemon protocol mismatch 必须由 CLI 非零失败, AoE 不使用 `npx @latest` 或旧参数 fallback。
 
 ### 5. runtime 直接写准确 capture
 
@@ -60,7 +60,7 @@ wrapper 在 attach 前以继承的 `TMUX_PANE`、profile、instance id 和 slot 
 
 ### 6. OpenCode 专属参数由 wrapper 拆分
 
-AoE 拥有 server 的 `--hostname`、`--port` 以及 attach 的 `--session`。  Cross Agent Team 或 resume runtime 遇到用户 extra args 中冲突的 `--hostname`、`--port`、`--session`、`--continue` 或 `--fork` 时显式拒绝。  其余 TUI 参数传给 attach, YOLO 环境变量和 working directory 保持现有语义。
+AoE 拥有 server 的 `--hostname`、`--port` 以及 attach 的 `--session`、`--dir` 和 auth。  用户 extra args 只允许当前 attach 子命令明确支持且不改变 runtime identity 的选项: `--print-logs`、`--log-level`、`--pure`、`--mini`、`--no-replay` 与 `--replay-limit`。  默认 TUI 专属的 `--model`、`--agent`、`--prompt` 以及所有未知或 runtime-owned 参数都会在 server 启动和 generation 推进前显式拒绝。
 
 AoE 创建的 server 是仅供当前 pane 与 xats exact probe 使用的临时 loopback endpoint, 不是用户配置的共享 OpenCode server。  wrapper 显式移除 `OPENCODE_SERVER_USERNAME` 与 `OPENCODE_SERVER_PASSWORD`, 因为配对协议不传递 OpenCode auth secret, 且继承 auth 会让 health 与 xats exact probe 不可达。  这是 managed host OpenCode 的兼容性变化: 本机其他进程在 runtime 存活期间可访问该随机端口, 但 endpoint 只绑定 loopback, 由 wrapper 在 attach 退出或启动失败时清理。
 

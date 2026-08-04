@@ -50,9 +50,9 @@ Claude 之所以不能照搬 Codex 的做法, 是因为它的 xats 身份建立�
 
 ### 决策二: 触发时机绑定在 auto-confirm 的输入提示符信号上
 
-`auto_confirm_panes` 里每个 pane 有两条 settle 分支.  一条是 `shows_claude_input_prompt` 为真, 意味着 Claude 自己的输入提示符已出现在屏幕上且旁边没有待答问题; 另一条是"AoE 已知的确认屏全部答完".
+`auto_confirm_panes` 对不需要恢复身份的 pane 有两条 settle 分支.  一条是 `shows_claude_input_prompt` 为真, 意味着 Claude 自己的输入提示符已出现在屏幕上且旁边没有待答问题; 另一条是"AoE 已知的确认屏全部答完".  对需要恢复身份的 pane, 后一条件不得 settle, 否则连续答完全部确认屏后会在真正 ready 前退出状态机并漏发 `reconnect`.
 
-只有前者可作为提交依据.  后者仅说明 AoE 问完了它认识的问题, Claude 完全可能仍在启动中, 此时送进去的文本会被当时正在运行的东西吞掉或错解.  这是 `auto_confirm_panes` 注释里已经点明的同一类风险, 本变更沿用它的判断而不是另立标准.
+只有前者可作为提交依据.  后者仅说明 AoE 问完了它认识的问题, Claude 完全可能仍在启动中, 此时送进去的文本会被当时正在运行的东西吞掉或错解.  因此需要恢复身份的 pane 必须继续等待 input prompt 或超时, 而不是在全部已知确认屏答完时提前 settle.
 
 选择这个宿主还有两个现成好处: 该函数同步运行在 attach 之前, 与 `tmux attach` 不存在争抢 capture/send 子进程的并发问题; 且它天然只持有调用方刚启动的那批 pane, 满足"只打本次启动的 pane"这条硬约束, 不需要重新推导目标集合.
 
