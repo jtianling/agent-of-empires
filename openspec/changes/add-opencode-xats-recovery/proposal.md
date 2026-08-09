@@ -6,7 +6,7 @@ AoE 当前可以双开 OpenCode pane, 但 OpenCode 不能在 `Shift+R` 时恢复
 
 - 将 OpenCode 纳入 host launch 和 pane 级 Cross Agent Team 能力。
 - 为每个 OpenCode slot 持久化准确的 native session id 与单调 xats runtime generation。
-- 在 OpenCode 进程启动前调用与 daemon 配对的 xats launcher CLI reserve generation, 并在准确 session ready 后提交 delivery。
+- 在 OpenCode 进程启动前调用 xats daemon 的 loopback REST control API reserve generation, 并在准确 session ready 后提交 delivery。
 - `Shift+C` 为每个 pane 创建全新 OpenCode conversation, 同时复用该 slot 的 xats identity key。
 - `Shift+R` 使用该 slot 的准确 session id 恢复原 OpenCode conversation, 同时复用 xats identity key。
 - 通过 AoE 管理的 OpenCode server/attach runtime 捕获当前 pane 的准确 session id, 禁止使用 cwd 或 latest session 推断。
@@ -30,6 +30,6 @@ AoE 当前可以双开 OpenCode pane, 但 OpenCode 不能在 `Shift+R` 时恢复
 ## Impact
 
 - 影响 `src/agents.rs`、pane command builder、restart/recovery、SQLite slot schema、session capture 和 OpenCode runtime wrapper。
-- 新增对 xats 配对 launcher CLI 的运行时依赖, 使用已对齐的 reserve/commit 协议, 但不修改 xats 仓库。
+- 使用 xats daemon 已提供的 reserve/commit REST adapter, 不增加全局 CLI 运行时依赖。
 - 影响 New Session 的 per-pane Cross Agent Team capability 过滤, 不新增视觉样式。
 - 需要聚焦单元/集成测试覆盖双 OpenCode pane、C/R 语义、generation fencing、命令安全和旧数据库 schema healing。

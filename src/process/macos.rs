@@ -1,25 +1,12 @@
 //! macOS-specific process utilities
 
 use std::collections::HashMap;
-use std::io;
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use nix::errno::Errno;
-use nix::sys::signal::{kill, killpg, Signal};
+use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use tracing::debug;
-
-pub fn configure_owned_process_group(command: &mut Command) {
-    command.process_group(0);
-}
-
-pub fn kill_owned_process_group(pid: u32) -> io::Result<()> {
-    match killpg(Pid::from_raw(pid as i32), Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
-        Err(error) => Err(io::Error::from_raw_os_error(error as i32)),
-    }
-}
 
 /// Kill a process and all its descendants
 /// Uses SIGTERM first, then SIGKILL after a short delay for stragglers

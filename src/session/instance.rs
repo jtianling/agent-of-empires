@@ -157,12 +157,14 @@ mod pane_level_command_tests {
         assert!(left_command.contains("--slot 0 --generation 4"));
         assert!(left_command.contains("--resume-session"));
         assert!(left_command.contains("ses_left"));
-        assert!(left_command.contains("left-key"));
+        assert!(!left_command.contains("left-key"));
+        assert!(!left_command.contains("XATS_IDENTITY_KEY"));
         assert!(!left_command.contains("ses_right"));
         assert!(right_command.contains("--slot 1 --generation 9"));
         assert!(right_command.contains("--resume-session"));
         assert!(right_command.contains("ses_right"));
-        assert!(right_command.contains("right-key"));
+        assert!(!right_command.contains("right-key"));
+        assert!(!right_command.contains("XATS_IDENTITY_KEY"));
         assert!(!right_command.contains("ses_left"));
     }
 
@@ -2270,10 +2272,12 @@ impl Instance {
                             _ => {}
                         }
                     }
-                    if let Some(key) =
-                        self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
-                    {
-                        env_vars.push((XATS_IDENTITY_KEY_ENV, key));
+                    if pane.tool != "opencode" {
+                        if let Some(key) =
+                            self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
+                        {
+                            env_vars.push((XATS_IDENTITY_KEY_ENV, key));
+                        }
                     }
                     Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
                 })
@@ -2310,10 +2314,12 @@ impl Instance {
                         _ => {}
                     }
                 }
-                if let Some(key) =
-                    self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
-                {
-                    env_vars.push((XATS_IDENTITY_KEY_ENV, key));
+                if pane.tool != "opencode" {
+                    if let Some(key) =
+                        self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
+                    {
+                        env_vars.push((XATS_IDENTITY_KEY_ENV, key));
+                    }
                 }
                 if self.expects_shell() && env_vars.is_empty() {
                     let escaped_dir = shell_escape(&self.project_path);

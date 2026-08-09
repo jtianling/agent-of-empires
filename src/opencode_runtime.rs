@@ -15,6 +15,7 @@ const SERVER_ATTEMPTS: usize = 3;
 const HEALTH_ATTEMPTS: usize = 100;
 const SLOT_ATTEMPTS: usize = 50;
 const POLL_DELAY: Duration = Duration::from_millis(100);
+const OPENCODE_XATS_BASE_URL_ENV: &str = "OPENCODE_XATS_BASE_URL";
 
 #[derive(Debug, Args)]
 pub struct OpenCodeRuntimeArgs {
@@ -53,13 +54,20 @@ struct HealthResponse {
 
 pub async fn run(profile: &str, args: OpenCodeRuntimeArgs) -> Result<()> {
     let args = validate_args(profile, args)?;
-    let (mut server, base_url) = start_server(&args.working_directory).await?;
-    let result = run_with_server(profile, &args, &base_url).await;
+    let identity_key = load_runtime_identity_key(profile, &args)?;
+    let (mut server, base_url) =
+        start_server(&args.working_directory, identity_key.as_deref()).await?;
+    let result = run_with_server(profile, &args, &base_url, identity_key.as_deref()).await;
     let cleanup = terminate_owned_server(&mut server).await;
     merge_runtime_and_cleanup(result, cleanup)
 }
 
-async fn run_with_server(profile: &str, args: &OpenCodeRuntimeArgs, base_url: &str) -> Result<()> {
+async fn run_with_server(
+    profile: &str,
+    args: &OpenCodeRuntimeArgs,
+    base_url: &str,
+    identity_key: Option<&str>,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -74,19 +82,18 @@ async fn run_with_server(profile: &str, args: &OpenCodeRuntimeArgs, base_url: &s
 
     record_exact_session(profile, args, &session_id).await?;
     if args.cross_agent_team {
-        let identity_key = std::env::var(crate::opencode_xats::IDENTITY_KEY_ENV)
-            .context("Cross Agent Team OpenCode runtime is missing XATS_IDENTITY_KEY")?;
-        crate::opencode_xats::commit(&identity_key, args.generation, base_url, &session_id)?;
+        let identity_key = identity_key.context("OpenCode runtime identity key is missing")?;
+        crate::opencode_xats::commit(identity_key, args.generation, base_url, &session_id).await?;
     }
 
-    let status = Command::new("opencode")
+    let mut attach = Command::new("opencode");
+    attach
         .args(attach_args(base_url, &session_id, &args.extra_args))
         .current_dir(&args.working_directory)
         .env_remove("OPENCODE_SERVER_PASSWORD")
-        .env_remove("OPENCODE_SERVER_USERNAME")
-        .status()
-        .await
-        .context("starting OpenCode attach")?;
+        .env_remove("OPENCODE_SERVER_USERNAME");
+    configure_xats_child_env(&mut attach, identity_key, base_url);
+    let status = attach.status().await.context("starting OpenCode attach")?;
     if !status.success() {
         bail!("OpenCode attach exited with {}", status);
     }
@@ -210,7 +217,10 @@ pub fn validate_session_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-async fn start_server(working_directory: &Path) -> Result<(Child, String)> {
+async fn start_server(
+    working_directory: &Path,
+    identity_key: Option<&str>,
+) -> Result<(Child, String)> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .build()
@@ -219,7 +229,8 @@ async fn start_server(working_directory: &Path) -> Result<(Child, String)> {
     for _ in 0..SERVER_ATTEMPTS {
         let port = allocate_loopback_port()?;
         let base_url = format!("http://{HOST}:{port}");
-        let mut child = Command::new("opencode")
+        let mut command = Command::new("opencode");
+        command
             .arg("serve")
             .arg("--hostname")
             .arg(HOST)
@@ -230,7 +241,9 @@ async fn start_server(working_directory: &Path) -> Result<(Child, String)> {
             .env_remove("OPENCODE_SERVER_USERNAME")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        configure_xats_child_env(&mut command, identity_key, &base_url);
+        let mut child = command
             .spawn()
             .context("starting OpenCode loopback server")?;
         match wait_for_health(&client, &mut child, &base_url).await {
@@ -248,6 +261,44 @@ async fn start_server(working_directory: &Path) -> Result<(Child, String)> {
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("OpenCode server failed to bind")))
         .context("starting OpenCode loopback server after bounded port retry")
+}
+
+fn configure_xats_child_env(command: &mut Command, identity_key: Option<&str>, base_url: &str) {
+    command
+        .env_remove(crate::opencode_xats::IDENTITY_KEY_ENV)
+        .env_remove(OPENCODE_XATS_BASE_URL_ENV);
+    if let Some(identity_key) = identity_key {
+        command
+            .env(crate::opencode_xats::IDENTITY_KEY_ENV, identity_key)
+            .env(OPENCODE_XATS_BASE_URL_ENV, base_url);
+    }
+}
+
+fn load_runtime_identity_key(profile: &str, args: &OpenCodeRuntimeArgs) -> Result<Option<String>> {
+    let store = crate::db::Store::open_with_schema(profile)?;
+    runtime_identity_key_from_store(&store, args)
+}
+
+fn runtime_identity_key_from_store(
+    store: &crate::db::Store,
+    args: &OpenCodeRuntimeArgs,
+) -> Result<Option<String>> {
+    if !args.cross_agent_team {
+        return Ok(None);
+    }
+    let slot = store
+        .read_slots_for_instance(&args.instance_id)?
+        .into_iter()
+        .find(|slot| slot.slot == args.slot)
+        .context("OpenCode runtime slot is not provisioned")?;
+    if slot.agent != "opencode"
+        || !slot.cross_agent_team
+        || slot.xats_runtime_generation != args.generation
+    {
+        bail!("OpenCode runtime identity does not match the prepared slot");
+    }
+    crate::opencode_xats::validate_identity_key(&slot.xats_identity_key)?;
+    Ok(Some(slot.xats_identity_key))
 }
 
 fn allocate_loopback_port() -> Result<u16> {
@@ -497,6 +548,44 @@ mod tests {
             };
             assert!(validate_args(profile, args).is_err());
         }
+    }
+
+    #[test]
+    fn opencode_runtime_loads_only_the_exact_prepared_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) =
+            crate::db::Store::open_with_schema_at(&directory.path().join("aoe.db")).unwrap();
+        let pane = crate::session::PaneConfig::new(
+            "opencode",
+            directory.path().to_string_lossy(),
+            false,
+            true,
+        );
+        store
+            .upsert_agent_slot_config("instance-1", 0, &pane, "", "", "durable-identity-key", 1)
+            .unwrap();
+        let prepared = store
+            .prepare_opencode_runtime("instance-1", 0, crate::db::RuntimePreparationMode::Fresh)
+            .unwrap();
+        let mut args = OpenCodeRuntimeArgs {
+            instance_id: "instance-1".to_string(),
+            slot: 0,
+            generation: prepared.generation,
+            working_directory: directory.path().to_path_buf(),
+            resume_session: None,
+            cross_agent_team: true,
+            extra_args: Vec::new(),
+        };
+
+        assert_eq!(
+            runtime_identity_key_from_store(&store, &args)
+                .unwrap()
+                .as_deref(),
+            Some("durable-identity-key")
+        );
+
+        args.generation += 1;
+        assert!(runtime_identity_key_from_store(&store, &args).is_err());
     }
 
     #[test]

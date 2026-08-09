@@ -12,11 +12,11 @@ xats 与 AoE 已对齐两阶段 recovery 协议。  AoE 必须在 OpenCode 启�
 - `Shift+C` 创建全新 conversation, `Shift+R` 恢复原 conversation。
 - 在 C/R/live/cold launch 中保持每个 slot 的 xats identity, 并用 generation fence 阻止旧 runtime 回写。
 - 不修改用户的 OpenCode 配置, 不安装全局 plugin, 不把 identity key 放入 argv 或日志。
-- 对 xats CLI、OpenCode server、session 创建/读取和 durable store 的每层错误显式失败。
+- 对 xats REST control API、OpenCode server、session 创建/读取和 durable store 的每层错误显式失败。
 
 **Non-Goals:**
 
-- 不修改 xats daemon、CLI 或 MCP 工具实现。
+- 不在 AoE 内实现 MCP client, 也不要求安装 xats CLI。
 - 不为 sandboxed OpenCode 增加 xats 支持。
 - 不保留按 cwd/latest session 查找作为 restart fallback。
 - 不改变 Claude、Codex 或其他 agent 的启动协议。
@@ -42,19 +42,23 @@ Fresh runtime 通过 loopback server 的 `POST /session` 创建 conversation, �
 
 新增 OpenCode pane 会先记录 live snapshot 时间水位, 再严格读取当前 tmux live pane 集合, 最后在 SQLite immediate transaction 中原子选择 extra slot。  缺失 row 优先并以 generation 1 插入; slots 已满时, CAS 替换已绑定但不在 live 集合中、且 `last_seen_at` 早于 snapshot 水位的 stale row, 或超过 5 分钟租约的 unbound pending row, generation 在旧值上递增。  水位之后刚绑定的 pane 和租约内的 `tmux_pane=''` pending row 继续占位, 并发 add 不会复用。  split 后的 bind 和失败 rollback 都使用原始 `(slot, generation, identity_key)` token, 且只匹配仍未绑定、session 为空的 row。
 
-AoE 随后同步执行 `cross-agent-teams-mcp reserve-opencode-runtime --identity-key-env XATS_IDENTITY_KEY --runtime-generation N`, key 只从子进程环境读取。  CLI 默认输出单行 JSON envelope, 不接受额外 `--json`。  reserve 必须在 tmux respawn/create 前成功。  `need_register` 是首次 identity 的允许状态, 其他非成功状态阻止该 pane 启动。
+AoE 随后同步调用 daemon 的 `POST /api/runtime/opencode/reserve`, 严格发送 `{identity_key, runtime_generation, protocol_version: 1}`。  新 identity 的成功响应是 `{ok: true, need_register: true, state: "unregistered"}`, 已知 identity 的成功响应是 `{ok: true, state: "reserved", runtime_generation: N, changed: boolean}`。  reserve 必须在 tmux respawn/create 前成功, 且返回 generation 必须准确匹配 N。
+
+daemon 地址只从 `${CROSS_AGENT_TEAMS_MCP_HOME:-~/.cross-agent-teams-mcp}/daemon.pid` 的严格 `{pid, port}` JSON 发现。  AoE 通过同一个已打开文件句柄完成类型、4 KiB 上限和 JSON 验证, 校验 pid 存活后只连接 `127.0.0.1:port`, 可选 bearer token 继承 `CROSS_AGENT_TEAMS_MCP_TOKEN`。  缺失、损坏或 stale pid file 都 fail closed, 不扫描端口, 也不回退到 PATH CLI。
 
 备选方案是只在 session ready 后提交 generation, 但较新 runtime 尚未 ready 时, 较旧 runtime 仍可覆盖 delivery, 因此不采用。
 
 ### 4. session ready 后由 wrapper commit delivery
 
-wrapper 得到准确 `(base_url, session_id)` 后执行 `cross-agent-teams-mcp commit-opencode-runtime --identity-key-env XATS_IDENTITY_KEY --runtime-generation N --base-url <url> --session-id <id>`, 同样只通过环境传 identity key。  xats 负责 exact probe、CAS、recovery prompt 和后续 MCP reconnect。  unknown key 允许 attach, 等用户首次正常注册; 其他失败由 wrapper 输出诊断并停止 runtime。
+wrapper 得到准确 `(base_url, session_id)` 后调用 `POST /api/runtime/opencode/commit`, 严格发送 `{identity_key, runtime_generation, protocol_version: 1, base_url, session_id}`。  成功响应必须准确为 `{ok: true, state: "delivery_committed", delivery_committed: true, connection_bound: false, recovery_prompt: "scheduled"}`。  xats 负责 exact probe、CAS、recovery prompt 和后续 MCP reconnect。  unknown key 允许 attach, 等用户首次正常注册; 其他失败由 wrapper 输出诊断并停止 runtime。
 
-AoE 只消费 xats 已对齐的状态机, 不把 `Clear`/`Resume` mode 传入 xats。  paired CLI 通过 PATH 中的 `cross-agent-teams-mcp` 发现, 每次调用关闭 stdin 并进入独立 process group, 并发读取 stdout/stderr, 5 秒 deadline 覆盖 direct child、后台后代和 output drain。  reader 创建失败也会进入同一有界清理路径, 不会 panic 或遗留 child。  超时后 AoE 终止整个 owned process group, 再有界回收 direct child 与 reader。  CLI/daemon protocol mismatch 必须由 CLI 非零失败, AoE 不使用 `npx @latest` 或旧参数 fallback。
+AoE 只消费 xats 已对齐的状态机, 不把 `Clear`/`Resume` mode 传入 xats。  每次 HTTP 调用使用 5 秒总 deadline, response body 使用 64 KiB streaming hard limit。  HTTP 503、connect、timeout 和 response body I/O 允许 bounded retry; HTTP 400、401、403、500 和其他非 200 状态立即失败。  进入 service 后的固定 200 body 必须按实际 union 分支解析, 不能要求所有 domain error 都带 `ok: false`。
+
+`connection_bind_trigger_failed` 只允许以完全相同的 generation、base URL 和 session id 重试 commit。  `opencode_unreachable` 与 `session_not_found` 同样允许 bounded retry。  `missing_auth_token`、protocol/type/stale/CAS/delivery conflict 和所有未知 outcome 都立即 fail closed。  `{ok: false, error: "protocol_version_mismatch", cli_protocol_version: N, daemon_protocol_version: 1}` 是 HTTP 200 domain error, 不是旧 CLI envelope。  reserve 的同步调用由独立 current-thread runtime 执行, commit 直接复用 OpenCode runtime 的 async 上下文, 避免在 Tokio runtime 中使用 blocking HTTP client。  所有诊断和结构调试输出都脱敏 identity key 与 bearer token。
 
 ### 5. runtime 直接写准确 capture
 
-wrapper 在 attach 前以继承的 `TMUX_PANE`、profile、instance id 和 slot 写 `pane_live`, 并更新已存在 durable slot 的 `native_session_id`。  写入沿用 `__record-pane` 的 pane ancestry 验证和 store schema validation。  primary launch 的 slot 在 tmux create 返回后立即建立, wrapper 对 slot materialization 使用有界等待, 不按 cwd 猜测。
+wrapper 不从 pane command argv 接收 identity key。  它使用 profile、instance id、slot 和 generation 从 durable store 读取准确 key, 并只通过 OpenCode server/attach child 的环境传递 `XATS_IDENTITY_KEY` 与 `OPENCODE_XATS_BASE_URL`。  wrapper 在 attach 前以继承的 `TMUX_PANE` 写 `pane_live`, 并更新已存在 durable slot 的 `native_session_id`。  写入沿用 `__record-pane` 的 pane ancestry 验证和 store schema validation。  primary launch 的 slot 在 tmux create 返回后立即建立, wrapper 对 slot materialization 使用有界等待, 不按 cwd 猜测。
 
 非 Cross Agent Team 的 host OpenCode 也使用同一 wrapper, 因而同样获得准确 C/R。  xats reserve/commit 只在 pane 开启 Cross Agent Team 且 key/generation 有效时执行。
 
@@ -66,7 +70,7 @@ AoE 创建的 server 是仅供当前 pane 与 xats exact probe 使用的临时 l
 
 ## Risks / Trade-offs
 
-- [xats 配对 CLI 尚未发布] → OpenCode Cross Agent Team 启动明确失败并保留诊断, 普通 OpenCode 启动不受影响。
+- [xats daemon 未运行或 REST adapter 尚未部署] → OpenCode Cross Agent Team 启动明确失败并保留脱敏诊断, 普通 OpenCode 启动不受影响。
 - [loopback 端口分配存在 bind 竞态] → wrapper 对 bind 失败使用新的受限端口重试, 每个 pane 独立分配。
 - [server 已启动但 commit 失败] → wrapper 终止自己创建的 server, 不留下看似可用但未 fenced 的 pane。
 - [reserve 成功但 OpenCode 启动失败] → xats row 保持 recovering, 下一次更高 generation 重试; 旧 endpoint 不会复活。
@@ -82,4 +86,4 @@ AoE 创建的 server 是仅供当前 pane 与 xats exact probe 使用的临时 l
 
 ## Open Questions
 
-无。  xats 的 reserve/commit、partial state、prompt 与 reconnect 语义已与 `xats-main` 对齐, AoE 只实现消费端。
+无。  xats 的 reserve/commit domain outcome、prompt 与 reconnect 语义已与 `xats-main` 对齐, AoE 只实现消费端。
