@@ -51,6 +51,23 @@ pub struct AgentHookConfig {
     pub events: &'static [HookEvent],
 }
 
+/// Who owns the server an exact-session runtime attaches to.
+///
+/// AoE prepares the conversation of an exact-session agent before its pane
+/// starts, so every launch, restart and identity path has to know whether the
+/// server behind that conversation is AoE's to end. Expressing it here is what
+/// keeps those paths from asking "is this agent named opencode".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactSessionRuntime {
+    /// AoE starts a per-pane loopback server and terminates it with the pane.
+    /// The base URL is itself a pane-distinguishing dimension.
+    OwnedServer,
+    /// A user-owned singleton server AoE only discovers and connects to. Every
+    /// pane shares one base URL, so only the session id tells them apart, and
+    /// AoE must never start or terminate it.
+    SharedServer,
+}
+
 /// Agent-specific configuration for graceful exit and resume-aware restarts.
 #[derive(Debug, Clone, Copy)]
 pub struct ResumeConfig {
@@ -114,6 +131,45 @@ pub struct AgentDef {
     /// Whether this agent sets its own terminal/pane title via OSC 0.
     /// When false, AoE manages the pane title based on detected status.
     pub sets_own_title: bool,
+    /// Set when AoE prepares this agent's conversation before the pane starts,
+    /// stating who owns the server that conversation lives on. `None` means the
+    /// agent picks its own conversation and AoE only passes a resume flag.
+    pub exact_session_runtime: Option<ExactSessionRuntime>,
+    /// Whether a pane running this agent can join a Cross Agent Team.
+    pub supports_cross_agent_team: bool,
+}
+
+impl AgentDef {
+    /// Whether AoE prepares this agent's exact conversation before launch.
+    pub fn uses_exact_session_runtime(&self) -> bool {
+        self.exact_session_runtime.is_some()
+    }
+
+    /// Whether the xats identity key may be injected into this agent's pane
+    /// environment. An exact-session agent is prepared by AoE, which holds the
+    /// key on the durable slot and passes it only to the xats control plane;
+    /// a shared-server agent additionally leaks the key to every sibling agent
+    /// on that server if it reaches the pane at all.
+    pub fn identity_key_in_pane_env(&self) -> bool {
+        self.exact_session_runtime.is_none()
+    }
+}
+
+/// The exact-session runtime shape of `tool`, if it has one.
+pub fn exact_session_runtime(tool: &str) -> Option<ExactSessionRuntime> {
+    get_agent(tool).and_then(|agent| agent.exact_session_runtime)
+}
+
+/// Whether `tool` names an agent that can join a Cross Agent Team.
+pub fn supports_cross_agent_team(tool: &str) -> bool {
+    get_agent(tool).is_some_and(|agent| agent.supports_cross_agent_team)
+}
+
+/// Whether a pane running `tool` may carry the xats identity key in its
+/// environment. An unknown tool is launched undecorated, so it answers `true`
+/// the way every non-exact-session agent does.
+pub fn identity_key_in_pane_env(tool: &str) -> bool {
+    get_agent(tool).map_or(true, AgentDef::identity_key_in_pane_env)
 }
 
 /// Hook events shared by Claude Code and Cursor CLI.
@@ -170,6 +226,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: Some("--resume {} --fork-session"),
         session_id_flag: Some("--session-id {}"),
         sets_own_title: true,
+        exact_session_runtime: None,
+        supports_cross_agent_team: true,
     },
     AgentDef {
         name: "opencode",
@@ -192,6 +250,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: Some("--session {} --fork"),
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: Some(ExactSessionRuntime::OwnedServer),
+        supports_cross_agent_team: true,
     },
     AgentDef {
         name: "vibe",
@@ -209,6 +269,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: None,
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
     },
     AgentDef {
         name: "codex",
@@ -235,6 +297,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: Some("fork {}"),
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: true,
     },
     AgentDef {
         name: "gemini",
@@ -276,6 +340,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: None,
         session_id_flag: None,
         sets_own_title: true,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
     },
     AgentDef {
         name: "shell",
@@ -293,6 +359,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: None,
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
     },
     AgentDef {
         name: "cursor",
@@ -313,6 +381,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: None,
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
     },
     AgentDef {
         name: "copilot",
@@ -330,6 +400,8 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: None,
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
     },
     AgentDef {
         name: "pi",
@@ -348,6 +420,35 @@ pub const AGENTS: &[AgentDef] = &[
         fork_template: None,
         session_id_flag: None,
         sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
+    },
+    AgentDef {
+        name: "kimi",
+        binary: "kimi",
+        aliases: &["kimi-code"],
+        detection: DetectionMethod::Which("kimi"),
+        yolo: Some(YoloMode::CliFlag("--yolo")),
+        instruction_flag: None,
+        set_default_command: false,
+        supports_host_launch: true,
+        detect_status: status_detection::detect_kimi_status,
+        container_env: &[],
+        hook_config: None,
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: r"(session_[0-9a-fA-F-]+)",
+            resume_flag: "--session {}",
+            timeout_secs: 10,
+        }),
+        // Forking is the agent's own operation and kimi exposes none; a fork of
+        // an exact session on a shared server would also need a second identity
+        // AoE never minted.
+        fork_template: None,
+        session_id_flag: None,
+        sets_own_title: false,
+        exact_session_runtime: Some(ExactSessionRuntime::SharedServer),
+        supports_cross_agent_team: true,
     },
 ];
 
@@ -463,6 +564,7 @@ mod tests {
         assert_eq!(get_agent("cursor").unwrap().binary, "agent");
         assert_eq!(get_agent("copilot").unwrap().binary, "copilot");
         assert_eq!(get_agent("pi").unwrap().binary, "pi");
+        assert_eq!(get_agent("kimi").unwrap().binary, "kimi");
     }
 
     #[test]
@@ -487,7 +589,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "claude", "opencode", "vibe", "codex", "gemini", "shell", "cursor", "copilot", "pi"
+                "claude", "opencode", "vibe", "codex", "gemini", "shell", "cursor", "copilot",
+                "pi", "kimi"
             ]
         );
     }
@@ -505,6 +608,8 @@ mod tests {
         assert_eq!(resolve_tool_name("github-copilot"), Some("copilot"));
         assert_eq!(resolve_tool_name("copilot"), Some("copilot"));
         assert_eq!(resolve_tool_name("pi"), Some("pi"));
+        assert_eq!(resolve_tool_name("kimi"), Some("kimi"));
+        assert_eq!(resolve_tool_name("kimi-code"), Some("kimi"));
         assert_eq!(resolve_tool_name(""), Some("claude"));
         assert_eq!(resolve_tool_name("agent"), Some("cursor"));
         assert_eq!(resolve_tool_name("unknown-tool"), None);
@@ -519,6 +624,7 @@ mod tests {
         assert_eq!(settings_index_from_name(Some("cursor")), 7);
         assert_eq!(settings_index_from_name(Some("copilot")), 8);
         assert_eq!(settings_index_from_name(Some("pi")), 9);
+        assert_eq!(settings_index_from_name(Some("kimi")), 10);
 
         assert_eq!(name_from_settings_index(0), None);
         assert_eq!(name_from_settings_index(1), Some("claude"));
@@ -527,7 +633,64 @@ mod tests {
         assert_eq!(name_from_settings_index(7), Some("cursor"));
         assert_eq!(name_from_settings_index(8), Some("copilot"));
         assert_eq!(name_from_settings_index(9), Some("pi"));
+        assert_eq!(name_from_settings_index(10), Some("kimi"));
         assert_eq!(name_from_settings_index(99), None);
+    }
+
+    /// The registry is the only place an agent's capabilities are stated, so a
+    /// launch path can branch on a field instead of recognizing a tool name.
+    #[test]
+    fn capabilities_are_registry_fields_rather_than_tool_names() {
+        assert_eq!(
+            exact_session_runtime("opencode"),
+            Some(ExactSessionRuntime::OwnedServer)
+        );
+        assert_eq!(
+            exact_session_runtime("kimi"),
+            Some(ExactSessionRuntime::SharedServer)
+        );
+        for tool in ["claude", "codex", "gemini", "shell", "unknown-tool"] {
+            assert_eq!(exact_session_runtime(tool), None, "{tool}");
+        }
+
+        for tool in ["claude", "codex", "opencode", "kimi"] {
+            assert!(supports_cross_agent_team(tool), "{tool}");
+        }
+        for tool in ["vibe", "gemini", "shell", "cursor", "copilot", "pi", "nope"] {
+            assert!(!supports_cross_agent_team(tool), "{tool}");
+        }
+    }
+
+    /// The one derived rule: AoE prepares an exact-session agent's conversation
+    /// and holds its key, so the key never travels in that pane's environment.
+    /// An agent AoE does not prepare carries its key the way it always did, and
+    /// an unrecognized tool is launched undecorated.
+    #[test]
+    fn only_agents_aoe_prepares_keep_the_identity_key_out_of_the_pane() {
+        for agent in AGENTS {
+            assert_eq!(
+                agent.identity_key_in_pane_env(),
+                !agent.uses_exact_session_runtime(),
+                "{}",
+                agent.name
+            );
+        }
+        assert!(!identity_key_in_pane_env("opencode"));
+        assert!(!identity_key_in_pane_env("kimi"));
+        assert!(identity_key_in_pane_env("claude"));
+        assert!(identity_key_in_pane_env("unknown-tool"));
+    }
+
+    #[test]
+    fn kimi_launches_on_the_host_and_resumes_an_exact_session() {
+        let kimi = get_agent("kimi").unwrap();
+        assert!(kimi.supports_host_launch);
+        assert!(!kimi.set_default_command);
+        assert_eq!(kimi.resume.as_ref().unwrap().resume_flag, "--session {}");
+        // No pre-allocated id and no fork: the session is minted over REST
+        // before launch, and the shared server offers no fork of it.
+        assert_eq!(kimi.session_id_flag, None);
+        assert_eq!(kimi.fork_template, None);
     }
 
     #[test]

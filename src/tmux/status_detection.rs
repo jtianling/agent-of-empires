@@ -677,6 +677,55 @@ pub fn detect_pi_status(raw_content: &str) -> Status {
     Status::Idle
 }
 
+/// Status of a kimi pane from its rendered content.
+///
+/// Ordering matters: an interrupt hint means a turn is running even while a
+/// spinner frame is also on screen, and a selection prompt means the pane is
+/// waiting for the user even though the same screen may still show the prompt
+/// that produced it.
+pub fn detect_kimi_status(raw_content: &str) -> Status {
+    let content = strip_ansi(raw_content).to_lowercase();
+    let recent: String = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(30)
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    if recent.contains("esc to interrupt")
+        || recent.contains("esc to cancel generation")
+        || recent.contains("ctrl+c to stop")
+    {
+        return Status::Running;
+    }
+    if content
+        .lines()
+        .any(|line| SPINNER_CHARS.iter().any(|spinner| line.contains(spinner)))
+    {
+        return Status::Running;
+    }
+    let waiting_prompts = [
+        "enter to select",
+        "esc to cancel",
+        "do you want to",
+        "allow this",
+        "(y/n)",
+        "[y/n]",
+        "approve",
+    ];
+    if waiting_prompts.iter().any(|prompt| recent.contains(prompt)) {
+        return Status::Waiting;
+    }
+    if recent
+        .lines()
+        .any(|line| line.trim_start().starts_with('❯') && line.contains(" 1."))
+    {
+        return Status::Waiting;
+    }
+    Status::Idle
+}
+
 #[cfg(test)]
 mod title_tests {
     use super::*;
@@ -957,6 +1006,50 @@ mod tests {
         assert_eq!(
             detect_opencode_status("file saved successfully"),
             Status::Idle
+        );
+    }
+
+    #[test]
+    fn test_detect_kimi_status_idle() {
+        assert_eq!(detect_kimi_status(""), Status::Idle);
+        assert_eq!(detect_kimi_status("file saved successfully"), Status::Idle);
+        // An interrupt hint far above the visible tail is scrollback, not state.
+        let scrollback = format!("esc to interrupt\n{}", "log line\n".repeat(40));
+        assert_eq!(detect_kimi_status(&scrollback), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_kimi_status_running() {
+        assert_eq!(
+            detect_kimi_status("Thinking...\n  (esc to interrupt)"),
+            Status::Running
+        );
+        assert_eq!(detect_kimi_status("⠋ working"), Status::Running);
+        // An interrupt hint outranks a prompt still on screen behind it.
+        assert_eq!(
+            detect_kimi_status("Do you want to proceed?\n⠹ running (esc to interrupt)"),
+            Status::Running
+        );
+    }
+
+    #[test]
+    fn test_detect_kimi_status_waiting() {
+        assert_eq!(
+            detect_kimi_status("Do you want to allow this tool?"),
+            Status::Waiting
+        );
+        assert_eq!(detect_kimi_status("Continue? (y/n)"), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_kimi_status_selection_prompt() {
+        assert_eq!(
+            detect_kimi_status("Choose:\n❯ 1. Approve once\n  2. Reject"),
+            Status::Waiting
+        );
+        assert_eq!(
+            detect_kimi_status("Pick one\n  enter to select"),
+            Status::Waiting
         );
     }
 

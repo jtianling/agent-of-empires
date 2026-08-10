@@ -7,19 +7,19 @@ use std::time::Duration;
 
 use super::{discover_control_plane_in, ControlPlane};
 
-pub(super) struct FakeResponse {
-    pub(super) status: u16,
-    pub(super) body: String,
-    pub(super) delay: Duration,
+pub(crate) struct FakeResponse {
+    pub(crate) status: u16,
+    pub(crate) body: String,
+    pub(crate) delay: Duration,
 }
 
-pub(super) struct FakeServer {
-    pub(super) port: u16,
-    pub(super) requests: Receiver<String>,
-    pub(super) worker: JoinHandle<()>,
+pub(crate) struct FakeServer {
+    pub(crate) port: u16,
+    pub(crate) requests: Receiver<String>,
+    pub(crate) worker: JoinHandle<()>,
 }
 
-pub(super) fn spawn_fake_server(responses: Vec<FakeResponse>) -> FakeServer {
+pub(crate) fn spawn_fake_server(responses: Vec<FakeResponse>) -> FakeServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (sender, requests) = mpsc::channel();
@@ -52,7 +52,7 @@ pub(super) fn spawn_fake_server(responses: Vec<FakeResponse>) -> FakeServer {
     }
 }
 
-pub(super) fn spawn_fake_server_without_content_length(body: String) -> FakeServer {
+pub(crate) fn spawn_fake_server_without_content_length(body: String) -> FakeServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (sender, requests) = mpsc::channel();
@@ -106,7 +106,7 @@ fn find_header_end(request: &[u8]) -> Option<usize> {
     request.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-pub(super) fn write_pid_file(directory: &Path, port: u16, pid: u32) {
+pub(crate) fn write_pid_file(directory: &Path, port: u16, pid: u32) {
     std::fs::write(
         directory.join("daemon.pid"),
         format!(r#"{{"pid":{pid},"port":{port}}}"#),
@@ -114,7 +114,7 @@ pub(super) fn write_pid_file(directory: &Path, port: u16, pid: u32) {
     .unwrap();
 }
 
-pub(super) fn control_for(
+pub(crate) fn control_for(
     server: &FakeServer,
     token: Option<&str>,
 ) -> (tempfile::TempDir, ControlPlane) {
@@ -126,18 +126,4 @@ pub(super) fn control_for(
     )
     .unwrap();
     (directory, control)
-}
-
-pub(super) fn reserved_response(generation: i64, changed: bool) -> String {
-    format!(
-        r#"{{"ok":true,"state":"reserved","runtime_generation":{generation},"changed":{changed}}}"#
-    )
-}
-
-pub(super) fn committed_response() -> String {
-    r#"{"ok":true,"state":"delivery_committed","delivery_committed":true,"connection_bound":false,"recovery_prompt":"scheduled"}"#.to_string()
-}
-
-pub(super) fn partial_commit_response() -> String {
-    r#"{"ok":false,"error":"connection_bind_trigger_failed","delivery_committed":true,"connection_bound":false,"detail":{"error":"opencode_inject_failed","detail":{"reason":"busy"},"transport_used":"opencode-server"}}"#.to_string()
 }

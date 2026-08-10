@@ -105,7 +105,9 @@ mod pane_level_command_tests {
         instance.tool = "opencode".to_string();
         instance.extra_args = "--model anthropic/test".to_string();
         let pane = PaneConfig::new("opencode", "/tmp", false, false);
-        let runtime = OpenCodeRuntimeContext {
+        let runtime = ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::OwnedServer,
+            server_base_url: String::new(),
             slot: 0,
             generation: 1,
             native_session_id: String::new(),
@@ -122,13 +124,17 @@ mod pane_level_command_tests {
     fn same_cwd_opencode_slots_keep_exact_runtime_values() {
         let instance = Instance::new("test", "/tmp/shared");
         let pane = PaneConfig::new("opencode", "/tmp/shared", false, true);
-        let left = OpenCodeRuntimeContext {
+        let left = ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::OwnedServer,
+            server_base_url: String::new(),
             slot: 0,
             generation: 4,
             native_session_id: "ses_left".to_string(),
             identity_key: "left-key".to_string(),
         };
-        let right = OpenCodeRuntimeContext {
+        let right = ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::OwnedServer,
+            server_base_url: String::new(),
             slot: 1,
             generation: 9,
             native_session_id: "ses_right".to_string(),
@@ -166,6 +172,196 @@ mod pane_level_command_tests {
         assert!(!right_command.contains("right-key"));
         assert!(!right_command.contains("XATS_IDENTITY_KEY"));
         assert!(!right_command.contains("ses_left"));
+    }
+
+    fn kimi_runtime(slot: i64, session_id: &str, identity_key: &str) -> ExactSessionRuntimeContext {
+        ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::SharedServer,
+            server_base_url: "http://127.0.0.1:58627".to_string(),
+            slot,
+            generation: 0,
+            native_session_id: session_id.to_string(),
+            identity_key: identity_key.to_string(),
+        }
+    }
+
+    /// Two kimi panes in one directory attach to their own conversations on the
+    /// one shared server, and neither command mentions the other's session.
+    #[test]
+    #[serial_test::serial]
+    fn same_cwd_kimi_panes_attach_to_their_own_sessions() {
+        std::env::set_var(crate::kimi::COMMAND_ENV, "/opt/kimi-dev/kimi");
+        let instance = Instance::new("test", "/tmp/shared");
+        let pane = PaneConfig::new("kimi", "/tmp/shared", false, true);
+        let left = kimi_runtime(0, "session_left", "left-key");
+        let right = kimi_runtime(1, "session_right", "right-key");
+
+        let left_command = instance
+            .build_kimi_pane_command(&pane, None, Some(&left), false)
+            .unwrap();
+        let right_command = instance
+            .build_kimi_pane_command(&pane, None, Some(&right), false)
+            .unwrap();
+        std::env::remove_var(crate::kimi::COMMAND_ENV);
+
+        assert!(left_command.contains("--session 'session_left'"));
+        assert!(!left_command.contains("session_right"));
+        assert!(right_command.contains("--session 'session_right'"));
+        assert!(!right_command.contains("session_left"));
+        for command in [&left_command, &right_command] {
+            assert!(command.contains("KIMI_XATS_BASE_URL='http://127.0.0.1:58627'"));
+            assert!(command.contains("KIMI_REMOTE='auto'"));
+            assert!(command.contains("'/opt/kimi-dev/kimi'"));
+        }
+        assert!(left_command.contains("KIMI_XATS_SESSION_ID='session_left'"));
+        assert!(right_command.contains("KIMI_XATS_SESSION_ID='session_right'"));
+    }
+
+    /// A command override names the binary of a shared-server pane; it does not
+    /// hand the pane back its own conversation choice. The session, the server
+    /// and the engine mode are still AoE's, so the override has to run on the
+    /// kimi command path rather than replacing it -- otherwise AoE would mint a
+    /// session and commit its coordinates for a TUI that attaches elsewhere.
+    #[test]
+    #[serial_test::serial]
+    fn a_command_override_names_the_kimi_binary_without_losing_the_launch_context() {
+        std::env::remove_var(crate::kimi::COMMAND_ENV);
+        let mut instance = Instance::new("test", "/tmp/shared");
+        instance.tool = "kimi".to_string();
+        instance.command = "/opt/kimi-dev/kimi".to_string();
+        let pane = PaneConfig::new("kimi", "/tmp/shared", false, true);
+        let runtime = kimi_runtime(0, "session_only", "super-secret-key");
+
+        let command = instance
+            .build_pane_command_with_runtime(
+                &pane,
+                None,
+                true,
+                Some("super-secret-key"),
+                Some(&runtime),
+            )
+            .unwrap();
+
+        // The wrapper re-escapes the inner command, so match on the words rather
+        // than on their quoting.
+        assert!(command.contains("/opt/kimi-dev/kimi"), "{command}");
+        assert!(command.contains("--session "), "{command}");
+        assert!(command.contains("KIMI_XATS_SESSION_ID="), "{command}");
+        assert!(command.contains("session_only"), "{command}");
+        assert!(command.contains("KIMI_XATS_BASE_URL="), "{command}");
+        assert!(command.contains("127.0.0.1:58627"), "{command}");
+        assert!(command.contains("KIMI_REMOTE="), "{command}");
+        assert!(command.contains(&format!("-u {XATS_IDENTITY_KEY_ENV}")));
+        assert!(!command.contains("super-secret-key"));
+    }
+
+    /// The key exists on the slot and is used for the xats commit, and reaches
+    /// neither the command nor the environment the pane can read. A kimi tool
+    /// process inherits the shared server's environment, so a key in any pane
+    /// would be readable by every kimi agent on the machine.
+    #[test]
+    #[serial_test::serial]
+    fn a_kimi_pane_never_carries_the_identity_key() {
+        std::env::set_var(crate::kimi::COMMAND_ENV, "/opt/kimi-dev/kimi");
+        let instance = Instance::new("test", "/tmp/shared");
+        let pane = PaneConfig::new("kimi", "/tmp/shared", true, true);
+        let runtime = kimi_runtime(0, "session_only", "super-secret-key");
+
+        let command = instance
+            .build_pane_command_with_runtime(
+                &pane,
+                None,
+                true,
+                Some("super-secret-key"),
+                Some(&runtime),
+            )
+            .unwrap();
+        std::env::remove_var(crate::kimi::COMMAND_ENV);
+
+        assert!(!command.contains("super-secret-key"));
+        assert!(!command.contains(&format!("{XATS_IDENTITY_KEY_ENV}=")));
+        // Inherited values cannot survive either: every injected name, and the
+        // key itself, is removed before anything is set.
+        assert!(command.contains(&format!("-u {XATS_IDENTITY_KEY_ENV}")));
+        assert!(command.contains("-u KIMI_XATS_SESSION_ID"));
+        assert!(command.contains("-u KIMI_XATS_BASE_URL"));
+        assert!(command.contains("-u KIMI_REMOTE"));
+        assert!(command.contains("--yolo"));
+        // Nothing registers with xats on the pane's behalf: the commit already
+        // happened, and no bootstrap call follows it into the command.
+        assert!(!command.contains("register"));
+        assert!(!command.contains("reconnect"));
+    }
+
+    /// `Shift+R` attaches to the stored conversation and reports a real resume;
+    /// `Shift+C` carries the freshly minted one. Both keep the slot's key, and
+    /// neither command exposes it.
+    #[test]
+    #[serial_test::serial]
+    fn kimi_resume_and_fresh_differ_only_in_the_session_they_attach() {
+        std::env::set_var(crate::kimi::COMMAND_ENV, "/opt/kimi-dev/kimi");
+        let instance = Instance::new("test", "/tmp/shared");
+        let pane = PaneConfig::new("kimi", "/tmp/shared", false, true);
+
+        let resumed_runtime = kimi_runtime(0, "session_old", "stable-key");
+        let (resumed_command, resumed) = instance
+            .build_pane_resume_plan_with_runtime(
+                &pane,
+                "session_old",
+                true,
+                RestartMode::Resume,
+                Some("stable-key"),
+                Some(&resumed_runtime),
+            )
+            .unwrap();
+
+        let fresh_runtime = kimi_runtime(0, "session_new", "stable-key");
+        let (fresh_command, fresh_resumed) = instance
+            .build_pane_resume_plan_with_runtime(
+                &pane,
+                "session_new",
+                true,
+                RestartMode::Fresh,
+                Some("stable-key"),
+                Some(&fresh_runtime),
+            )
+            .unwrap();
+        std::env::remove_var(crate::kimi::COMMAND_ENV);
+
+        assert!(resumed);
+        assert!(resumed_command.contains("session_old"));
+        assert!(!resumed_command.contains("session_new"));
+        assert!(!fresh_resumed);
+        assert!(fresh_command.contains("session_new"));
+        assert!(!fresh_command.contains("session_old"));
+        for command in [&resumed_command, &fresh_command] {
+            assert!(!command.contains("stable-key"));
+        }
+    }
+
+    /// A kimi pane whose conversation was never prepared has no command at all,
+    /// and a sandboxed one is refused rather than turned into a shell.
+    #[test]
+    fn kimi_without_preparation_or_on_a_sandbox_builds_nothing() {
+        let instance = Instance::new("test", "/tmp/shared");
+        let pane = PaneConfig::new("kimi", "/tmp/shared", false, true);
+        assert_eq!(instance.build_pane_command(&pane, None, true, None), None);
+
+        let mut sandboxed = Instance::new("test", "/tmp/shared");
+        sandboxed.sandbox_info = Some(SandboxInfo {
+            enabled: true,
+            container_id: None,
+            image: "test-image".to_string(),
+            container_name: "test".to_string(),
+            created_at: None,
+            extra_env: None,
+            custom_instruction: None,
+        });
+        let runtime = kimi_runtime(0, "session_only", "");
+        assert_eq!(
+            sandboxed.build_pane_command_with_runtime(&pane, None, true, None, Some(&runtime)),
+            None
+        );
     }
 
     #[test]
@@ -997,7 +1193,21 @@ impl Instance {
     }
 
     pub fn supports_cross_agent_team_tool(tool: &str) -> bool {
-        matches!(tool, "claude" | "codex" | "opencode")
+        crate::agents::supports_cross_agent_team(tool)
+    }
+
+    /// The exact-session runtime AoE prepares for `pane`, if the registry gives
+    /// it one. A sandboxed instance has none: AoE prepares a conversation from
+    /// the host, and nothing it prepares there describes what runs in the
+    /// container.
+    fn pane_exact_session_runtime(
+        &self,
+        pane: &PaneConfig,
+    ) -> Option<crate::agents::ExactSessionRuntime> {
+        if self.is_sandboxed() {
+            return None;
+        }
+        crate::agents::exact_session_runtime(&pane.tool)
     }
 
     /// Whether this instance launches with tool-specific Cross Agent Team behavior.
@@ -1686,27 +1896,26 @@ impl Instance {
             }
         }
 
-        let opencode_runtime = if launch == SessionLaunch::Agent
-            && self.primary_pane.tool == "opencode"
-            && !self.is_sandboxed()
+        let exact_runtime = match self
+            .pane_exact_session_runtime(&self.primary_pane)
+            .filter(|_| launch == SessionLaunch::Agent)
         {
-            if self.has_command_override() {
-                anyhow::bail!("Managed host OpenCode does not support a custom command override");
+            Some(shape) => {
+                self.reject_command_override_for(shape, self.has_command_override())?;
+                let store = crate::db::Store::open_with_schema(&Self::current_profile())?;
+                Some(self.prepare_exact_session_runtime(
+                    &store,
+                    0,
+                    &self.primary_pane,
+                    "",
+                    self.xats_identity_key.as_deref().unwrap_or(""),
+                    RestartMode::Fresh,
+                )?)
             }
-            let store = crate::db::Store::open_with_schema(&Self::current_profile())?;
-            Some(self.prepare_opencode_runtime_context(
-                &store,
-                0,
-                &self.primary_pane,
-                "",
-                self.xats_identity_key.as_deref().unwrap_or(""),
-                RestartMode::Fresh,
-            )?)
-        } else {
-            None
+            None => None,
         };
         let cmd = match launch {
-            SessionLaunch::Agent => match opencode_runtime.as_ref() {
+            SessionLaunch::Agent => match exact_runtime.as_ref() {
                 Some(runtime) => self.build_pane_command_with_runtime(
                     &self.primary_pane,
                     None,
@@ -1734,7 +1943,7 @@ impl Instance {
         )?;
 
         if launch == SessionLaunch::Agent {
-            if let Err(error) = self.record_primary_launch_slot(opencode_runtime.as_ref()) {
+            if let Err(error) = self.record_primary_launch_slot(exact_runtime.as_ref()) {
                 let _ = session.kill();
                 return Err(error);
             }
@@ -1763,22 +1972,15 @@ impl Instance {
 
     fn record_primary_launch_slot(
         &self,
-        opencode_runtime: Option<&OpenCodeRuntimeContext>,
+        exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Result<()> {
         let profile = Self::current_profile();
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
         let pane_id = tmux::get_agent_pane_id(&session_name)
             .ok_or_else(|| anyhow::anyhow!("primary pane id was not recorded"))?;
         let store = crate::db::Store::open_with_schema(&profile)?;
-        if let Some(runtime) = opencode_runtime {
-            store.bind_prepared_slot_pane(
-                &self.id,
-                runtime.slot,
-                runtime.generation,
-                &runtime.identity_key,
-                &pane_id,
-                crate::db::now_unix(),
-            )
+        if let Some(runtime) = exact_runtime {
+            runtime.bind_launched_pane(&store, &self.id, &self.primary_pane, &pane_id)
         } else {
             store.record_launched_slot_config_if_absent(
                 &self.id,
@@ -1831,6 +2033,8 @@ impl Instance {
         if pane.tool == "shell" {
             return Some(ExtraPaneLaunch {
                 command: self.build_extra_shell_pane_command(&pane.working_dir),
+                agent: pane.tool.clone(),
+                native_session_id: String::new(),
                 identity_key: String::new(),
                 prepared_slot: None,
                 prepared_generation: None,
@@ -1852,6 +2056,8 @@ impl Instance {
         )?;
         Some(ExtraPaneLaunch {
             command,
+            agent: pane.tool.clone(),
+            native_session_id: String::new(),
             identity_key,
             prepared_slot: None,
             prepared_generation: None,
@@ -1864,11 +2070,11 @@ impl Instance {
         session_name: &str,
         pane: &PaneConfig,
     ) -> Result<ExtraPaneLaunch> {
-        if pane.tool != "opencode" || self.is_sandboxed() {
+        let Some(shape) = self.pane_exact_session_runtime(pane) else {
             return self
                 .build_extra_pane_config_command(pane)
                 .ok_or_else(|| anyhow::anyhow!("No launch command for pane tool '{}'", pane.tool));
-        }
+        };
         let store = crate::db::Store::open_with_schema(profile)?;
         let identity_key = if pane.cross_agent_team {
             Uuid::new_v4().to_string()
@@ -1877,7 +2083,7 @@ impl Instance {
         };
         let live_snapshot_at = crate::db::now_unix();
         let live_pane_ids = crate::db::reconcile::live_session_pane_ids(session_name)?;
-        let (slot, prepared) = store.prepare_new_opencode_runtime(
+        let (slot, prepared) = store.prepare_new_exact_session_slot(
             &self.id,
             pane,
             &identity_key,
@@ -1885,23 +2091,24 @@ impl Instance {
             live_snapshot_at,
             crate::db::now_unix(),
         )?;
-        let runtime = OpenCodeRuntimeContext {
+        let mut runtime = ExactSessionRuntimeContext {
+            shape,
+            server_base_url: String::new(),
             slot,
             generation: prepared.generation,
             native_session_id: prepared.native_session_id,
             identity_key: prepared.xats_identity_key,
         };
-        if pane.cross_agent_team {
-            let reserved = crate::opencode_xats::reserve(&runtime.identity_key, runtime.generation);
-            if let Err(error) = reserved {
-                let cleanup = store.rollback_unbound_opencode_slot(
-                    &self.id,
-                    slot,
-                    runtime.generation,
-                    &runtime.identity_key,
-                );
-                return Err(append_rollback_error(error, cleanup));
-            }
+        if let Err(error) = self.claim_new_extra_pane_runtime(&store, pane, &mut runtime) {
+            let cleanup = store.rollback_unbound_exact_session_slot(
+                &self.id,
+                &pane.tool,
+                slot,
+                runtime.generation,
+                &runtime.identity_key,
+                &runtime.native_session_id,
+            );
+            return Err(append_rollback_error(error, cleanup));
         }
         let command = self.build_pane_command_with_runtime(
             pane,
@@ -1913,18 +2120,23 @@ impl Instance {
         let command = match command {
             Some(command) => command,
             None => {
-                let error = anyhow::anyhow!("Could not build OpenCode runtime command");
-                let cleanup = store.rollback_unbound_opencode_slot(
+                let error =
+                    anyhow::anyhow!("Could not build {} runtime command", pane.tool.as_str());
+                let cleanup = store.rollback_unbound_exact_session_slot(
                     &self.id,
+                    &pane.tool,
                     slot,
                     runtime.generation,
                     &runtime.identity_key,
+                    &runtime.native_session_id,
                 );
                 return Err(append_rollback_error(error, cleanup));
             }
         };
         Ok(ExtraPaneLaunch {
             command,
+            agent: pane.tool.clone(),
+            native_session_id: runtime.native_session_id,
             identity_key: runtime.identity_key,
             prepared_slot: Some(slot),
             prepared_generation: Some(runtime.generation),
@@ -1940,15 +2152,17 @@ impl Instance {
         else {
             return Ok(());
         };
-        crate::db::Store::open_with_schema(profile)?.rollback_unbound_opencode_slot(
+        crate::db::Store::open_with_schema(profile)?.rollback_unbound_exact_session_slot(
             &self.id,
+            &launch.agent,
             slot,
             generation,
             &launch.identity_key,
+            &launch.native_session_id,
         )
     }
 
-    fn prepare_opencode_runtime_context(
+    fn prepare_exact_session_runtime(
         &self,
         store: &crate::db::Store,
         slot: i64,
@@ -1956,14 +2170,16 @@ impl Instance {
         tmux_pane: &str,
         identity_key: &str,
         mode: RestartMode,
-    ) -> Result<OpenCodeRuntimeContext> {
-        if pane.tool != "opencode" || self.is_sandboxed() {
-            anyhow::bail!("OpenCode runtime preparation requires a host OpenCode pane");
-        }
+    ) -> Result<ExactSessionRuntimeContext> {
+        let shape = self.pane_exact_session_runtime(pane).ok_or_else(|| {
+            anyhow::anyhow!(
+                "runtime preparation requires a host pane whose agent has an exact session runtime"
+            )
+        })?;
         // Validate user input before advancing the slot generation.
         if slot == 0 && self.pane_runs_instance_tool(&pane.tool) && !self.extra_args.is_empty() {
-            crate::opencode_runtime::parse_and_validate_extra_args(&self.extra_args)
-                .context("validating managed OpenCode attach arguments")?;
+            validate_exact_runtime_extra_args(shape, &self.extra_args)
+                .with_context(|| format!("validating managed {} launch arguments", pane.tool))?;
         }
         let now = crate::db::now_unix();
         store.record_launched_slot_config_if_absent(
@@ -1978,7 +2194,7 @@ impl Instance {
             .read_slots_for_instance(&self.id)?
             .into_iter()
             .find(|row| row.slot == slot)
-            .ok_or_else(|| anyhow::anyhow!("OpenCode slot {slot} was not provisioned"))?;
+            .ok_or_else(|| anyhow::anyhow!("{} slot {slot} was not provisioned", pane.tool))?;
         let identity_key = if existing.xats_identity_key.is_empty() {
             identity_key
         } else {
@@ -1994,9 +2210,42 @@ impl Instance {
             now,
         )?;
         if mode == RestartMode::Resume {
-            crate::opencode_runtime::validate_session_id(&existing.native_session_id)
-                .with_context(|| format!("OpenCode slot {slot} has no valid session to resume"))?;
+            validate_exact_session_id(shape, &existing.native_session_id).with_context(|| {
+                format!("{} slot {slot} has no valid session to resume", pane.tool)
+            })?;
         }
+        self.serialize_shared_server_replacement(shape, mode, tmux_pane)?;
+        match shape {
+            crate::agents::ExactSessionRuntime::OwnedServer => {
+                self.prepare_owned_server_runtime(store, slot, pane, mode)
+            }
+            crate::agents::ExactSessionRuntime::SharedServer => {
+                let mut runtime = ExactSessionRuntimeContext {
+                    shape,
+                    server_base_url: String::new(),
+                    slot,
+                    generation: existing.xats_runtime_generation,
+                    native_session_id: existing.native_session_id,
+                    identity_key: identity_key.to_string(),
+                };
+                self.prepare_shared_server_session(store, pane, tmux_pane, &mut runtime, mode)?;
+                Ok(runtime)
+            }
+        }
+    }
+
+    /// Advance the fence of a slot whose server AoE owns, then reserve it.
+    ///
+    /// The conversation itself is minted later by the runtime wrapper against
+    /// the server it starts; the generation returned here is what lets that
+    /// wrapper prove the slot still belongs to this launch when it writes back.
+    fn prepare_owned_server_runtime(
+        &self,
+        store: &crate::db::Store,
+        slot: i64,
+        pane: &PaneConfig,
+        mode: RestartMode,
+    ) -> Result<ExactSessionRuntimeContext> {
         let prepared = store.prepare_opencode_runtime(
             &self.id,
             slot,
@@ -2016,12 +2265,29 @@ impl Instance {
             }
             crate::opencode_xats::reserve(&prepared.xats_identity_key, prepared.generation)?;
         }
-        Ok(OpenCodeRuntimeContext {
+        Ok(ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::OwnedServer,
+            server_base_url: String::new(),
             slot,
             generation: prepared.generation,
             native_session_id: prepared.native_session_id,
             identity_key: prepared.xats_identity_key,
         })
+    }
+
+    /// A managed pane whose server AoE owns is launched through AoE's own
+    /// runtime wrapper, so a custom command would start something that wrapper
+    /// does not manage. A shared-server pane is the opposite case: the override
+    /// is how the user names the binary AoE must launch.
+    fn reject_command_override_for(
+        &self,
+        shape: crate::agents::ExactSessionRuntime,
+        has_override: bool,
+    ) -> Result<()> {
+        if has_override && shape == crate::agents::ExactSessionRuntime::OwnedServer {
+            anyhow::bail!("Managed host OpenCode does not support a custom command override");
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2177,13 +2443,27 @@ impl Instance {
         resume_token: Option<&str>,
         is_primary: bool,
         slot_identity_key: Option<&str>,
-        opencode_runtime: Option<&OpenCodeRuntimeContext>,
+        exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<String> {
         let pane = target.resolve_for(self);
         let agent = crate::agents::get_agent(&pane.tool);
         let is_primary = is_primary && self.pane_runs_instance_tool(&pane.tool);
 
         if self.is_sandboxed() {
+            // A shared-server agent's conversation is minted on a server that
+            // lives on the host, so nothing AoE could prepare would describe
+            // what runs in the container. Refusing here keeps the launch from
+            // reaching session minting, and no caller substitutes a shell.
+            if agent.and_then(|a| a.exact_session_runtime)
+                == Some(crate::agents::ExactSessionRuntime::SharedServer)
+            {
+                tracing::error!(
+                    "Sandboxed '{}' is not supported: its conversation lives on \
+                     the host's shared server",
+                    pane.tool
+                );
+                return None;
+            }
             let sandbox = self.sandbox_info.as_ref()?;
             let container = DockerContainer::from_session_id(&self.id);
 
@@ -2223,19 +2503,34 @@ impl Instance {
             ))
         } else {
             let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
-            let has_override = is_primary && self.has_command_override();
+            // A shared-server pane keeps its own command path even under an
+            // override: the override names the binary, but the session, the
+            // server and the engine mode still have to reach the pane, and the
+            // base command carries none of them.
+            let has_override = is_primary
+                && self.has_command_override()
+                && self
+                    .shared_server_command_override(&pane, is_primary)
+                    .is_none();
 
             if !has_override {
                 agent.filter(|a| a.supports_host_launch).and_then(|a| {
-                    let mut cmd = if a.name == "opencode" {
-                        self.build_opencode_runtime_command(
-                            &pane,
-                            resume_token,
-                            is_primary,
-                            opencode_runtime,
-                        )?
-                    } else {
-                        self.build_base_pane_command(Some(a), resume_token, is_primary)
+                    let mut cmd = match a.exact_session_runtime {
+                        Some(crate::agents::ExactSessionRuntime::OwnedServer) => self
+                            .build_opencode_runtime_command(
+                                &pane,
+                                resume_token,
+                                is_primary,
+                                exact_runtime,
+                            )?,
+                        Some(crate::agents::ExactSessionRuntime::SharedServer) => self
+                            .build_kimi_pane_command(
+                                &pane,
+                                resume_token,
+                                exact_runtime,
+                                is_primary,
+                            )?,
+                        None => self.build_base_pane_command(Some(a), resume_token, is_primary),
                     };
                     let mut env_vars: Vec<(&str, &str)> = Vec::new();
                     if needs_instance_id {
@@ -2272,7 +2567,7 @@ impl Instance {
                             _ => {}
                         }
                     }
-                    if pane.tool != "opencode" {
+                    if crate::agents::identity_key_in_pane_env(&pane.tool) {
                         if let Some(key) =
                             self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
                         {
@@ -2314,7 +2609,7 @@ impl Instance {
                         _ => {}
                     }
                 }
-                if pane.tool != "opencode" {
+                if crate::agents::identity_key_in_pane_env(&pane.tool) {
                     if let Some(key) =
                         self.xats_identity_key_for_pane(&pane, is_primary, slot_identity_key)
                     {
@@ -2333,14 +2628,213 @@ impl Instance {
         }
     }
 
+    /// Terminate a shared-server pane and confirm its exit before its slot is
+    /// re-prepared.
+    ///
+    /// A fresh conversation abandons the session the running pane still holds.
+    /// Nothing revokes the old coordinates on the kimi side -- an abandoned
+    /// session keeps answering probes -- so the only thing that stops the old
+    /// pane from re-committing over the new ones is that it is already gone when
+    /// the new session is minted. Ordering is the whole defence, which is why it
+    /// happens here rather than inside the relaunch that follows.
+    fn serialize_shared_server_replacement(
+        &self,
+        shape: crate::agents::ExactSessionRuntime,
+        mode: RestartMode,
+        tmux_pane: &str,
+    ) -> Result<()> {
+        if shape != crate::agents::ExactSessionRuntime::SharedServer
+            || mode != RestartMode::Fresh
+            || tmux_pane.is_empty()
+        {
+            return Ok(());
+        }
+        tmux::set_pane_remain_on_exit(tmux_pane, true).with_context(|| {
+            format!("holding pane {tmux_pane} open while replacing its kimi conversation")
+        })?;
+        tmux::kill_pane_process_tree_target(tmux_pane);
+        for _ in 0..PANE_EXIT_ATTEMPTS {
+            match crate::process::get_pane_pid(tmux_pane) {
+                None => return Ok(()),
+                Some(pid) if crate::process::is_unsafe_kill_root(pid) => return Ok(()),
+                Some(_) => std::thread::sleep(PANE_EXIT_POLL),
+            }
+        }
+        anyhow::bail!(
+            "pane {tmux_pane} did not exit, so a new kimi conversation would be \
+             minted while the old pane can still claim it"
+        )
+    }
+
+    /// Mint or verify this pane's kimi session, persist it, then commit its
+    /// delivery coordinates.
+    ///
+    /// The order is load bearing. The session reaches the durable slot before
+    /// anything else can observe it, and the commit is the last xats-affecting
+    /// step before the pane process starts, so the agent's own `reconnect` finds
+    /// coordinates AoE already fixed rather than racing them.
+    fn prepare_shared_server_session(
+        &self,
+        store: &crate::db::Store,
+        pane: &PaneConfig,
+        tmux_pane: &str,
+        runtime: &mut ExactSessionRuntimeContext,
+        mode: RestartMode,
+    ) -> Result<()> {
+        if pane.cross_agent_team && runtime.identity_key.is_empty() {
+            anyhow::bail!(
+                "kimi Cross Agent Team slot {} has no identity key",
+                runtime.slot
+            );
+        }
+        let launch = crate::kimi::prepare_session(&crate::kimi::PaneRequest {
+            working_directory: std::path::PathBuf::from(&pane.working_dir),
+            cross_agent_team: pane.cross_agent_team,
+            mode: match mode {
+                RestartMode::Resume => crate::kimi::SessionMode::Resume,
+                RestartMode::Fresh => crate::kimi::SessionMode::Fresh,
+            },
+            durable_session_id: runtime.native_session_id.clone(),
+            command_override: self
+                .shared_server_command_override(pane, runtime.slot == 0)
+                .map(str::to_string),
+        })?;
+        store.upsert_agent_slot_config(
+            &self.id,
+            runtime.slot,
+            pane,
+            &launch.session_id,
+            tmux_pane,
+            &runtime.identity_key,
+            crate::db::now_unix(),
+        )?;
+        let previous_session_id =
+            std::mem::replace(&mut runtime.native_session_id, launch.session_id.clone());
+        runtime.server_base_url = launch.base_url.clone();
+        if pane.cross_agent_team {
+            crate::kimi::commit_delivery(&runtime.identity_key, &previous_session_id, &launch)?;
+        }
+        Ok(())
+    }
+
+    /// Claim the xats runtime of a freshly provisioned extra pane slot.
+    ///
+    /// An owned-server slot reserves its generation and lets its runtime wrapper
+    /// mint the conversation against the server it starts. A shared-server slot
+    /// has no fence to reserve, so AoE mints the conversation here and commits
+    /// its coordinates itself.
+    fn claim_new_extra_pane_runtime(
+        &self,
+        store: &crate::db::Store,
+        pane: &PaneConfig,
+        runtime: &mut ExactSessionRuntimeContext,
+    ) -> Result<()> {
+        match runtime.shape {
+            crate::agents::ExactSessionRuntime::OwnedServer => {
+                if pane.cross_agent_team {
+                    crate::opencode_xats::reserve(&runtime.identity_key, runtime.generation)?;
+                }
+                Ok(())
+            }
+            crate::agents::ExactSessionRuntime::SharedServer => {
+                self.prepare_shared_server_session(store, pane, "", runtime, RestartMode::Fresh)
+            }
+        }
+    }
+
+    /// The kimi pane command: the configured binary attaching to the exact
+    /// session AoE minted, with the shared server and engine mode in the
+    /// environment.
+    ///
+    /// The identity key appears in neither, by construction: it is not a
+    /// parameter of this function. A kimi tool process is spawned by the shared
+    /// server and inherits that server's environment, so a key that reached any
+    /// pane would be readable by every kimi agent on the machine.
+    /// The command override that names this pane's shared-server binary, when
+    /// the pane is the instance's own and the user set one.
+    ///
+    /// A shared-server agent is the one case where an override is not a way to
+    /// bypass what AoE prepared: AoE still owns the session, the server and the
+    /// engine mode, and the override only says which binary attaches to them.
+    /// An extra pane has no override of its own and names its binary through
+    /// [`crate::kimi::COMMAND_ENV`] instead.
+    fn shared_server_command_override(&self, pane: &PaneConfig, is_primary: bool) -> Option<&str> {
+        let shared = self.pane_exact_session_runtime(pane)
+            == Some(crate::agents::ExactSessionRuntime::SharedServer);
+        (shared
+            && is_primary
+            && self.pane_runs_instance_tool(&pane.tool)
+            && self.has_command_override())
+        .then(|| self.get_tool_command())
+    }
+
+    fn build_kimi_pane_command(
+        &self,
+        pane: &PaneConfig,
+        resume_session: Option<&str>,
+        runtime: Option<&ExactSessionRuntimeContext>,
+        is_primary: bool,
+    ) -> Option<String> {
+        let runtime = runtime?;
+        if runtime.server_base_url.is_empty() {
+            return None;
+        }
+        let session_id = resume_session
+            .filter(|value| !value.is_empty())
+            .unwrap_or(runtime.native_session_id.as_str());
+        if crate::kimi::validate_session_id(session_id).is_err() {
+            return None;
+        }
+        let words = crate::kimi::command_words(
+            pane.cross_agent_team,
+            self.shared_server_command_override(pane, is_primary),
+        )
+        .map_err(|error| tracing::error!("Cannot build kimi pane command: {error:#}"))
+        .ok()?;
+        let injected = [
+            (crate::kimi::BASE_URL_ENV, runtime.server_base_url.as_str()),
+            (crate::kimi::SESSION_ID_ENV, session_id),
+            (crate::kimi::REMOTE_MODE_ENV, crate::kimi::REMOTE_MODE_VALUE),
+        ];
+        // The launch wrapper already execs through `env`, so this command adds
+        // only its arguments. Remove before setting, and drop the identity key
+        // on the way through:
+        // a kimi tool process is spawned by the shared server, so any of these
+        // inherited from elsewhere would describe another pane's session.
+        let mut parts: Vec<String> = Vec::new();
+        for name in injected
+            .iter()
+            .map(|(name, _)| *name)
+            .chain([crate::xats_control::IDENTITY_KEY_ENV])
+        {
+            parts.push("-u".to_string());
+            parts.push(name.to_string());
+        }
+        for (name, value) in injected {
+            parts.push(format!("{name}={}", shell_escape(value)));
+        }
+        parts.extend(words.iter().map(|word| shell_escape(word)));
+        parts.push("--session".to_string());
+        parts.push(shell_escape(session_id));
+        if !self.extra_args.is_empty() && self.pane_runs_instance_tool(&pane.tool) {
+            let extra = crate::kimi::parse_and_validate_extra_args(&self.extra_args)
+                .map_err(|error| tracing::error!("Invalid kimi extra args: {error:#}"))
+                .ok()?;
+            parts.extend(extra.iter().map(|arg| shell_escape(arg)));
+        }
+        Some(parts.join(" "))
+    }
+
     fn build_opencode_runtime_command(
         &self,
         pane: &PaneConfig,
         resume_session: Option<&str>,
         is_primary: bool,
-        runtime: Option<&OpenCodeRuntimeContext>,
+        runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<String> {
-        let fallback = OpenCodeRuntimeContext {
+        let fallback = ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::OwnedServer,
+            server_base_url: String::new(),
             slot: if is_primary { 0 } else { 1 },
             generation: 0,
             native_session_id: resume_session.unwrap_or_default().to_string(),
@@ -2832,10 +3326,11 @@ impl Instance {
             }
             None => self.primary_pane.clone(),
         };
-        let opencode_runtime = if pane.tool == "opencode" && !self.is_sandboxed() {
-            if pane_agent.is_none() && self.has_command_override() {
-                anyhow::bail!("Managed host OpenCode does not support a custom command override");
-            }
+        let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
+            self.reject_command_override_for(
+                shape,
+                pane_agent.is_none() && self.has_command_override(),
+            )?;
             let profile = Self::current_profile();
             let store = crate::db::Store::open_with_schema(&profile)?;
             let pane_id =
@@ -2856,7 +3351,7 @@ impl Instance {
                     crate::db::now_unix(),
                 )?;
             }
-            Some(self.prepare_opencode_runtime_context(
+            Some(self.prepare_exact_session_runtime(
                 &store,
                 0,
                 &pane,
@@ -2867,7 +3362,7 @@ impl Instance {
         } else {
             None
         };
-        let cmd = match opencode_runtime.as_ref() {
+        let cmd = match exact_runtime.as_ref() {
             Some(runtime) => self.build_pane_command_with_runtime(
                 &pane,
                 Some(runtime.native_session_id.as_str()).filter(|id| !id.is_empty()),
@@ -2940,12 +3435,12 @@ impl Instance {
             let pane = slot.pane_config();
             let mut native_session_id = self.slot_resume_source(slot, mode);
             let mut identity_key = slot.xats_identity_key.clone();
-            let opencode_runtime = if pane.tool == "opencode" && !self.is_sandboxed() {
-                if slot.slot == 0 && self.has_command_override() {
-                    outcomes.push(PaneResumeOutcome::Error(
-                        "Managed host OpenCode does not support a custom command override"
-                            .to_string(),
-                    ));
+            let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
+                if let Err(error) = self.reject_command_override_for(
+                    shape,
+                    slot.slot == 0 && self.has_command_override(),
+                ) {
+                    outcomes.push(PaneResumeOutcome::Error(format!("{error:#}")));
                     continue;
                 }
                 let store = match crate::db::Store::open_with_schema(&Self::current_profile()) {
@@ -2955,7 +3450,7 @@ impl Instance {
                         continue;
                     }
                 };
-                match self.prepare_opencode_runtime_context(
+                match self.prepare_exact_session_runtime(
                     &store,
                     slot.slot,
                     &pane,
@@ -2983,7 +3478,7 @@ impl Instance {
                 slot.slot == 0,
                 mode,
                 Some(identity_key.as_str()).filter(|key| !key.is_empty()),
-                opencode_runtime.as_ref(),
+                exact_runtime.as_ref(),
             );
             // Every Claude pane this fan-out actually relaunched raises its own
             // startup screens, not just the primary one.
@@ -3138,15 +3633,15 @@ impl Instance {
             let pane = slot.pane_config();
             let mut native_session_id = slot.native_session_id.clone();
             let mut identity_key = slot.xats_identity_key.clone();
-            let opencode_runtime = if pane.tool == "opencode" && !self.is_sandboxed() {
-                if slot.slot == 0 && self.has_command_override() {
-                    outcomes.push(PaneResumeOutcome::Error(
-                        "Managed host OpenCode does not support a custom command override"
-                            .to_string(),
-                    ));
+            let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
+                if let Err(error) = self.reject_command_override_for(
+                    shape,
+                    slot.slot == 0 && self.has_command_override(),
+                ) {
+                    outcomes.push(PaneResumeOutcome::Error(format!("{error:#}")));
                     continue;
                 }
-                match self.prepare_opencode_runtime_context(
+                match self.prepare_exact_session_runtime(
                     store,
                     slot.slot,
                     &pane,
@@ -3174,7 +3669,7 @@ impl Instance {
                 slot.slot == 0,
                 mode,
                 Some(identity_key.as_str()).filter(|key| !key.is_empty()),
-                opencode_runtime.as_ref(),
+                exact_runtime.as_ref(),
             );
             if pane.tool == "claude"
                 && pane.cross_agent_team
@@ -3875,6 +4370,10 @@ pub enum RestartMode {
     Fresh,
 }
 
+/// Bounded wait for a replaced pane's process tree to actually be gone.
+const PANE_EXIT_ATTEMPTS: usize = 50;
+const PANE_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Snapshot of the identity fields a fresh restart speculatively mutates
 /// (`agent_session_id`, `fork_pending`), captured so the restart can roll them
 /// back if the respawn never actually starts a new conversation.
@@ -3889,6 +4388,12 @@ type FreshIdentitySnapshot = (Option<String>, Option<String>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtraPaneLaunch {
     pub command: String,
+    /// The agent this pane was provisioned for, so a rollback can name the slot
+    /// it is allowed to remove.
+    pub agent: String,
+    /// The conversation the provisioned slot holds. Empty unless AoE minted one
+    /// before launch; it completes the token a rollback has to match.
+    pub native_session_id: String,
     /// Empty when the pane gets no identity: Cross Agent Team is off, or the
     /// pane runs a shell, which registers no identity at all.
     pub identity_key: String,
@@ -3905,12 +4410,88 @@ fn append_rollback_error(error: anyhow::Error, cleanup: Result<()>) -> anyhow::E
     }
 }
 
+/// One pane's AoE-prepared conversation, carried from preparation through
+/// command building to the post-launch slot binding.
+///
+/// `shape` travels with it because who owns the server decides how the pane is
+/// launched and what a failure may clean up; `generation` fences only an
+/// [`ExactSessionRuntime::OwnedServer`] runtime, where AoE both prepares and
+/// terminates the server, and stays at its stored value otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OpenCodeRuntimeContext {
+struct ExactSessionRuntimeContext {
+    shape: crate::agents::ExactSessionRuntime,
+    /// The shared server this pane's conversation lives on. Empty for an
+    /// owned-server runtime, whose wrapper allocates its own loopback port.
+    server_base_url: String,
     slot: i64,
     generation: i64,
     native_session_id: String,
     identity_key: String,
+}
+
+/// Validate a durable conversation id against the runtime that owns it.
+fn validate_exact_session_id(shape: crate::agents::ExactSessionRuntime, value: &str) -> Result<()> {
+    match shape {
+        crate::agents::ExactSessionRuntime::OwnedServer => {
+            crate::opencode_runtime::validate_session_id(value)
+        }
+        crate::agents::ExactSessionRuntime::SharedServer => crate::kimi::validate_session_id(value),
+    }
+}
+
+/// Validate the instance's extra launch arguments against the runtime that owns
+/// the pane. Each runtime already decided the session, the server and the engine
+/// mode, so each refuses the arguments that would change them.
+fn validate_exact_runtime_extra_args(
+    shape: crate::agents::ExactSessionRuntime,
+    value: &str,
+) -> Result<Vec<String>> {
+    match shape {
+        crate::agents::ExactSessionRuntime::OwnedServer => {
+            crate::opencode_runtime::parse_and_validate_extra_args(value)
+        }
+        crate::agents::ExactSessionRuntime::SharedServer => {
+            crate::kimi::parse_and_validate_extra_args(value)
+        }
+    }
+}
+
+impl ExactSessionRuntimeContext {
+    /// Attach the tmux pane AoE just created to this prepared slot.
+    ///
+    /// An [`ExactSessionRuntime::OwnedServer`] slot is still conversationless at
+    /// this point -- its runtime wrapper records the session once the server it
+    /// owns has minted one -- so the binding is guarded by the generation that
+    /// prepared it. A [`ExactSessionRuntime::SharedServer`] slot already carries
+    /// the session AoE minted before launch, so the same guard would never
+    /// match and the pane id is written alongside it instead.
+    fn bind_launched_pane(
+        &self,
+        store: &crate::db::Store,
+        instance_id: &str,
+        pane: &PaneConfig,
+        pane_id: &str,
+    ) -> Result<()> {
+        match self.shape {
+            crate::agents::ExactSessionRuntime::OwnedServer => store.bind_prepared_slot_pane(
+                instance_id,
+                self.slot,
+                self.generation,
+                &self.identity_key,
+                pane_id,
+                crate::db::now_unix(),
+            ),
+            crate::agents::ExactSessionRuntime::SharedServer => store.upsert_agent_slot_config(
+                instance_id,
+                self.slot,
+                pane,
+                &self.native_session_id,
+                pane_id,
+                &self.identity_key,
+                crate::db::now_unix(),
+            ),
+        }
+    }
 }
 
 /// Outcome of resuming a single tracked pane.
@@ -3972,7 +4553,7 @@ impl Instance {
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
-        opencode_runtime: Option<&OpenCodeRuntimeContext>,
+        exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<(String, bool)> {
         let pane = target.resolve_for(self);
         let Some(def) = crate::agents::get_agent(&pane.tool) else {
@@ -3993,7 +4574,7 @@ impl Instance {
             resume_token,
             is_primary,
             slot_identity_key,
-            opencode_runtime,
+            exact_runtime,
         )?;
         Some((command, resumed))
     }
@@ -4019,16 +4600,17 @@ impl Instance {
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
-        opencode_runtime: Option<&OpenCodeRuntimeContext>,
+        exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> PaneResumeOutcome {
-        if pane.tool == "opencode"
-            && mode == RestartMode::Resume
-            && crate::opencode_runtime::validate_session_id(native_session_id).is_err()
-        {
-            return PaneResumeOutcome::Error(format!(
-                "OpenCode pane has no valid session to resume: '{}'",
-                native_session_id
-            ));
+        if let Some(shape) = self.pane_exact_session_runtime(pane) {
+            if mode == RestartMode::Resume
+                && validate_exact_session_id(shape, native_session_id).is_err()
+            {
+                return PaneResumeOutcome::Error(format!(
+                    "{} pane has no valid session to resume: '{}'",
+                    pane.tool, native_session_id
+                ));
+            }
         }
         // A shell slot is relaunched the way it was launched. The registry
         // entry's binary is the literal `shell`, which names no program, so the
@@ -4049,7 +4631,7 @@ impl Instance {
                 is_primary,
                 mode,
                 slot_identity_key,
-                opencode_runtime,
+                exact_runtime,
             )
         };
         let Some((command, resumed)) = plan else {
@@ -4114,6 +4696,7 @@ pub(crate) fn extract_resume_token(output: &str, pattern: &str) -> Option<String
 
 pub(crate) fn is_valid_resume_token(s: &str) -> bool {
     crate::opencode_runtime::validate_session_id(s).is_ok()
+        || crate::kimi::validate_session_id(s).is_ok()
         || (!s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
 }
 
