@@ -408,6 +408,12 @@ fn reconcile_session(
         .iter()
         .map(|s| (s.slot, s.native_session_id.clone()))
         .collect();
+    // The transcript state each slot's model was last read from, so an
+    // unchanged transcript costs a `stat` instead of a megabyte of tail read.
+    let existing_model_fingerprints: HashMap<i64, String> = existing_rows
+        .iter()
+        .map(|s| (s.slot, s.model_fingerprint.clone()))
+        .collect();
 
     let assigned = assign_slots(panes, primary_pane, &existing_map);
 
@@ -480,6 +486,17 @@ fn reconcile_session(
             );
             continue;
         }
+        refresh_slot_model(
+            store,
+            &inst.id,
+            pane.slot,
+            &pane_config,
+            &capture,
+            existing_model_fingerprints
+                .get(&pane.slot)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        );
         if !existing.contains(&pane.slot) {
             // First time this slot is recorded for the session: adoption.
             store.append_event(
@@ -503,6 +520,55 @@ fn reconcile_session(
     }
 
     Ok(())
+}
+
+/// Refresh a slot's observed model from its agent's own transcript.
+///
+/// Only Claude records a usable model on disk, and only for its own panes, so
+/// nothing is read for any other agent: a Claude-shaped transcript sitting at
+/// the path another agent's cwd and session id resolve to belongs to a
+/// conversation that pane never had.
+///
+/// A transcript whose fingerprint matches what the slot was last probed against
+/// is not opened at all. `last_fingerprint` comes from the slot's own row rather
+/// than from memory: the home-view poller and the notification monitor both run
+/// this pass, in different processes.
+///
+/// Purely additive to the pass: a probe that observes nothing leaves the slot's
+/// model as it was, and no failure here can affect the capture that was just
+/// persisted.
+fn refresh_slot_model(
+    store: &Store,
+    instance_id: &str,
+    slot: i64,
+    pane: &crate::session::PaneConfig,
+    capture: &crate::db::PaneLive,
+    last_fingerprint: &str,
+) {
+    if pane.tool != "claude" {
+        return;
+    }
+    let Some(path) = crate::db::claude_transcript::transcript_path(
+        &pane.working_dir,
+        &capture.native_session_id,
+    ) else {
+        return;
+    };
+    let Some(fingerprint) = crate::db::claude_transcript::fingerprint(&path) else {
+        return;
+    };
+    if fingerprint == last_fingerprint {
+        return;
+    }
+    let model = crate::db::claude_transcript::detect_model(&path).unwrap_or_default();
+    if let Err(error) = store.record_slot_model_probe(instance_id, slot, &fingerprint, &model) {
+        tracing::debug!(
+            "reconcile: persisting model for {} slot {} failed: {}",
+            instance_id,
+            slot,
+            error
+        );
+    }
 }
 
 /// Delete `pane_live` rows whose pane is not in any managed session.
@@ -1115,6 +1181,48 @@ mod identity_key_tests {
         let launched = slots.iter().find(|s| s.slot == 1).expect("launched slot");
         assert_eq!(launched.cwd, "/tmp/moved-dir");
         assert_eq!(launched.xats_identity_key, "launched-key");
+    }
+
+    /// A pass that cannot observe a model leaves the slot's own value alone.
+    /// The conversation id here names a transcript that does not exist, which is
+    /// the ordinary shape of a failed probe.
+    #[test]
+    fn reconcile_keeps_a_slot_model_when_nothing_can_be_observed() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+        let missing = "00000000-0000-4000-8000-00000000dead";
+
+        store
+            .upsert_agent_slot(&inst.id, 0, "claude", missing, "/tmp", "%1", "", 1)
+            .unwrap();
+        store
+            .record_slot_model_probe(&inst.id, 0, "", "claude-opus-5")
+            .unwrap();
+        store
+            .upsert_pane_live("%1", "claude", missing, "/tmp", 2)
+            .unwrap();
+
+        reconcile_session(&store, &inst, &[(0, "%1".to_string())], Some("%1")).unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        assert_eq!(slots[0].model, "claude-opus-5");
+    }
+
+    /// Model continuity is a Claude capability; every other agent's slot comes
+    /// out of a pass with no model at all.
+    #[test]
+    fn reconcile_never_gives_a_non_claude_slot_a_model() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+
+        store
+            .upsert_pane_live("%1", "codex", "conv-1", "/tmp/recon", 1)
+            .unwrap();
+        reconcile_session(&store, &inst, &[(0, "%1".to_string())], Some("%1")).unwrap();
+
+        let slots = store.read_slots_for_instance(&inst.id).unwrap();
+        assert_eq!(slots[0].agent, "codex");
+        assert_eq!(slots[0].model, "");
     }
 
     #[test]

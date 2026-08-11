@@ -12,6 +12,7 @@
 //! EXISTS`), so both the migration and a defensive open path can apply it
 //! safely.
 
+pub mod claude_transcript;
 pub mod codex_rollout;
 pub mod reconcile;
 
@@ -590,6 +591,34 @@ impl Store {
         Ok(())
     }
 
+    /// Record the outcome of probing a slot's agent transcript for its model.
+    ///
+    /// The fingerprint is always stored, so a transcript that yielded nothing is
+    /// not read again until it changes. The model is stored only when something
+    /// was observed: an empty result is the absence of an observation, not an
+    /// observation of nothing, and probes come back empty for ordinary reasons
+    /// (a conversation not answered yet, a transcript that moved, a file that
+    /// could not be read). Writing it would clear a value the pane is still
+    /// running under.
+    ///
+    /// Never creates a row: a slot the reconciler has not written yet has
+    /// nothing for a model to belong to.
+    pub fn record_slot_model_probe(
+        &self,
+        instance_id: &str,
+        slot: i64,
+        fingerprint: &str,
+        model: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE agent_slot SET model_fingerprint = ?3, \
+             model = CASE WHEN ?4 != '' THEN ?4 ELSE model END \
+             WHERE instance_id = ?1 AND slot = ?2",
+            rusqlite::params![instance_id, slot, fingerprint, model],
+        )?;
+        Ok(())
+    }
+
     /// Read all valid durable slots for an instance, ordered by slot.
     pub fn read_slots_for_instance(&self, instance_id: &str) -> Result<Vec<AgentSlot>> {
         Ok(self
@@ -873,7 +902,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, \
              xats_identity_key, xats_runtime_generation, yolo_mode, cross_agent_team, \
-             worktree_info, last_seen_at \
+             worktree_info, model, model_fingerprint, last_seen_at \
              FROM agent_slot WHERE instance_id = ?1 ORDER BY slot",
         )?;
         let rows = stmt.query_map([instance_id], |r| {
@@ -889,7 +918,9 @@ impl Store {
                 r.get::<_, bool>(8)?,
                 r.get::<_, bool>(9)?,
                 r.get::<_, String>(10)?,
-                r.get::<_, i64>(11)?,
+                r.get::<_, String>(11)?,
+                r.get::<_, String>(12)?,
+                r.get::<_, i64>(13)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -919,6 +950,8 @@ impl Store {
                 yolo_mode,
                 cross_agent_team,
                 worktree_json,
+                model,
+                model_fingerprint,
                 last_seen_at,
             ) = row;
             out.push(RawAgentSlot {
@@ -933,6 +966,8 @@ impl Store {
                 yolo_mode,
                 cross_agent_team,
                 worktree_json,
+                model,
+                model_fingerprint,
                 last_seen_at,
             });
         }
@@ -980,6 +1015,8 @@ impl Store {
             yolo_mode: normalized.yolo_mode,
             cross_agent_team: normalized.cross_agent_team,
             worktree_info: normalized.worktree,
+            model: row.model,
+            model_fingerprint: row.model_fingerprint,
             last_seen_at: row.last_seen_at,
         };
         Ok(record)
@@ -1147,6 +1184,8 @@ struct RawAgentSlot {
     yolo_mode: bool,
     cross_agent_team: bool,
     worktree_json: String,
+    model: String,
+    model_fingerprint: String,
     last_seen_at: i64,
 }
 
@@ -1177,6 +1216,16 @@ pub struct AgentSlot {
     pub yolo_mode: bool,
     pub cross_agent_team: bool,
     pub worktree_info: Option<crate::session::PaneWorktreeInfo>,
+    /// Model this pane was last observed running, empty when never observed.
+    ///
+    /// A property of the seat rather than of the conversation: a fresh restart
+    /// replaces `native_session_id` and leaves this in place, so the pane comes
+    /// back on the model the user last chose there.
+    pub model: String,
+    /// Identity of the transcript state `model` was read from, empty when the
+    /// slot has never been probed. Persisted rather than cached in memory
+    /// because more than one AoE process reconciles.
+    pub model_fingerprint: String,
     pub last_seen_at: i64,
 }
 
@@ -1409,6 +1458,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             cross_agent_team   INTEGER NOT NULL DEFAULT 0,
             worktree_info      TEXT NOT NULL DEFAULT '',
             pane_config_version INTEGER NOT NULL DEFAULT 0,
+            model              TEXT NOT NULL DEFAULT '',
+            model_fingerprint  TEXT NOT NULL DEFAULT '',
             last_seen_at       INTEGER NOT NULL,
             PRIMARY KEY (instance_id, slot)
         );
@@ -1508,6 +1559,8 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
         ("cross_agent_team", "INTEGER NOT NULL DEFAULT 0"),
         ("worktree_info", "TEXT NOT NULL DEFAULT ''"),
         ("pane_config_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("model_fingerprint", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let has_column: bool = conn.query_row(
             "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = ?1",
@@ -1784,6 +1837,7 @@ mod tests {
             "cross_agent_team",
             "worktree_info",
             "pane_config_version",
+            "model",
         ] {
             assert!(column_exists(&store.conn, "agent_slot", column));
         }
@@ -1825,6 +1879,118 @@ mod tests {
         let (_fresh_tmp, fresh) = temp_store();
         ensure_schema(&fresh.conn).unwrap();
         assert!(column_exists(&fresh.conn, "agent_slot", "tmux_pane"));
+    }
+
+    /// A database from before the column keeps its rows, and the healed column
+    /// defaults to "no model observed".
+    #[test]
+    fn backfill_heals_the_model_column() {
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        assert!(!column_exists(&store.conn, "agent_slot", "model"));
+
+        ensure_schema(&store.conn).unwrap();
+        ensure_schema(&store.conn).unwrap();
+
+        for column in ["model", "model_fingerprint"] {
+            let column_count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(column_count, 1, "healing must not duplicate {column}");
+        }
+
+        let slots = store.read_slots_for_instance("legacy").unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].native_session_id, "sess");
+        assert_eq!(slots[0].model, "");
+        assert_eq!(slots[0].model_fingerprint, "");
+
+        store
+            .upsert_agent_slot("legacy", 1, "claude", "new", "/tmp", "%9", "", 2)
+            .unwrap();
+        assert_eq!(store.read_slots_for_instance("legacy").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_slot_model_survives_reopening_the_store() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("aoe.db");
+        {
+            let store = Store::open_at(&path).unwrap();
+            ensure_schema(&store.conn).unwrap();
+            store
+                .upsert_agent_slot("inst", 0, "claude", "s", "/tmp", "%1", "", 1)
+                .unwrap();
+            store
+                .record_slot_model_probe("inst", 0, "fp-1", "claude-fable-5")
+                .unwrap();
+        }
+        let reopened = Store::open_at(&path).unwrap();
+        ensure_schema(&reopened.conn).unwrap();
+        let slots = reopened.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].model, "claude-fable-5");
+        assert_eq!(
+            slots[0].model_fingerprint, "fp-1",
+            "the fingerprint outlives the process that probed, so a restart does \
+             not re-read every transcript"
+        );
+    }
+
+    /// An empty probe is the absence of an observation, not an observation of
+    /// nothing: it must never clear a model the pane is still running under.
+    #[test]
+    fn an_empty_model_never_clears_a_stored_one() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 0, "claude", "s", "/tmp", "%1", "", 1)
+            .unwrap();
+        store
+            .record_slot_model_probe("inst", 0, "fp-1", "claude-opus-5")
+            .unwrap();
+
+        // A later probe that observed nothing still advances the fingerprint.
+        store
+            .record_slot_model_probe("inst", 0, "fp-2", "")
+            .unwrap();
+        // And every capture-shaped write leaves the model alone too.
+        store
+            .upsert_agent_slot("inst", 0, "claude", "s2", "/tmp", "%1", "", 2)
+            .unwrap();
+        store
+            .upsert_agent_slot_capture("inst", 0, "claude", "s3", "/tmp", "%1", "", 3)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].model, "claude-opus-5");
+        assert_eq!(slots[0].model_fingerprint, "fp-2");
+        assert_eq!(slots[0].native_session_id, "s3");
+    }
+
+    /// Two panes of one instance run their own conversations, so they can run
+    /// their own models.
+    #[test]
+    fn slots_of_one_instance_keep_distinct_models() {
+        let (_tmp, store) = temp_store();
+        store
+            .upsert_agent_slot("inst", 0, "claude", "s0", "/tmp", "%1", "", 1)
+            .unwrap();
+        store
+            .upsert_agent_slot("inst", 1, "claude", "s1", "/tmp", "%2", "", 1)
+            .unwrap();
+        store
+            .record_slot_model_probe("inst", 0, "fp-0", "claude-opus-5")
+            .unwrap();
+        store
+            .record_slot_model_probe("inst", 1, "fp-1", "claude-fable-5")
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].model, "claude-opus-5");
+        assert_eq!(slots[1].model, "claude-fable-5");
     }
 
     #[test]

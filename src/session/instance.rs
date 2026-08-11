@@ -114,7 +114,7 @@ mod pane_level_command_tests {
             identity_key: String::new(),
         };
         let command =
-            instance.build_pane_command_with_runtime(&pane, None, true, None, Some(&runtime));
+            instance.build_pane_command_with_runtime(&pane, None, true, None, None, Some(&runtime));
 
         let error = require_launch_command(SessionLaunch::Agent, command, "opencode").unwrap_err();
         assert!(format!("{error:#}").contains("Could not build opencode launch command"));
@@ -147,6 +147,7 @@ mod pane_level_command_tests {
                 Some("ses_left"),
                 true,
                 Some("left-key"),
+                None,
                 Some(&left),
             )
             .unwrap();
@@ -156,6 +157,7 @@ mod pane_level_command_tests {
                 Some("ses_right"),
                 false,
                 Some("right-key"),
+                None,
                 Some(&right),
             )
             .unwrap();
@@ -238,6 +240,7 @@ mod pane_level_command_tests {
                 None,
                 true,
                 Some("super-secret-key"),
+                None,
                 Some(&runtime),
             )
             .unwrap();
@@ -273,6 +276,7 @@ mod pane_level_command_tests {
                 None,
                 true,
                 Some("super-secret-key"),
+                None,
                 Some(&runtime),
             )
             .unwrap();
@@ -311,6 +315,7 @@ mod pane_level_command_tests {
                 true,
                 RestartMode::Resume,
                 Some("stable-key"),
+                None,
                 Some(&resumed_runtime),
             )
             .unwrap();
@@ -323,6 +328,7 @@ mod pane_level_command_tests {
                 true,
                 RestartMode::Fresh,
                 Some("stable-key"),
+                None,
                 Some(&fresh_runtime),
             )
             .unwrap();
@@ -359,7 +365,14 @@ mod pane_level_command_tests {
         });
         let runtime = kimi_runtime(0, "session_only", "");
         assert_eq!(
-            sandboxed.build_pane_command_with_runtime(&pane, None, true, None, Some(&runtime)),
+            sandboxed.build_pane_command_with_runtime(
+                &pane,
+                None,
+                true,
+                None,
+                None,
+                Some(&runtime)
+            ),
             None
         );
     }
@@ -1914,17 +1927,22 @@ impl Instance {
             }
             None => None,
         };
+        // Slot 0 outlives the session's tmux presence, so a session started
+        // again after being stopped comes back on the model it was last seen
+        // running. A brand new session has no slot and therefore no model.
+        let observed_model = self.observed_primary_model();
         let cmd = match launch {
-            SessionLaunch::Agent => match exact_runtime.as_ref() {
-                Some(runtime) => self.build_pane_command_with_runtime(
-                    &self.primary_pane,
-                    None,
-                    true,
-                    Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
-                    Some(runtime),
-                ),
-                None => self.build_agent_command(None),
-            },
+            SessionLaunch::Agent => self.build_pane_command_with_runtime(
+                &self.primary_pane,
+                None,
+                true,
+                exact_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.identity_key.as_str())
+                    .filter(|key| !key.is_empty()),
+                observed_model.as_deref(),
+                exact_runtime.as_ref(),
+            ),
             SessionLaunch::Placeholder => None,
         };
         let cmd = require_launch_command(launch, cmd, &self.primary_pane.tool)?;
@@ -2002,6 +2020,22 @@ impl Instance {
     /// launch-context decoration pipeline.
     pub fn build_agent_command(&self, resume_token: Option<&str>) -> Option<String> {
         self.build_pane_command(&self.primary_pane, resume_token, true, None)
+    }
+
+    /// The model slot 0 was last observed running, for the launch paths that
+    /// build from the instance rather than from a slot they were handed.
+    ///
+    /// Best-effort by design: an unreadable store is no observation, and the
+    /// pane then launches exactly as it did before model continuity existed.
+    fn observed_primary_model(&self) -> Option<String> {
+        let store = crate::db::Store::open_with_schema(&Self::current_profile()).ok()?;
+        store
+            .read_slots_for_instance(&self.id)
+            .ok()?
+            .into_iter()
+            .find(|slot| slot.slot == 0)
+            .map(|slot| slot.model)
+            .filter(|model| !model.is_empty())
     }
 
     /// Build the launch command for an extra agent pane AoE adds beside the
@@ -2115,6 +2149,7 @@ impl Instance {
             None,
             false,
             Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
+            None,
             Some(&runtime),
         );
         let command = match command {
@@ -2434,15 +2469,21 @@ impl Instance {
             is_primary,
             slot_identity_key,
             None,
+            None,
         )
     }
 
+    /// `observed_model` is the model the pane's slot last recorded, `None` for a
+    /// pane that has no slot to record one (a brand new extra pane) or whose
+    /// agent has no readable model.
+    #[allow(clippy::too_many_arguments)]
     fn build_pane_command_with_runtime(
         &self,
         target: impl PaneConfigTarget,
         resume_token: Option<&str>,
         is_primary: bool,
         slot_identity_key: Option<&str>,
+        observed_model: Option<&str>,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<String> {
         let pane = target.resolve_for(self);
@@ -2467,7 +2508,8 @@ impl Instance {
             let sandbox = self.sandbox_info.as_ref()?;
             let container = DockerContainer::from_session_id(&self.id);
 
-            let base_cmd = self.build_base_pane_command(agent, resume_token, is_primary);
+            let base_cmd =
+                self.build_base_pane_command(agent, resume_token, is_primary, observed_model);
             let mut tool_cmd = if pane.yolo_mode {
                 if let Some(yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
@@ -2530,7 +2572,12 @@ impl Instance {
                                 exact_runtime,
                                 is_primary,
                             )?,
-                        None => self.build_base_pane_command(Some(a), resume_token, is_primary),
+                        None => self.build_base_pane_command(
+                            Some(a),
+                            resume_token,
+                            is_primary,
+                            observed_model,
+                        ),
                     };
                     let mut env_vars: Vec<(&str, &str)> = Vec::new();
                     if needs_instance_id {
@@ -2577,7 +2624,8 @@ impl Instance {
                     Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
                 })
             } else {
-                let mut cmd = self.build_base_pane_command(agent, resume_token, is_primary);
+                let mut cmd =
+                    self.build_base_pane_command(agent, resume_token, is_primary, observed_model);
                 let mut env_vars: Vec<(&str, &str)> = Vec::new();
                 if needs_instance_id {
                     env_vars.push(("AOE_INSTANCE_ID", &self.id));
@@ -2901,11 +2949,18 @@ impl Instance {
     /// instance-primary concepts do not apply: the command is built from the
     /// pane agent's own binary plus, when present, a resume flag from the
     /// supplied token.
+    ///
+    /// `observed_model` is the model the pane's slot last recorded. It is
+    /// appended after `extra_args` so Claude's last-`--model`-wins rule picks it
+    /// over anything the user configured there, and it is applied on both
+    /// branches: a pane beside the primary one runs its own conversation on its
+    /// own model.
     fn build_base_pane_command(
         &self,
         agent: Option<&crate::agents::AgentDef>,
         resume_token: Option<&str>,
         is_primary: bool,
+        observed_model: Option<&str>,
     ) -> String {
         if !is_primary {
             let mut cmd = agent.map_or_else(|| "bash".to_string(), |a| a.binary.to_string());
@@ -2915,7 +2970,7 @@ impl Instance {
                 let resume_flag = resume.resume_flag.replace("{}", token);
                 cmd = format!("{} {}", cmd, resume_flag);
             }
-            return cmd;
+            return append_observed_model(cmd, agent, observed_model);
         }
 
         let mut cmd = self.get_tool_command().to_string();
@@ -2961,7 +3016,7 @@ impl Instance {
         if !self.extra_args.is_empty() {
             cmd = format!("{} {}", cmd, self.extra_args);
         }
-        cmd
+        append_observed_model(cmd, agent, observed_model)
     }
 
     /// Build a new Instance that will, on its first launch, execute this agent's
@@ -3362,18 +3417,27 @@ impl Instance {
         } else {
             None
         };
+        let observed_model = self.observed_primary_model();
         let cmd = match exact_runtime.as_ref() {
             Some(runtime) => self.build_pane_command_with_runtime(
                 &pane,
                 Some(runtime.native_session_id.as_str()).filter(|id| !id.is_empty()),
                 pane_agent.is_none(),
                 Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
+                observed_model.as_deref(),
                 Some(runtime),
             ),
-            None => match pane_agent {
-                Some(_) => self.build_pane_command(&pane, None, false, None),
-                None => self.build_agent_command(effective_resume_token.as_deref()),
-            },
+            None => self.build_pane_command_with_runtime(
+                &pane,
+                match pane_agent {
+                    Some(_) => None,
+                    None => effective_resume_token.as_deref(),
+                },
+                pane_agent.is_none(),
+                None,
+                observed_model.as_deref(),
+                None,
+            ),
         }
         .ok_or_else(|| anyhow::anyhow!("No agent command available"))?;
 
@@ -3478,6 +3542,7 @@ impl Instance {
                 slot.slot == 0,
                 mode,
                 Some(identity_key.as_str()).filter(|key| !key.is_empty()),
+                Some(slot.model.as_str()).filter(|model| !model.is_empty()),
                 exact_runtime.as_ref(),
             );
             // Every Claude pane this fan-out actually relaunched raises its own
@@ -3669,6 +3734,7 @@ impl Instance {
                 slot.slot == 0,
                 mode,
                 Some(identity_key.as_str()).filter(|key| !key.is_empty()),
+                Some(slot.model.as_str()).filter(|model| !model.is_empty()),
                 exact_runtime.as_ref(),
             );
             if pane.tool == "claude"
@@ -4317,6 +4383,27 @@ fn resolve_claude_session_from_disk(project_path: &str) -> Option<String> {
     best.map(|(_, id)| id)
 }
 
+/// Append `--model <id>` for a Claude pane that has an observed model.
+///
+/// Claude is the only agent this applies to: it is the only one whose current
+/// model AoE can read back, and every other agent's command has to stay exactly
+/// what it was. The identifier is re-validated here rather than trusted from the
+/// store, because it lands in a command line that `tmux respawn-pane` runs
+/// through a shell.
+fn append_observed_model(
+    cmd: String,
+    agent: Option<&crate::agents::AgentDef>,
+    observed_model: Option<&str>,
+) -> String {
+    if agent.map(|a| a.name) != Some("claude") {
+        return cmd;
+    }
+    match observed_model.filter(|model| crate::db::claude_transcript::is_safe_model_id(model)) {
+        Some(model) => format!("{cmd} --model {model}"),
+        None => cmd,
+    }
+}
+
 fn wrap_command_ignore_suspend(cmd: &str) -> String {
     wrap_command_ignore_suspend_with_env(cmd, &[])
 }
@@ -4545,9 +4632,11 @@ impl Instance {
             mode,
             slot_identity_key,
             None,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_pane_resume_plan_with_runtime(
         &self,
         target: impl PaneConfigTarget,
@@ -4555,6 +4644,7 @@ impl Instance {
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
+        observed_model: Option<&str>,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<(String, bool)> {
         let pane = target.resolve_for(self);
@@ -4576,6 +4666,7 @@ impl Instance {
             resume_token,
             is_primary,
             slot_identity_key,
+            observed_model,
             exact_runtime,
         )?;
         Some((command, resumed))
@@ -4602,6 +4693,7 @@ impl Instance {
         is_primary: bool,
         mode: RestartMode,
         slot_identity_key: Option<&str>,
+        observed_model: Option<&str>,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> PaneResumeOutcome {
         if let Some(shape) = self.pane_exact_session_runtime(pane) {
@@ -4633,6 +4725,7 @@ impl Instance {
                 is_primary,
                 mode,
                 slot_identity_key,
+                observed_model,
                 exact_runtime,
             )
         };
@@ -5816,6 +5909,8 @@ mod tests {
             yolo_mode: false,
             cross_agent_team: true,
             worktree_info: None,
+            model: String::new(),
+            model_fingerprint: String::new(),
             last_seen_at: 1,
         }
     }
@@ -6103,6 +6198,8 @@ mod tests {
             yolo_mode: false,
             cross_agent_team: true,
             worktree_info: None,
+            model: String::new(),
+            model_fingerprint: String::new(),
             last_seen_at: 1,
         }
     }
@@ -7799,6 +7896,8 @@ mod tests {
             yolo_mode: false,
             cross_agent_team: false,
             worktree_info: None,
+            model: String::new(),
+            model_fingerprint: String::new(),
             last_seen_at: 0,
         }
     }
@@ -8719,7 +8818,7 @@ mod tests {
         let parent = parent_instance("claude", Some("parent-uuid"));
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let agent = crate::agents::get_agent("claude");
-        let cmd = fork.build_base_pane_command(agent, None, true);
+        let cmd = fork.build_base_pane_command(agent, None, true, None);
         assert!(
             cmd.contains("claude --resume parent-uuid --fork-session"),
             "expected claude fork command, got: {cmd}"
@@ -8731,7 +8830,7 @@ mod tests {
         let parent = parent_instance("codex", Some("parent-uuid"));
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let agent = crate::agents::get_agent("codex");
-        let cmd = fork.build_base_pane_command(agent, None, true);
+        let cmd = fork.build_base_pane_command(agent, None, true, None);
         assert!(
             cmd.contains("codex fork parent-uuid"),
             "expected codex fork command, got: {cmd}"
@@ -8746,7 +8845,7 @@ mod tests {
         let mut fork = parent.create_fork("f".to_string(), None).unwrap();
         fork.resume_token = Some("new-fork-uuid".to_string());
         let agent = crate::agents::get_agent("claude");
-        let cmd = fork.build_base_pane_command(agent, Some("new-fork-uuid"), true);
+        let cmd = fork.build_base_pane_command(agent, Some("new-fork-uuid"), true, None);
         assert!(
             cmd.contains("--resume new-fork-uuid") && !cmd.contains("--fork-session"),
             "expected plain resume command, got: {cmd}"
@@ -9185,5 +9284,156 @@ mod tests {
              fit the marker on one row must not read as 'no question here'. \
              screen={screen:?}"
         );
+    }
+}
+
+/// Model continuity at the one command-building exit every launch and restart
+/// path goes through.
+#[cfg(test)]
+mod observed_model_tests {
+    use super::*;
+
+    const FABLE: &str = "claude-fable-5";
+
+    fn claude_instance() -> Instance {
+        let mut inst = Instance::new("test", "/tmp/project");
+        inst.tool = "claude".to_string();
+        inst.primary_pane = PaneConfig::new("claude", "/tmp/project", false, false);
+        inst
+    }
+
+    fn plan(
+        inst: &Instance,
+        pane: &PaneConfig,
+        token: &str,
+        mode: RestartMode,
+        model: &str,
+    ) -> String {
+        inst.build_pane_resume_plan_with_runtime(
+            pane,
+            token,
+            pane.tool == inst.tool,
+            mode,
+            None,
+            Some(model).filter(|m| !m.is_empty()),
+            None,
+        )
+        .expect("launch command")
+        .0
+    }
+
+    #[test]
+    fn a_resume_restart_carries_both_the_resume_flag_and_the_model() {
+        let inst = claude_instance();
+        let token = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11";
+        let cmd = plan(
+            &inst,
+            &inst.primary_pane.clone(),
+            token,
+            RestartMode::Resume,
+            FABLE,
+        );
+
+        assert!(cmd.contains(&format!("--resume {token}")), "{cmd}");
+        assert!(cmd.contains(&format!("--model {FABLE}")), "{cmd}");
+    }
+
+    #[test]
+    fn a_fresh_restart_carries_the_model_without_a_resume_flag() {
+        let inst = claude_instance();
+        let cmd = plan(
+            &inst,
+            &inst.primary_pane.clone(),
+            "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11",
+            RestartMode::Fresh,
+            FABLE,
+        );
+
+        assert!(!cmd.contains("--resume"), "{cmd}");
+        assert!(cmd.contains(&format!("--model {FABLE}")), "{cmd}");
+    }
+
+    /// The non-primary branch used to return the bare binary plus a resume flag,
+    /// so nothing about the instance reached a pane beside the primary one.
+    #[test]
+    fn a_non_primary_claude_pane_also_carries_its_model() {
+        let inst = claude_instance();
+        let pane = PaneConfig::new("claude", "/tmp/other", false, false);
+        let cmd = plan(&inst, &pane, "", RestartMode::Fresh, FABLE);
+
+        assert!(cmd.contains(&format!("--model {FABLE}")), "{cmd}");
+    }
+
+    /// Position is the whole mechanism: Claude takes the last `--model`, so the
+    /// observed value wins without `extra_args` being parsed or rewritten.
+    #[test]
+    fn the_observed_model_is_appended_after_extra_args() {
+        let mut inst = claude_instance();
+        inst.extra_args = "--model sonnet".to_string();
+        let cmd = plan(
+            &inst,
+            &inst.primary_pane.clone(),
+            "",
+            RestartMode::Fresh,
+            FABLE,
+        );
+
+        let configured = cmd
+            .find("--model sonnet")
+            .expect("extra_args survive verbatim");
+        let observed = cmd
+            .find(&format!("--model {FABLE}"))
+            .expect("observed model present");
+        assert!(observed > configured, "{cmd}");
+    }
+
+    #[test]
+    fn a_pane_with_no_observed_model_builds_exactly_what_it_did_before() {
+        let inst = claude_instance();
+        let pane = inst.primary_pane.clone();
+        let token = "4dc7a3c8-934e-40c1-95f8-8b00fe11cf11";
+
+        let with_model = plan(&inst, &pane, token, RestartMode::Resume, FABLE);
+        let without = plan(&inst, &pane, token, RestartMode::Resume, "");
+
+        assert!(!without.contains("--model"), "{without}");
+        assert_eq!(
+            without,
+            with_model.replace(&format!(" --model {FABLE}"), "")
+        );
+    }
+
+    /// Model continuity is a Claude capability; another agent's command is
+    /// byte-for-byte what it was, even when a model somehow reached its slot.
+    #[test]
+    fn a_non_claude_pane_is_never_given_a_model_flag() {
+        let mut inst = Instance::new("test", "/tmp/project");
+        inst.tool = "codex".to_string();
+        inst.primary_pane = PaneConfig::new("codex", "/tmp/project", false, false);
+        let pane = inst.primary_pane.clone();
+        let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
+
+        let with_model = plan(&inst, &pane, token, RestartMode::Resume, FABLE);
+        let without = plan(&inst, &pane, token, RestartMode::Resume, "");
+
+        assert!(!with_model.contains("--model"), "{with_model}");
+        assert_eq!(with_model, without);
+    }
+
+    /// The value reaches a shell through `respawn-pane`. A row that does not
+    /// hold a model identifier is not turned into one.
+    #[test]
+    fn an_unsafe_stored_model_never_reaches_the_command() {
+        let inst = claude_instance();
+        let cmd = plan(
+            &inst,
+            &inst.primary_pane.clone(),
+            "",
+            RestartMode::Fresh,
+            "sonnet; rm -rf /",
+        );
+
+        assert!(!cmd.contains("--model"), "{cmd}");
+        assert!(!cmd.contains("rm -rf"), "{cmd}");
     }
 }

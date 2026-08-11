@@ -19,6 +19,10 @@ mod harness;
 
 mod agent_session_store;
 mod attach_reconcile;
+mod claude_model_continuity;
+mod claude_model_injection;
+mod claude_model_schema;
+mod claude_model_support;
 mod cli;
 mod codex_xats;
 mod cold_start_recovery;
