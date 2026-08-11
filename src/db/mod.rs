@@ -702,20 +702,30 @@ impl Store {
 
     /// Bind a pane id to a slot provisioned before tmux create/split without
     /// disturbing its prepared generation or exact session state.
+    ///
+    /// `native_session_id` is the conversation the caller believes the slot
+    /// already holds, and completes the provisioning token the same way it does
+    /// for a rollback: an owned-server caller passes an empty one because its
+    /// runtime wrapper mints the conversation after the pane exists, while a
+    /// shared-server caller passes the session AoE minted before launch.
+    /// Assuming either shape here would silently match no row for the other.
+    #[allow(clippy::too_many_arguments)]
     pub fn bind_prepared_slot_pane(
         &self,
         instance_id: &str,
+        agent: &str,
         slot: i64,
         generation: i64,
         identity_key: &str,
+        native_session_id: &str,
         tmux_pane: &str,
         last_seen_at: i64,
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE agent_slot SET tmux_pane = ?1, last_seen_at = ?2 \
-             WHERE instance_id = ?3 AND slot = ?4 AND agent = 'opencode' \
+             WHERE instance_id = ?3 AND slot = ?4 AND agent = ?7 \
                AND xats_runtime_generation = ?5 AND xats_identity_key = ?6 \
-               AND tmux_pane = '' AND native_session_id = ''",
+               AND tmux_pane = '' AND native_session_id = ?8",
             rusqlite::params![
                 tmux_pane,
                 last_seen_at,
@@ -723,11 +733,14 @@ impl Store {
                 slot,
                 generation,
                 identity_key,
+                agent,
+                native_session_id,
             ],
         )?;
         if changed != 1 {
             anyhow::bail!(
-                "prepared slot {} for instance '{}' was not found",
+                "prepared {} slot {} for instance '{}' was not found",
+                agent,
                 slot,
                 instance_id
             );
@@ -2487,7 +2500,16 @@ mod tests {
 
         let live_snapshot_at = 10;
         binder
-            .bind_prepared_slot_pane("inst", slot, prepared.generation, "new-key", "%new", 11)
+            .bind_prepared_slot_pane(
+                "inst",
+                "opencode",
+                slot,
+                prepared.generation,
+                "new-key",
+                "",
+                "%new",
+                11,
+            )
             .unwrap();
         let live = ["%live-2".to_string(), "%live-3".to_string()];
 
@@ -2542,18 +2564,103 @@ mod tests {
             .unwrap();
 
         assert!(store
-            .bind_prepared_slot_pane("inst", slot, prepared.generation + 1, "key", "%1", 2,)
+            .bind_prepared_slot_pane(
+                "inst",
+                "opencode",
+                slot,
+                prepared.generation + 1,
+                "key",
+                "",
+                "%1",
+                2,
+            )
             .is_err());
         assert!(store
-            .bind_prepared_slot_pane("inst", slot, prepared.generation, "other-key", "%1", 2,)
+            .bind_prepared_slot_pane(
+                "inst",
+                "opencode",
+                slot,
+                prepared.generation,
+                "other-key",
+                "",
+                "%1",
+                2,
+            )
             .is_err());
         store
-            .bind_prepared_slot_pane("inst", slot, prepared.generation, "key", "%1", 2)
+            .bind_prepared_slot_pane(
+                "inst",
+                "opencode",
+                slot,
+                prepared.generation,
+                "key",
+                "",
+                "%1",
+                2,
+            )
             .unwrap();
         assert_eq!(
             store.read_slots_for_instance("inst").unwrap()[0].tmux_pane,
             "%1"
         );
+    }
+
+    /// A shared-server slot carries the session AoE minted before the split, so
+    /// binding it must match on that conversation rather than on the empty one an
+    /// owned-server slot still has. Assuming either shape matched no row for the
+    /// other, which surfaced as an extra pane that launched and then reported its
+    /// identity key as unrecorded.
+    #[test]
+    fn prepared_shared_server_bind_matches_the_session_minted_before_launch() {
+        let (_tmp, store) = temp_store();
+        let pane = crate::session::PaneConfig::new("kimi", "/tmp", false, true);
+        let (slot, prepared) = store
+            .prepare_new_exact_session_slot("inst", &pane, "key", &[], 1, 1)
+            .unwrap();
+        store
+            .upsert_agent_slot_config("inst", slot, &pane, "session_abc", "", "key", 1)
+            .unwrap();
+
+        assert!(store
+            .bind_prepared_slot_pane(
+                "inst",
+                "kimi",
+                slot,
+                prepared.generation,
+                "key",
+                "",
+                "%1",
+                2
+            )
+            .is_err());
+        assert!(store
+            .bind_prepared_slot_pane(
+                "inst",
+                "opencode",
+                slot,
+                prepared.generation,
+                "key",
+                "session_abc",
+                "%1",
+                2
+            )
+            .is_err());
+
+        store
+            .bind_prepared_slot_pane(
+                "inst",
+                "kimi",
+                slot,
+                prepared.generation,
+                "key",
+                "session_abc",
+                "%1",
+                2,
+            )
+            .unwrap();
+        let row = &store.read_slots_for_instance("inst").unwrap()[0];
+        assert_eq!(row.tmux_pane, "%1");
+        assert_eq!(row.native_session_id, "session_abc");
     }
 
     #[test]

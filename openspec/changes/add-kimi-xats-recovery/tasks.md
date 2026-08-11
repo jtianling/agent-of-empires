@@ -50,6 +50,7 @@
 ## 7. Launch、restart 与 recovery 集成
 
 - [x] 7.1 普通 host kimi primary/secondary launch 使用统一准备路径并立即建立可 capture 的 slot
+- [x] 7.10 extra pane 的 slot 绑定按 agent 与 slot 已持有的会话匹配, 不假定 slot 无会话 (owned-server 传空, shared-server 传启动前铸好的会话)
 - [x] 7.2 环境注入实现先删后设, 覆盖 base URL、session id 与远程引擎模式
 - [x] 7.3 保证 identity key 既不进入 pane command argv 也不进入 pane 环境, 只从 durable slot 读出用于 xats 请求体
 - [x] 7.4 `Shift+R` 对每个 kimi slot 使用准确 durable session

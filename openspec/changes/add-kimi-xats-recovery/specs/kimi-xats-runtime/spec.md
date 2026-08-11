@@ -78,6 +78,11 @@ For a fresh kimi conversation AoE SHALL create the session through the kimi serv
 - **AND** the conversation SHALL contain no AoE-authored message
 - **AND** AoE SHALL NOT poll for a filesystem artifact
 
+#### Scenario: The launched pane binds to the slot that already holds its session
+- **WHEN** AoE attaches a newly created pane to the slot it provisioned
+- **THEN** the binding SHALL match that slot by the agent and by the conversation the slot already holds
+- **AND** SHALL NOT assume the slot is conversationless, which is only true of a runtime that mints its session after the pane exists
+
 #### Scenario: Working directory mismatch is rejected
 - **WHEN** the pane working directory differs from the session's recorded working directory
 - **THEN** AoE SHALL fail the launch before starting the TUI

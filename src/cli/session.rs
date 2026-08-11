@@ -285,6 +285,7 @@ async fn add_agent_pane(profile: &str, args: AddAgentPaneArgs) -> Result<()> {
             pane_id: &pane_id,
             config: &pane_config,
             identity_key: &launch.identity_key,
+            native_session_id: &launch.native_session_id,
             prepared_slot: launch.prepared_slot,
             prepared_generation: launch.prepared_generation,
         },

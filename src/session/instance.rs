@@ -4475,9 +4475,11 @@ impl ExactSessionRuntimeContext {
         match self.shape {
             crate::agents::ExactSessionRuntime::OwnedServer => store.bind_prepared_slot_pane(
                 instance_id,
+                &pane.tool,
                 self.slot,
                 self.generation,
                 &self.identity_key,
+                "",
                 pane_id,
                 crate::db::now_unix(),
             ),

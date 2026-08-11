@@ -124,6 +124,10 @@ pub struct LaunchedPane<'a> {
     pub config: &'a crate::session::PaneConfig,
     /// The identity key minted for this pane, empty when it gets none.
     pub identity_key: &'a str,
+    /// The conversation the provisioned slot already holds. Empty unless AoE
+    /// minted one before launch; it completes the binding token the same way it
+    /// completes a rollback token.
+    pub native_session_id: &'a str,
     /// Slot provisioned before the pane process started.
     pub prepared_slot: Option<i64>,
     pub prepared_generation: Option<i64>,
@@ -206,9 +210,11 @@ fn record_launched_extra_pane_among(
         (Some(prepared_slot), Some(prepared_generation)) => {
             return store.bind_prepared_slot_pane(
                 instance_id,
+                &pane.config.tool,
                 prepared_slot,
                 prepared_generation,
                 pane.identity_key,
+                pane.native_session_id,
                 pane.pane_id,
                 now,
             );
@@ -988,6 +994,7 @@ mod identity_key_tests {
                 pane_id: "%2",
                 config: &launched,
                 identity_key: "launched-key",
+                native_session_id: "",
                 prepared_slot: None,
                 prepared_generation: None,
             },
@@ -1023,6 +1030,7 @@ mod identity_key_tests {
                     pane_id: "%2",
                     config: &launched,
                     identity_key: "",
+                    native_session_id: "",
                     prepared_slot: None,
                     prepared_generation: None,
                 },
@@ -1060,6 +1068,7 @@ mod identity_key_tests {
                 pane_id: "%2",
                 config: &launched,
                 identity_key: "launched-key",
+                native_session_id: "",
                 prepared_slot: None,
                 prepared_generation: None,
             },
