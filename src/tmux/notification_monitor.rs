@@ -766,10 +766,8 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
-    fn setup_test_home(temp: &TempDir) {
-        std::env::set_var("HOME", temp.path());
-        #[cfg(target_os = "linux")]
-        std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+    fn setup_test_home(temp: &TempDir) -> crate::session::TestHomeGuard {
+        crate::session::scoped_test_home(temp.path())
     }
 
     #[test]
@@ -1080,7 +1078,7 @@ mod tests {
     #[serial]
     fn test_write_ack_signal_round_trips_through_take_ack_signal() {
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _home = setup_test_home(&temp);
 
         write_ack_signal("abc123").unwrap();
         assert_eq!(take_ack_signal(), Some("abc123".to_string()));

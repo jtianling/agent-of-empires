@@ -15,29 +15,34 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn setup_test_home(temp: &TempDir) {
-    std::env::set_var("HOME", temp.path());
-    #[cfg(target_os = "linux")]
-    std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+fn setup_test_home(temp: &TempDir) -> crate::session::TestHomeGuard {
+    crate::session::scoped_test_home(temp.path())
 }
 
 struct TestEnv {
     _temp: TempDir,
+    /// Held for the env's whole life: the guard restores `HOME` when it drops,
+    /// so leaving it in the builder would restore it before the test even runs.
+    _home: crate::session::TestHomeGuard,
     view: HomeView,
 }
 
 fn create_test_env_empty() -> TestEnv {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        _temp: temp,
+        _home,
+        view,
+    }
 }
 
 fn create_test_env_with_sessions(count: usize) -> TestEnv {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut instances = Vec::new();
     for i in 0..count {
@@ -50,12 +55,16 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
 
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        _temp: temp,
+        _home,
+        view,
+    }
 }
 
 fn create_test_env_with_groups() -> TestEnv {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut instances = Vec::new();
 
@@ -74,12 +83,16 @@ fn create_test_env_with_groups() -> TestEnv {
 
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        _temp: temp,
+        _home,
+        view,
+    }
 }
 
 fn create_test_env_with_group_rename_conflict() -> TestEnv {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut instances = Vec::new();
 
@@ -103,14 +116,18 @@ fn create_test_env_with_group_rename_conflict() -> TestEnv {
 
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        _temp: temp,
+        _home,
+        view,
+    }
 }
 
 fn create_test_env_with_mixed_sessions() -> TestEnv {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut instances = Vec::new();
 
@@ -134,7 +151,11 @@ fn create_test_env_with_mixed_sessions() -> TestEnv {
 
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        _temp: temp,
+        _home,
+        view,
+    }
 }
 
 #[test]
@@ -985,7 +1006,7 @@ fn test_codex_fork_not_ready_hint_points_to_resume_restart() {
     // Codex fork needs a captured resume_token. `R` (resume restart) preserves it;
     // `C` (clean restart) clears it, so the guard hint must point to `R`.
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut inst = Instance::new("codexsession", "/tmp/codex");
     // The pane is authoritative for the tool; the instance field mirrors it.
@@ -1018,7 +1039,7 @@ fn test_codex_fork_not_ready_hint_points_to_resume_restart() {
 #[serial]
 fn test_managed_host_opencode_fork_fails_closed() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut inst = Instance::new("opencodesession", "/tmp/opencode");
     let mut pane = inst.primary_pane_config().clone();
@@ -1311,7 +1332,7 @@ fn test_uppercase_p_picker_esc_closes() {
 #[serial]
 fn test_uppercase_p_picker_switch_profile() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
 
     crate::session::create_profile("first").unwrap();
     crate::session::create_profile("second").unwrap();
@@ -1372,7 +1393,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     use crate::session::{GroupTree, SandboxInfo};
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut instances = Vec::new();
 
@@ -1409,7 +1430,11 @@ fn create_test_env_with_group_sessions() -> TestEnv {
 
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools, std::env::current_dir().unwrap_or_default()).unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        _temp: temp,
+        _home,
+        view,
+    }
 }
 
 #[test]
@@ -1419,7 +1444,7 @@ fn test_group_has_managed_worktrees() {
     use chrono::Utc;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -1454,7 +1479,7 @@ fn test_group_has_containers() {
     use crate::session::SandboxInfo;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -1575,7 +1600,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
     use chrono::Utc;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -1621,7 +1646,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
     use crate::tui::dialogs::GroupDeleteOptions;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _home = setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");

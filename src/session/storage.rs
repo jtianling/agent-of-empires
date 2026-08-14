@@ -109,17 +109,15 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
 
-    fn setup_test_home(temp: &std::path::Path) {
-        std::env::set_var("HOME", temp);
-        #[cfg(target_os = "linux")]
-        std::env::set_var("XDG_CONFIG_HOME", temp.join(".config"));
+    fn setup_test_home(temp: &std::path::Path) -> crate::session::TestHomeGuard {
+        crate::session::scoped_test_home(temp)
     }
 
     #[test]
     #[serial]
     fn test_storage_roundtrip() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-profile")?;
 
@@ -142,7 +140,7 @@ mod tests {
     #[serial]
     fn test_storage_new_with_empty_profile() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("")?;
         assert_eq!(storage.profile(), "default");
@@ -153,7 +151,7 @@ mod tests {
     #[serial]
     fn test_storage_new_with_custom_profile() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("custom-profile")?;
         assert_eq!(storage.profile(), "custom-profile");
@@ -164,7 +162,7 @@ mod tests {
     #[serial]
     fn test_storage_load_nonexistent_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-empty")?;
         let loaded = storage.load()?;
@@ -177,7 +175,7 @@ mod tests {
     #[serial]
     fn test_storage_load_empty_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-empty-file")?;
 
@@ -194,7 +192,7 @@ mod tests {
     #[serial]
     fn test_storage_load_whitespace_only_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-whitespace")?;
 
@@ -210,7 +208,7 @@ mod tests {
     #[serial]
     fn test_storage_save_creates_backup() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-backup")?;
 
@@ -236,7 +234,7 @@ mod tests {
     #[serial]
     fn test_storage_save_empty_array() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-empty-save")?;
         storage.save(&[])?;
@@ -250,7 +248,7 @@ mod tests {
     #[serial]
     fn test_storage_load_with_groups_no_groups_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-no-groups")?;
 
@@ -267,7 +265,7 @@ mod tests {
     #[serial]
     fn test_storage_save_and_load_with_groups() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-with-groups")?;
 
@@ -290,7 +288,7 @@ mod tests {
     #[serial]
     fn test_storage_load_invalid_json() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-invalid")?;
 
@@ -306,7 +304,7 @@ mod tests {
     #[serial]
     fn test_storage_preserves_instance_fields() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-fields")?;
 
@@ -337,7 +335,7 @@ mod tests {
     #[serial]
     fn test_storage_profile_accessor() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         // Verify profiles are correctly named
         let storage1 = Storage::new("profile-alpha")?;
@@ -355,7 +353,7 @@ mod tests {
     #[serial]
     fn test_storage_groups_file_empty() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let storage = Storage::new("test-empty-groups")?;
 

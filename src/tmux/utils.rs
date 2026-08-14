@@ -963,10 +963,8 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use tempfile::TempDir;
 
-    fn setup_test_home(temp: &TempDir) {
-        std::env::set_var("HOME", temp.path());
-        #[cfg(target_os = "linux")]
-        std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+    fn setup_test_home(temp: &TempDir) -> crate::session::TestHomeGuard {
+        crate::session::scoped_test_home(temp.path())
     }
 
     fn tmux_available() -> bool {
@@ -1473,7 +1471,7 @@ mod tests {
         crate::tmux::isolate_tmux_socket();
 
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _home = setup_test_home(&temp);
 
         let mut config = crate::session::config::Config::default();
         config.app_state.sort_order = Some(SortOrder::AZ);
@@ -1534,7 +1532,7 @@ mod tests {
         crate::tmux::isolate_tmux_socket();
 
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _home = setup_test_home(&temp);
 
         let session_name = format!("aoe_clear_from_title_{}", std::process::id());
         create_tmux_session(&session_name);
@@ -1565,7 +1563,7 @@ mod tests {
         crate::tmux::isolate_tmux_socket();
 
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _home = setup_test_home(&temp);
 
         // Global options only persist while a server is alive on the socket, so
         // anchor one with a throwaway session instead of relying on test order.
@@ -1630,7 +1628,7 @@ mod tests {
     #[serial]
     fn test_current_home_sort_order_reads_saved_app_state() {
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _home = setup_test_home(&temp);
         let storage = crate::session::Storage::new("default").unwrap();
         let _ = storage.load_with_groups().unwrap();
 

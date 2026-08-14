@@ -54,6 +54,59 @@ use std::path::PathBuf;
 pub const DEFAULT_PROFILE: &str = "default";
 const AUTO_PROFILE_PREFIX: &str = "auto-";
 
+/// Test-only: the previous `HOME` (and `XDG_CONFIG_HOME` on Linux), put back
+/// when this drops.
+///
+/// Restoring matters as much as setting. The temp directory a test points
+/// `HOME` at is deleted when that test ends, so a `HOME` left behind names a
+/// directory that no longer exists, and every later test that reads a real
+/// home -- to expand `~`, to resolve the user config -- either fails or, worse,
+/// quietly reads something else. A test has also been seen passing only because
+/// a leaked `HOME` happened to hide the developer's real config from it.
+///
+/// Bind it to a named variable: `let _home = scoped_test_home(dir);`. Binding
+/// to `_` drops it immediately and restores `HOME` before the test body runs.
+#[cfg(test)]
+#[must_use = "binding to `_` restores HOME immediately; use `let _home = ...`"]
+pub(crate) struct TestHomeGuard {
+    home: Option<std::ffi::OsString>,
+    #[cfg(target_os = "linux")]
+    xdg_config_home: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl Drop for TestHomeGuard {
+    fn drop(&mut self) {
+        match self.home.take() {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        #[cfg(target_os = "linux")]
+        match self.xdg_config_home.take() {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+}
+
+/// Test-only: point `HOME` (and `XDG_CONFIG_HOME` on Linux) at `dir` until the
+/// returned guard drops.
+///
+/// Callers MUST be `#[serial]`: these variables are process-wide, so two tests
+/// holding a guard at once see each other's home.
+#[cfg(test)]
+pub(crate) fn scoped_test_home(dir: &std::path::Path) -> TestHomeGuard {
+    let guard = TestHomeGuard {
+        home: std::env::var_os("HOME"),
+        #[cfg(target_os = "linux")]
+        xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+    };
+    std::env::set_var("HOME", dir);
+    #[cfg(target_os = "linux")]
+    std::env::set_var("XDG_CONFIG_HOME", dir.join(".config"));
+    guard
+}
+
 pub fn get_app_dir() -> Result<PathBuf> {
     let dir = get_app_dir_path()?;
     if !dir.exists() {
@@ -368,10 +421,8 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
 
-    fn setup_test_home(temp: &std::path::Path) {
-        std::env::set_var("HOME", temp);
-        #[cfg(target_os = "linux")]
-        std::env::set_var("XDG_CONFIG_HOME", temp.join(".config"));
+    fn setup_test_home(temp: &std::path::Path) -> super::TestHomeGuard {
+        super::scoped_test_home(temp)
     }
 
     #[test]
@@ -441,7 +492,7 @@ mod tests {
     #[serial]
     fn test_register_and_unregister_instance() {
         let temp = tempdir().unwrap();
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let test_profile = "test-instance-tracking";
         let _ = delete_profile(test_profile);
@@ -464,7 +515,7 @@ mod tests {
     #[serial]
     fn test_has_other_instances_false_when_alone() {
         let temp = tempdir().unwrap();
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let test_profile = "test-has-other-alone";
         let _ = delete_profile(test_profile);
@@ -481,7 +532,7 @@ mod tests {
     #[serial]
     fn test_cleanup_stale_instances() {
         let temp = tempdir().unwrap();
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let test_profile = "test-stale-cleanup";
         let _ = delete_profile(test_profile);
@@ -506,7 +557,7 @@ mod tests {
     #[serial]
     fn test_cleanup_empty_profile_respects_other_instances() {
         let temp = tempdir().unwrap();
-        setup_test_home(temp.path());
+        let _home = setup_test_home(temp.path());
 
         let test_profile = "test-cleanup-multi";
         let _ = delete_profile(test_profile);
