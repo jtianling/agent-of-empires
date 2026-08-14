@@ -292,6 +292,15 @@ impl Store {
         Ok(())
     }
 
+    /// Write a pane's configuration onto its durable slot.
+    ///
+    /// A declared xats identity already stored wins over an empty one passed in.
+    /// Only some of the many relaunch paths carry the pane config a slot was
+    /// declared with, and the ones that rebuild it from a capture or from the
+    /// instance's own primary pane carry no declaration at all; letting an empty
+    /// value through would clear on relaunch exactly the thing that exists so the
+    /// user does not have to name the pane again. A non-empty value still wins,
+    /// so a declaration can be changed, just not silently dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_agent_slot_config(
         &self,
@@ -311,14 +320,20 @@ impl Store {
         self.conn.execute(
             "INSERT INTO agent_slot \
              (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
-              yolo_mode, cross_agent_team, worktree_info, pane_config_version, last_seen_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11) \
+              yolo_mode, cross_agent_team, worktree_info, xats_team, xats_agent_name, \
+              pane_config_version, last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13, 1, ?11) \
              ON CONFLICT(instance_id, slot) DO UPDATE SET \
              agent = excluded.agent, native_session_id = excluded.native_session_id, \
              cwd = excluded.cwd, tmux_pane = excluded.tmux_pane, \
              xats_identity_key = excluded.xats_identity_key, \
              yolo_mode = excluded.yolo_mode, cross_agent_team = excluded.cross_agent_team, \
-             worktree_info = excluded.worktree_info, pane_config_version = 1, \
+             worktree_info = excluded.worktree_info, \
+             xats_team = CASE WHEN excluded.xats_team != '' \
+               THEN excluded.xats_team ELSE agent_slot.xats_team END, \
+             xats_agent_name = CASE WHEN excluded.xats_agent_name != '' \
+               THEN excluded.xats_agent_name ELSE agent_slot.xats_agent_name END, \
+             pane_config_version = 1, \
              last_seen_at = excluded.last_seen_at",
             rusqlite::params![
                 instance_id,
@@ -331,7 +346,9 @@ impl Store {
                 pane.yolo_mode,
                 pane.cross_agent_team,
                 worktree_info,
-                last_seen_at
+                last_seen_at,
+                pane.xats_team,
+                pane.xats_agent_name
             ],
         )?;
         Ok(())
@@ -487,8 +504,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO agent_slot \
              (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
-              yolo_mode, cross_agent_team, worktree_info, pane_config_version, last_seen_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11) \
+              yolo_mode, cross_agent_team, worktree_info, xats_team, xats_agent_name, \
+              pane_config_version, last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13, 1, ?11) \
              ON CONFLICT(instance_id, slot) DO UPDATE SET \
              agent = excluded.agent, native_session_id = excluded.native_session_id, \
              cwd = excluded.cwd, tmux_pane = excluded.tmux_pane, \
@@ -497,6 +515,10 @@ impl Store {
              xats_identity_key = CASE \
                WHEN agent_slot.xats_identity_key != '' THEN agent_slot.xats_identity_key \
                ELSE excluded.xats_identity_key END, \
+             xats_team = CASE WHEN excluded.xats_team != '' \
+               THEN excluded.xats_team ELSE agent_slot.xats_team END, \
+             xats_agent_name = CASE WHEN excluded.xats_agent_name != '' \
+               THEN excluded.xats_agent_name ELSE agent_slot.xats_agent_name END, \
              last_seen_at = excluded.last_seen_at",
             rusqlite::params![
                 instance_id,
@@ -509,7 +531,9 @@ impl Store {
                 pane.yolo_mode,
                 pane.cross_agent_team,
                 worktree_info,
-                last_seen_at
+                last_seen_at,
+                pane.xats_team,
+                pane.xats_agent_name
             ],
         )?;
         Ok(())
@@ -572,8 +596,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO agent_slot \
              (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
-              yolo_mode, cross_agent_team, worktree_info, pane_config_version, last_seen_at) \
-             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10) \
+              yolo_mode, cross_agent_team, worktree_info, xats_team, xats_agent_name, \
+              pane_config_version, last_seen_at) \
+             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, ?11, ?12, 1, ?10) \
              ON CONFLICT(instance_id, slot) DO NOTHING",
             rusqlite::params![
                 instance_id,
@@ -585,7 +610,9 @@ impl Store {
                 pane.yolo_mode,
                 pane.cross_agent_team,
                 worktree_info,
-                last_seen_at
+                last_seen_at,
+                pane.xats_team,
+                pane.xats_agent_name
             ],
         )?;
         Ok(())
@@ -902,7 +929,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, \
              xats_identity_key, xats_runtime_generation, yolo_mode, cross_agent_team, \
-             worktree_info, model, model_fingerprint, last_seen_at \
+             worktree_info, model, model_fingerprint, last_seen_at, \
+             xats_team, xats_agent_name \
              FROM agent_slot WHERE instance_id = ?1 ORDER BY slot",
         )?;
         let rows = stmt.query_map([instance_id], |r| {
@@ -921,6 +949,7 @@ impl Store {
                 r.get::<_, String>(11)?,
                 r.get::<_, String>(12)?,
                 r.get::<_, i64>(13)?,
+                (r.get::<_, String>(14)?, r.get::<_, String>(15)?),
             ))
         })?;
         let mut out = Vec::new();
@@ -953,6 +982,7 @@ impl Store {
                 model,
                 model_fingerprint,
                 last_seen_at,
+                (xats_team, xats_agent_name),
             ) = row;
             out.push(RawAgentSlot {
                 instance_id: row_instance_id,
@@ -966,6 +996,8 @@ impl Store {
                 yolo_mode,
                 cross_agent_team,
                 worktree_json,
+                xats_team,
+                xats_agent_name,
                 model,
                 model_fingerprint,
                 last_seen_at,
@@ -983,6 +1015,8 @@ impl Store {
             row.cross_agent_team,
         );
         normalized.worktree = worktree_info;
+        normalized.xats_team = row.xats_team.clone();
+        normalized.xats_agent_name = row.xats_agent_name.clone();
         normalized.validate()?;
         if normalized.yolo_mode != row.yolo_mode
             || normalized.cross_agent_team != row.cross_agent_team
@@ -1015,6 +1049,8 @@ impl Store {
             yolo_mode: normalized.yolo_mode,
             cross_agent_team: normalized.cross_agent_team,
             worktree_info: normalized.worktree,
+            xats_team: row.xats_team,
+            xats_agent_name: row.xats_agent_name,
             model: row.model,
             model_fingerprint: row.model_fingerprint,
             last_seen_at: row.last_seen_at,
@@ -1184,6 +1220,8 @@ struct RawAgentSlot {
     yolo_mode: bool,
     cross_agent_team: bool,
     worktree_json: String,
+    xats_team: String,
+    xats_agent_name: String,
     model: String,
     model_fingerprint: String,
     last_seen_at: i64,
@@ -1216,6 +1254,12 @@ pub struct AgentSlot {
     pub yolo_mode: bool,
     pub cross_agent_team: bool,
     pub worktree_info: Option<crate::session::PaneWorktreeInfo>,
+    /// xats team the user declared for this pane, empty when undeclared. Opaque
+    /// to AoE, and a property of the seat rather than of the conversation: every
+    /// relaunch path that keeps the slot keeps this too.
+    pub xats_team: String,
+    /// xats agent name the user declared for this pane, empty when undeclared.
+    pub xats_agent_name: String,
     /// Model this pane was last observed running, empty when never observed.
     ///
     /// A property of the seat rather than of the conversation: a fresh restart
@@ -1236,6 +1280,8 @@ impl AgentSlot {
             working_dir: self.cwd.clone(),
             yolo_mode: self.yolo_mode,
             cross_agent_team: self.cross_agent_team,
+            xats_team: self.xats_team.clone(),
+            xats_agent_name: self.xats_agent_name.clone(),
             worktree: self.worktree_info.clone(),
         }
     }
@@ -1339,8 +1385,8 @@ fn insert_new_exact_session_slot(
         "INSERT INTO agent_slot \
          (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
           xats_runtime_generation, yolo_mode, cross_agent_team, worktree_info, \
-          pane_config_version, last_seen_at) \
-         VALUES (?1, ?2, ?9, '', ?3, '', ?4, 1, ?5, ?6, ?7, 1, ?8)",
+          xats_team, xats_agent_name, pane_config_version, last_seen_at) \
+         VALUES (?1, ?2, ?9, '', ?3, '', ?4, 1, ?5, ?6, ?7, ?10, ?11, 1, ?8)",
         rusqlite::params![
             instance_id,
             slot,
@@ -1351,11 +1397,19 @@ fn insert_new_exact_session_slot(
             worktree_info,
             last_seen_at,
             pane.tool,
+            pane.xats_team,
+            pane.xats_agent_name,
         ],
     )?;
     Ok((slot, 1))
 }
 
+/// Unlike the upserts, this writes the declared xats identity unconditionally,
+/// without their `CASE WHEN excluded.xats_team != ''` guard. That is deliberate:
+/// this statement only fires when a new pane takes over a slot whose previous
+/// occupant is gone, and the incoming pane's declaration -- including no
+/// declaration -- is then the truth. The guard exists to stop a RELAUNCH of the
+/// same pane from clearing what it already has, which is a different situation.
 #[allow(clippy::too_many_arguments)]
 fn replace_stale_exact_session_slot(
     transaction: &Transaction<'_>,
@@ -1373,6 +1427,7 @@ fn replace_stale_exact_session_slot(
         "UPDATE agent_slot SET agent = ?12, native_session_id = '', cwd = ?1, \
          tmux_pane = '', xats_identity_key = ?2, xats_runtime_generation = ?3, \
          yolo_mode = ?4, cross_agent_team = ?5, worktree_info = ?6, \
+         xats_team = ?13, xats_agent_name = ?14, \
          pane_config_version = 1, last_seen_at = ?7 \
          WHERE instance_id = ?8 AND slot = ?9 AND xats_runtime_generation = ?10 \
            AND tmux_pane = ?11",
@@ -1389,6 +1444,8 @@ fn replace_stale_exact_session_slot(
             generation,
             tmux_pane,
             pane.tool,
+            pane.xats_team,
+            pane.xats_agent_name,
         ],
     )?;
     if changed != 1 {
@@ -1458,6 +1515,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             cross_agent_team   INTEGER NOT NULL DEFAULT 0,
             worktree_info      TEXT NOT NULL DEFAULT '',
             pane_config_version INTEGER NOT NULL DEFAULT 0,
+            xats_team          TEXT NOT NULL DEFAULT '',
+            xats_agent_name    TEXT NOT NULL DEFAULT '',
             model              TEXT NOT NULL DEFAULT '',
             model_fingerprint  TEXT NOT NULL DEFAULT '',
             last_seen_at       INTEGER NOT NULL,
@@ -1559,6 +1618,8 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
         ("cross_agent_team", "INTEGER NOT NULL DEFAULT 0"),
         ("worktree_info", "TEXT NOT NULL DEFAULT ''"),
         ("pane_config_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("xats_team", "TEXT NOT NULL DEFAULT ''"),
+        ("xats_agent_name", "TEXT NOT NULL DEFAULT ''"),
         ("model", "TEXT NOT NULL DEFAULT ''"),
         ("model_fingerprint", "TEXT NOT NULL DEFAULT ''"),
     ] {
@@ -1848,6 +1909,119 @@ mod tests {
         assert_eq!(slots[0].native_session_id, "sess");
         assert_eq!(slots[0].tmux_pane, "");
         assert_eq!(slots[0].xats_runtime_generation, 0);
+    }
+
+    /// A pane's declared xats identity travels through the slot untouched,
+    /// including the quotes and spaces a role name can legitimately contain.
+    #[test]
+    fn declared_xats_identity_round_trips_through_a_slot() {
+        let (_tmp, store) = temp_store();
+        let mut pane = crate::session::PaneConfig::new("claude", "/tmp", false, true);
+        pane.xats_team = "monkeys team".to_string();
+        pane.xats_agent_name = "mvr 'coder'".to_string();
+
+        store
+            .upsert_agent_slot_config("inst", 0, &pane, "sess", "%1", "key", 1)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].xats_team, "monkeys team");
+        assert_eq!(slots[0].xats_agent_name, "mvr 'coder'");
+        assert_eq!(slots[0].pane_config().xats_team, "monkeys team");
+        assert_eq!(slots[0].pane_config().xats_agent_name, "mvr 'coder'");
+    }
+
+    /// The relaunch paths that rebuild a pane config from a capture, or from the
+    /// instance's own primary pane, carry no declaration. Letting that empty
+    /// value through would clear on relaunch the very thing that exists so the
+    /// user does not have to name the pane again.
+    #[test]
+    fn a_relaunch_without_a_declaration_does_not_clear_the_stored_one() {
+        let (_tmp, store) = temp_store();
+        let mut declared = crate::session::PaneConfig::new("claude", "/tmp", false, true);
+        declared.xats_team = "monkeys".to_string();
+        declared.xats_agent_name = "mvr-coder".to_string();
+        store
+            .upsert_agent_slot_config("inst", 0, &declared, "sess", "%1", "key", 1)
+            .unwrap();
+
+        let undeclared = crate::session::PaneConfig::new("claude", "/tmp", false, true);
+        store
+            .upsert_agent_slot_config("inst", 0, &undeclared, "sess", "%2", "key", 2)
+            .unwrap();
+        store
+            .upsert_agent_slot_capture_config("inst", 0, &undeclared, "sess", "%2", "key", 3)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].xats_team, "monkeys");
+        assert_eq!(slots[0].xats_agent_name, "mvr-coder");
+    }
+
+    #[test]
+    fn a_new_declaration_replaces_the_stored_one() {
+        let (_tmp, store) = temp_store();
+        let mut pane = crate::session::PaneConfig::new("claude", "/tmp", false, true);
+        pane.xats_team = "monkeys".to_string();
+        store
+            .upsert_agent_slot_config("inst", 0, &pane, "sess", "%1", "key", 1)
+            .unwrap();
+
+        pane.xats_team = "mvr".to_string();
+        store
+            .upsert_agent_slot_config("inst", 0, &pane, "sess", "%1", "key", 2)
+            .unwrap();
+
+        assert_eq!(
+            store.read_slots_for_instance("inst").unwrap()[0].xats_team,
+            "mvr"
+        );
+    }
+
+    #[test]
+    fn sibling_slots_declare_independently() {
+        let (_tmp, store) = temp_store();
+        let mut left = crate::session::PaneConfig::new("claude", "/tmp", false, true);
+        left.xats_agent_name = "monkeys-coder".to_string();
+        let mut right = crate::session::PaneConfig::new("claude", "/tmp", false, true);
+        right.xats_agent_name = "mvr-coder".to_string();
+
+        store
+            .upsert_agent_slot_config("inst", 0, &left, "a", "%1", "key-0", 1)
+            .unwrap();
+        store
+            .upsert_agent_slot_config("inst", 1, &right, "b", "%2", "key-1", 1)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].xats_agent_name, "monkeys-coder");
+        assert_eq!(slots[1].xats_agent_name, "mvr-coder");
+    }
+
+    /// A row written before the capability existed reads as undeclared rather
+    /// than failing to read at all.
+    #[test]
+    fn slots_predating_the_declared_identity_columns_read_as_undeclared() {
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        ensure_schema(&store.conn).unwrap();
+        ensure_schema(&store.conn).unwrap();
+
+        for column in ["xats_team", "xats_agent_name"] {
+            let column_count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(column_count, 1, "healing must not duplicate {column}");
+        }
+
+        let slots = store.read_slots_for_instance("legacy").unwrap();
+        assert_eq!(slots.len(), 1, "the row survives the added columns");
+        assert_eq!(slots[0].xats_team, "");
+        assert_eq!(slots[0].xats_agent_name, "");
     }
 
     #[test]
@@ -2329,6 +2503,8 @@ mod tests {
             working_dir: "/tmp/right".to_string(),
             yolo_mode: true,
             cross_agent_team: true,
+            xats_team: String::new(),
+            xats_agent_name: String::new(),
             worktree: Some(crate::session::PaneWorktreeInfo {
                 worktree_path: Some("/tmp/right".to_string()),
                 worktree: Some(crate::session::WorktreeInfo {

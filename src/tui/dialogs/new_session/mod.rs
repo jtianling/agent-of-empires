@@ -37,6 +37,9 @@ pub(super) enum HelpVisibility {
     RightPanePath,
     Yolo,
     CrossAgentTeam,
+    /// Shown only while some pane actually has Cross Agent Team turned on, which
+    /// is the only state in which the fields exist.
+    DeclaredXatsIdentity,
 }
 
 pub(super) struct FieldHelp {
@@ -78,6 +81,11 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
         name: "Cross Agent Team",
         description: "Launch the selected tool with its local xats integration",
         visibility: HelpVisibility::CrossAgentTeam,
+    },
+    FieldHelp {
+        name: "xats Team / xats Agent Name",
+        description: "Optional identity this pane registers under (empty = the agent asks)",
+        visibility: HelpVisibility::DeclaredXatsIdentity,
     },
     FieldHelp {
         name: "Worktree",
@@ -195,6 +203,10 @@ pub(super) struct PaneDialogState {
     pub(super) create_new_branch: bool,
     pub(super) yolo_mode: bool,
     pub(super) cross_agent_team: bool,
+    /// The pane's declared xats team and agent name. Empty means undeclared, so
+    /// clearing a field is how a declaration is taken back.
+    pub(super) xats_team: Input,
+    pub(super) xats_agent_name: Input,
     pub(super) workspace_repos: Vec<String>,
     pub(super) workspace_repos_expanded: bool,
     pub(super) workspace_repo_selected_index: usize,
@@ -215,6 +227,8 @@ impl PaneDialogState {
             create_new_branch: true,
             yolo_mode,
             cross_agent_team,
+            xats_team: Input::default(),
+            xats_agent_name: Input::default(),
             workspace_repos: Vec::new(),
             workspace_repos_expanded: false,
             workspace_repo_selected_index: 0,
@@ -577,6 +591,15 @@ impl NewSessionDialog {
             .is_some_and(crate::session::Instance::supports_cross_agent_team_tool)
     }
 
+    /// Whether this pane can declare a xats identity, which is exactly when it
+    /// has Cross Agent Team and has it turned on. The fields are inert
+    /// otherwise: they carry nowhere, so offering them would invite a
+    /// declaration that quietly does nothing.
+    pub(super) fn pane_declares_xats_identity(&self, target: PaneTarget) -> bool {
+        self.pane_has_cross_agent_team(target)
+            && self.pane(target).is_some_and(|pane| pane.cross_agent_team)
+    }
+
     pub(super) fn right_pane_selection_index(&self) -> usize {
         self.secondary
             .as_ref()
@@ -650,6 +673,10 @@ impl NewSessionDialog {
             HelpVisibility::CrossAgentTeam => {
                 self.pane_has_cross_agent_team(PaneTarget::Primary)
                     || self.pane_has_cross_agent_team(PaneTarget::Secondary)
+            }
+            HelpVisibility::DeclaredXatsIdentity => {
+                self.pane_declares_xats_identity(PaneTarget::Primary)
+                    || self.pane_declares_xats_identity(PaneTarget::Secondary)
             }
         }
     }
@@ -1036,6 +1063,21 @@ impl NewSessionDialog {
                         if let Some(pane) = self.secondary.as_mut() {
                             pane.path.handle_text_key(key);
                         }
+                    } else if let Some(valid) = self.declared_identity_validator(self.focused_field)
+                    {
+                        // Refused here rather than at submit: a value the
+                        // persistent layer will not take should never become
+                        // text the user has to discover is unusable. It is also
+                        // the only place a bad declaration can be caught at all
+                        // -- once it reaches the Codex bootstrap, the daemon's
+                        // rejection is indistinguishable from an old CLI's, and
+                        // the retry would drop the declaration silently.
+                        let input = self.current_input_mut();
+                        let before = input.value().to_string();
+                        input.handle_event(&crossterm::event::Event::Key(key));
+                        if !valid(input.value()) {
+                            *input = Input::new(before);
+                        }
                     } else {
                         self.current_input_mut()
                             .handle_event(&crossterm::event::Event::Key(key));
@@ -1329,10 +1371,40 @@ impl NewSessionDialog {
         );
     }
 
+    /// The rule the focused declaration field must satisfy, or `None` when the
+    /// field is not one. Team and agent name reserve different characters, so
+    /// the field decides which check applies.
+    fn declared_identity_validator(&self, field: usize) -> Option<fn(&str) -> bool> {
+        let layout = self.field_layout();
+        if [layout.xats_team, layout.right_pane_xats_team].contains(&field) {
+            return Some(crate::session::is_valid_declared_xats_team);
+        }
+        if [layout.xats_agent_name, layout.right_pane_xats_agent_name].contains(&field) {
+            return Some(crate::session::is_valid_declared_xats_agent_name);
+        }
+        None
+    }
+
     fn current_input_mut(&mut self) -> &mut Input {
         let layout = self.field_layout();
         match self.focused_field {
             n if n == layout.title => &mut self.title,
+            n if n == layout.xats_team => &mut self.primary.xats_team,
+            n if n == layout.xats_agent_name => &mut self.primary.xats_agent_name,
+            n if n == layout.right_pane_xats_team => {
+                &mut self
+                    .secondary
+                    .as_mut()
+                    .expect("visible secondary field")
+                    .xats_team
+            }
+            n if n == layout.right_pane_xats_agent_name => {
+                &mut self
+                    .secondary
+                    .as_mut()
+                    .expect("visible secondary field")
+                    .xats_agent_name
+            }
             n if n == layout.worktree => &mut self.primary.worktree_branch,
             n if n == layout.right_pane_worktree => {
                 &mut self
@@ -1405,12 +1477,22 @@ impl NewSessionDialog {
         let pane = self.pane(target)?;
         let branch = pane.worktree_branch.value().trim();
         let has_worktree = !branch.is_empty();
+        let declares = self.pane_declares_xats_identity(target);
+        let declared = |input: &Input| {
+            if declares {
+                input.value().trim().to_string()
+            } else {
+                String::new()
+            }
+        };
         Some(PaneDraft {
             tool: self.pane_tool(target)?.to_string(),
             path: pane.path.resolved(),
             yolo_mode: pane.yolo_mode && self.pane_has_yolo(target)
                 || self.pane_tool_always_yolo(target),
             cross_agent_team: pane.cross_agent_team && self.pane_has_cross_agent_team(target),
+            xats_team: declared(&pane.xats_team),
+            xats_agent_name: declared(&pane.xats_agent_name),
             worktree: PaneWorktreeRequest {
                 branch: has_worktree.then(|| branch.to_string()),
                 create_new_branch: pane.create_new_branch,

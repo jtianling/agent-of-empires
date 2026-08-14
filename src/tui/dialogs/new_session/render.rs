@@ -36,6 +36,9 @@ impl NewSessionDialog {
         {
             constraints.push(Constraint::Length(2));
         }
+        if layout.xats_team != super::layout::ABSENT {
+            constraints.push(Constraint::Length(2));
+        }
         constraints.extend([
             Constraint::Length(2),
             Constraint::Length(1),
@@ -46,6 +49,9 @@ impl NewSessionDialog {
             if layout.right_pane_yolo != super::layout::ABSENT
                 || layout.right_pane_cross_agent_team != super::layout::ABSENT
             {
+                constraints.push(Constraint::Length(2));
+            }
+            if layout.right_pane_xats_team != super::layout::ABSENT {
                 constraints.push(Constraint::Length(2));
             }
             constraints.push(Constraint::Length(2));
@@ -115,6 +121,10 @@ impl NewSessionDialog {
             self.render_flags_row(frame, chunks[row], PaneTarget::Primary, theme);
             row += 1;
         }
+        if layout.xats_team != super::layout::ABSENT {
+            self.render_declared_identity_row(frame, chunks[row], PaneTarget::Primary, theme);
+            row += 1;
+        }
         self.render_worktree_row(frame, chunks[row], PaneTarget::Primary, theme);
         row += 1;
 
@@ -141,6 +151,10 @@ impl NewSessionDialog {
                 || layout.right_pane_cross_agent_team != super::layout::ABSENT
             {
                 self.render_flags_row(frame, chunks[row], PaneTarget::Secondary, theme);
+                row += 1;
+            }
+            if layout.right_pane_xats_team != super::layout::ABSENT {
+                self.render_declared_identity_row(frame, chunks[row], PaneTarget::Secondary, theme);
                 row += 1;
             }
             self.render_worktree_row(frame, chunks[row], PaneTarget::Secondary, theme);
@@ -270,6 +284,49 @@ impl NewSessionDialog {
             ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// The pane's declared xats identity: team and agent name side by side, both
+    /// optional. Shown only while that pane's Cross Agent Team is on, which is
+    /// the only state in which a declaration travels anywhere.
+    fn render_declared_identity_row(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        target: PaneTarget,
+        theme: &Theme,
+    ) {
+        let Some(pane) = self.pane(target) else {
+            return;
+        };
+        let layout = self.field_layout();
+        let (team_field, name_field) = match target {
+            PaneTarget::Primary => (layout.xats_team, layout.xats_agent_name),
+            PaneTarget::Secondary => (
+                layout.right_pane_xats_team,
+                layout.right_pane_xats_agent_name,
+            ),
+        };
+        let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        render_text_field(
+            frame,
+            columns[0],
+            "xats Team:",
+            &pane.xats_team,
+            self.focused_field == team_field,
+            Some("(undeclared)"),
+            theme,
+        );
+        render_text_field(
+            frame,
+            columns[1],
+            "xats Name:",
+            &pane.xats_agent_name,
+            self.focused_field == name_field,
+            Some("(undeclared)"),
+            theme,
+        );
     }
 
     fn checkbox_spans<'a>(

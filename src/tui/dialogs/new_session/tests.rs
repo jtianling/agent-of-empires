@@ -131,6 +131,178 @@ fn submitted_panes_keep_separate_paths_flags_and_worktrees() {
 }
 
 #[test]
+fn declared_identity_fields_appear_only_while_cross_agent_team_is_on() {
+    let mut dialog = dialog();
+    dialog.primary.cross_agent_team = false;
+    let off = dialog.field_layout();
+    assert_eq!(off.xats_team, ABSENT, "inert while the switch is off");
+    assert_eq!(off.xats_agent_name, ABSENT);
+
+    dialog.focused_field = off.cross_agent_team;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+
+    let on = dialog.field_layout();
+    assert_ne!(on.xats_team, ABSENT);
+    assert_ne!(on.xats_agent_name, ABSENT);
+    assert!(on.cross_agent_team < on.xats_team);
+    assert!(on.xats_team < on.xats_agent_name);
+    assert!(on.xats_agent_name < on.worktree);
+}
+
+#[test]
+fn declared_identity_fields_are_shown_per_pane() {
+    let mut dialog = dialog();
+    dialog.set_right_pane_selection(1);
+    dialog.primary.cross_agent_team = true;
+    dialog.secondary.as_mut().unwrap().cross_agent_team = false;
+
+    let layout = dialog.field_layout();
+    assert_ne!(layout.xats_team, ABSENT);
+    assert_eq!(
+        layout.right_pane_xats_team, ABSENT,
+        "the other pane's switch is off, so its fields stay inert"
+    );
+
+    dialog.secondary.as_mut().unwrap().cross_agent_team = true;
+    let layout = dialog.field_layout();
+    assert_ne!(layout.right_pane_xats_team, ABSENT);
+    assert_ne!(layout.right_pane_xats_agent_name, ABSENT);
+}
+
+#[test]
+fn typing_a_declared_identity_reaches_the_submitted_draft() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut dialog = dialog();
+    dialog.primary.path.set_value(temp.path().to_string_lossy());
+    dialog.primary.cross_agent_team = true;
+    dialog.focused_field = dialog.field_layout().xats_team;
+    for c in "monkeys".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.focused_field = dialog.field_layout().xats_agent_name;
+    for c in "mvr-coder".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+
+    let DialogResult::Submit(data) = dialog.build_submit_result() else {
+        panic!("expected submit");
+    };
+    assert_eq!(data.primary.xats_team, "monkeys");
+    assert_eq!(data.primary.xats_agent_name, "mvr-coder");
+}
+
+#[test]
+fn sibling_panes_declare_independent_identities() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut dialog = dialog();
+    dialog.primary.path.set_value(temp.path().to_string_lossy());
+    dialog.primary.cross_agent_team = true;
+    dialog.primary.xats_agent_name = tui_input::Input::new("monkeys-coder".to_string());
+    dialog.set_right_pane_selection(1);
+    let secondary = dialog.secondary.as_mut().unwrap();
+    secondary.path.set_value(temp.path().to_string_lossy());
+    secondary.cross_agent_team = true;
+    secondary.xats_agent_name = tui_input::Input::new("mvr-coder".to_string());
+
+    let DialogResult::Submit(data) = dialog.build_submit_result() else {
+        panic!("expected submit");
+    };
+    assert_eq!(data.primary.xats_agent_name, "monkeys-coder");
+    assert_eq!(data.secondary.unwrap().xats_agent_name, "mvr-coder");
+}
+
+#[test]
+fn clearing_a_declared_identity_field_means_undeclared() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut dialog = dialog();
+    dialog.primary.path.set_value(temp.path().to_string_lossy());
+    dialog.primary.cross_agent_team = true;
+    dialog.primary.xats_team = tui_input::Input::new("ab".to_string());
+    dialog.focused_field = dialog.field_layout().xats_team;
+    dialog.handle_key(key(KeyCode::Backspace));
+    dialog.handle_key(key(KeyCode::Backspace));
+
+    assert_eq!(dialog.primary.xats_team.value(), "");
+    let DialogResult::Submit(data) = dialog.build_submit_result() else {
+        panic!("expected submit");
+    };
+    assert_eq!(data.primary.xats_team, "");
+}
+
+/// A pane whose switch is off carries no declaration even if one was typed
+/// before the switch was turned off, and the typed text survives for when it
+/// is turned back on.
+#[test]
+fn a_declaration_is_not_submitted_while_the_switch_is_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut dialog = dialog();
+    dialog.primary.path.set_value(temp.path().to_string_lossy());
+    dialog.primary.cross_agent_team = true;
+    dialog.primary.xats_team = tui_input::Input::new("monkeys".to_string());
+    dialog.primary.cross_agent_team = false;
+
+    let DialogResult::Submit(data) = dialog.build_submit_result() else {
+        panic!("expected submit");
+    };
+    assert_eq!(data.primary.xats_team, "");
+    assert_eq!(dialog.primary.xats_team.value(), "monkeys");
+}
+
+/// The persistent layer refuses control characters and overlong values, so the
+/// field refuses them too rather than letting the user find out at submit.
+#[test]
+fn a_declared_identity_field_refuses_what_storage_would_refuse() {
+    let mut dialog = dialog();
+    dialog.primary.cross_agent_team = true;
+    let limit = crate::session::MAX_DECLARED_XATS_IDENTITY_LEN;
+    dialog.primary.xats_team = tui_input::Input::new("x".repeat(limit));
+    dialog.focused_field = dialog.field_layout().xats_team;
+
+    dialog.handle_key(key(KeyCode::Char('y')));
+
+    assert_eq!(
+        dialog.primary.xats_team.value().len(),
+        limit,
+        "the field stops at the length storage accepts"
+    );
+}
+
+/// `mvr-coder(monkeys)` is how jt writes an agent and its team in prose, so it
+/// is the value most likely to be typed here -- and xats reads the parentheses
+/// as syntax and refuses it. Refusing at entry is the only place it can be
+/// caught: past this point the daemon's "your value is wrong" is indistinguish-
+/// able from an old CLI's "I do not know that flag", and the bootstrap's retry
+/// would drop the declaration and launch a healthy-looking, nameless pane.
+#[test]
+fn a_declared_identity_field_refuses_the_characters_xats_reads_as_syntax() {
+    let mut dialog = dialog();
+    dialog.primary.cross_agent_team = true;
+
+    dialog.focused_field = dialog.field_layout().xats_agent_name;
+    for c in "mvr-coder(monkeys)".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        dialog.primary.xats_agent_name.value(),
+        "mvr-codermonkeys",
+        "the reserved characters never enter the field"
+    );
+
+    // A name may not carry a device separator either.
+    dialog.primary.xats_agent_name = tui_input::Input::new(String::new());
+    dialog.handle_key(key(KeyCode::Char('a')));
+    dialog.handle_key(key(KeyCode::Char(':')));
+    assert_eq!(dialog.primary.xats_agent_name.value(), "a");
+
+    // A team reserves the parentheses but not the colon.
+    dialog.focused_field = dialog.field_layout().xats_team;
+    for c in "mon:keys(x)".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(dialog.primary.xats_team.value(), "mon:keysx");
+}
+
+#[test]
 fn new_session_state_has_no_sandbox_entry() {
     let dialog = dialog();
     assert!(FIELD_HELP.iter().all(|entry| entry.name != "Sandbox"));
@@ -146,6 +318,7 @@ fn new_session_state_has_no_sandbox_entry() {
             "Path",
             "YOLO Mode",
             "Cross Agent Team",
+            "xats Team / xats Agent Name",
             "Worktree",
             "Right Pane",
             "Right Pane Path",

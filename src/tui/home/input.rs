@@ -31,6 +31,10 @@ fn pending_right_pane(
         path: path.unwrap_or_default(),
         yolo_mode: defaults.is_some_and(|pane| pane.yolo_mode),
         cross_agent_team: defaults.is_some_and(|pane| pane.cross_agent_team),
+        // Not inherited from the pane beside it: a declared identity names one
+        // agent, and two panes of a session are two agents.
+        xats_team: String::new(),
+        xats_agent_name: String::new(),
         worktree: PaneWorktreeRequest::default(),
     })
 }

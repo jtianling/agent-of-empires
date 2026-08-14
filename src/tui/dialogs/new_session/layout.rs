@@ -18,11 +18,15 @@ pub(super) struct FieldLayout {
     pub(super) tool: usize,
     pub(super) yolo: usize,
     pub(super) cross_agent_team: usize,
+    pub(super) xats_team: usize,
+    pub(super) xats_agent_name: usize,
     pub(super) worktree: usize,
     pub(super) right_pane: usize,
     pub(super) right_pane_path: usize,
     pub(super) right_pane_yolo: usize,
     pub(super) right_pane_cross_agent_team: usize,
+    pub(super) right_pane_xats_team: usize,
+    pub(super) right_pane_xats_agent_name: usize,
     pub(super) right_pane_worktree: usize,
     /// Number of focusable fields, i.e. the modulus for Tab/BackTab.
     pub(super) count: usize,
@@ -57,12 +61,21 @@ impl NewSessionDialog {
         let yolo = cursor.take_if(self.pane_has_yolo(super::PaneTarget::Primary));
         let cross_agent_team =
             cursor.take_if(self.pane_has_cross_agent_team(super::PaneTarget::Primary));
+        // The declared identity belongs to a pane that talks to xats, so the
+        // fields appear with the switch that makes it one. Turning it off does
+        // not clear what was typed: the value comes back with the switch.
+        let declares_primary = self.pane_declares_xats_identity(super::PaneTarget::Primary);
+        let xats_team = cursor.take_if(declares_primary);
+        let xats_agent_name = cursor.take_if(declares_primary);
         let worktree = cursor.take();
         let right_pane = cursor.take();
         let right_pane_path = cursor.take_if(self.secondary.is_some());
         let right_pane_yolo = cursor.take_if(self.pane_has_yolo(super::PaneTarget::Secondary));
         let right_pane_cross_agent_team =
             cursor.take_if(self.pane_has_cross_agent_team(super::PaneTarget::Secondary));
+        let declares_secondary = self.pane_declares_xats_identity(super::PaneTarget::Secondary);
+        let right_pane_xats_team = cursor.take_if(declares_secondary);
+        let right_pane_xats_agent_name = cursor.take_if(declares_secondary);
         let right_pane_worktree = cursor.take_if(self.secondary.is_some());
 
         FieldLayout {
@@ -72,11 +85,15 @@ impl NewSessionDialog {
             tool,
             yolo,
             cross_agent_team,
+            xats_team,
+            xats_agent_name,
             worktree,
             right_pane,
             right_pane_path,
             right_pane_yolo,
             right_pane_cross_agent_team,
+            right_pane_xats_team,
+            right_pane_xats_agent_name,
             right_pane_worktree,
             count: cursor.0,
         }

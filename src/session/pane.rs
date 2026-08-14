@@ -52,6 +52,12 @@ pub struct PaneDraft {
     pub yolo_mode: bool,
     #[serde(default)]
     pub cross_agent_team: bool,
+    /// User-declared xats team, empty when undeclared.
+    #[serde(default)]
+    pub xats_team: String,
+    /// User-declared xats agent name, empty when undeclared.
+    #[serde(default)]
+    pub xats_agent_name: String,
     #[serde(default)]
     pub worktree: PaneWorktreeRequest,
 }
@@ -118,6 +124,45 @@ impl PaneWorktreeInfo {
     }
 }
 
+/// Longest xats team or agent name AoE will store for a pane. The values are
+/// role names typed by a user, not payloads; the bound exists so a stray paste
+/// cannot reach a launch command line.
+pub const MAX_DECLARED_XATS_IDENTITY_LEN: usize = 128;
+
+/// Characters xats reads as addressing syntax rather than as part of a name:
+/// `:` separates a name from a device, and parentheses are how a team is written
+/// beside a name. A declaration containing them is refused by the daemon.
+const XATS_NAME_RESERVED: [char; 3] = [':', '(', ')'];
+const XATS_TEAM_RESERVED: [char; 2] = ['(', ')'];
+
+/// Whether a declared xats agent name is safe to store and carry.
+///
+/// Two different reasons to refuse, and they are worth telling apart. AoE's own
+/// reason is that the value travels through command lines and log lines, so
+/// control characters and unbounded length are out. The daemon's reason is that
+/// it reads `:` and `()` as addressing syntax -- refusing those here is not AoE
+/// interpreting what a name MEANS, it is AoE refusing to store something the
+/// channel cannot carry.
+///
+/// Checking the daemon's rule at entry is what keeps a rejected declaration from
+/// degrading into a silent success: the Codex bootstrap's retry cannot tell "you
+/// used a flag I do not know" from "you used a flag correctly but its value is
+/// invalid", so it would drop the declaration and launch a healthy-looking pane
+/// that is quietly nameless. The fix is to make the second case unreachable.
+pub fn is_valid_declared_xats_agent_name(value: &str) -> bool {
+    is_storable_declared_value(value) && !value.contains(XATS_NAME_RESERVED)
+}
+
+/// Whether a declared xats team is safe to store and carry. Teams reserve fewer
+/// characters than names do: a team is never the left side of `name:device`.
+pub fn is_valid_declared_xats_team(value: &str) -> bool {
+    is_storable_declared_value(value) && !value.contains(XATS_TEAM_RESERVED)
+}
+
+fn is_storable_declared_value(value: &str) -> bool {
+    value.len() <= MAX_DECLARED_XATS_IDENTITY_LEN && !value.chars().any(char::is_control)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneConfig {
     pub tool: String,
@@ -126,6 +171,16 @@ pub struct PaneConfig {
     pub yolo_mode: bool,
     #[serde(default)]
     pub cross_agent_team: bool,
+    /// User-declared xats team for this pane, empty when undeclared.
+    ///
+    /// Opaque to AoE exactly as the identity key is, but unlike the key it is a
+    /// public role name rather than a credential: it may appear on argv and in
+    /// logs, which is what makes it usable as the Codex pre-registration channel.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub xats_team: String,
+    /// User-declared xats agent name for this pane, empty when undeclared.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub xats_agent_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<PaneWorktreeInfo>,
 }
@@ -154,6 +209,8 @@ impl PaneConfig {
             tool,
             working_dir: working_dir.into(),
             yolo_mode,
+            xats_team: String::new(),
+            xats_agent_name: String::new(),
             worktree: None,
         }
     }
@@ -167,7 +224,20 @@ impl PaneConfig {
         );
         self.yolo_mode = normalized.yolo_mode;
         self.cross_agent_team = normalized.cross_agent_team;
+        self.xats_team = self.xats_team.trim().to_string();
+        self.xats_agent_name = self.xats_agent_name.trim().to_string();
         self
+    }
+
+    /// Whether this pane carries a declared xats identity to pass on.
+    ///
+    /// A declaration only travels with a pane that actually talks to xats, so a
+    /// value left behind on a pane whose Cross Agent Team is off is inert rather
+    /// than erased: turning the feature back on restores what was declared.
+    pub fn declares_xats_identity(&self) -> bool {
+        self.cross_agent_team
+            && crate::session::Instance::supports_cross_agent_team_tool(&self.tool)
+            && !(self.xats_team.is_empty() && self.xats_agent_name.is_empty())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -192,6 +262,30 @@ impl PaneConfig {
                 "Pane tool '{}' does not support Cross Agent Team",
                 self.tool
             );
+        }
+        for (label, value, valid, reserved) in [
+            (
+                "team",
+                &self.xats_team,
+                is_valid_declared_xats_team as fn(&str) -> bool,
+                "( )",
+            ),
+            (
+                "agent name",
+                &self.xats_agent_name,
+                is_valid_declared_xats_agent_name as fn(&str) -> bool,
+                ": ( )",
+            ),
+        ] {
+            if !valid(value) {
+                bail!(
+                    "Declared xats {} must be at most {} characters, free of control \
+                     characters, and free of {} (xats reads those as addressing syntax)",
+                    label,
+                    MAX_DECLARED_XATS_IDENTITY_LEN,
+                    reserved
+                );
+            }
         }
         if let Some(worktree) = &self.worktree {
             if worktree.is_empty() {
@@ -307,7 +401,7 @@ mod tests {
             working_dir: "/tmp".to_string(),
             yolo_mode: true,
             cross_agent_team: true,
-            worktree: None,
+            ..Default::default()
         };
 
         assert!(pane.validate().is_err());
@@ -315,6 +409,66 @@ mod tests {
         normalized.validate().unwrap();
         assert!(!normalized.yolo_mode);
         assert!(!normalized.cross_agent_team);
+    }
+
+    #[test]
+    fn declared_xats_identity_survives_a_json_round_trip_with_quotes_and_spaces() {
+        let mut pane = PaneConfig::new("claude", "/tmp", false, true);
+        pane.xats_team = "team 'one'".to_string();
+        pane.xats_agent_name = "a \"coder\" here".to_string();
+        pane.validate().unwrap();
+
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: PaneConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, pane);
+    }
+
+    #[test]
+    fn a_record_without_declared_xats_identity_reads_as_undeclared() {
+        let restored: PaneConfig =
+            serde_json::from_str(r#"{"tool":"claude","working_dir":"/tmp"}"#).unwrap();
+
+        assert!(restored.xats_team.is_empty());
+        assert!(restored.xats_agent_name.is_empty());
+        assert!(!restored.declares_xats_identity());
+    }
+
+    #[test]
+    fn declared_xats_identity_rejects_control_characters_and_overlong_values() {
+        let mut newline = PaneConfig::new("claude", "/tmp", false, true);
+        newline.xats_team = "team\nname".to_string();
+        assert!(newline.validate().is_err());
+
+        let mut control = PaneConfig::new("claude", "/tmp", false, true);
+        control.xats_agent_name = "coder\u{7}".to_string();
+        assert!(control.validate().is_err());
+
+        let mut long = PaneConfig::new("claude", "/tmp", false, true);
+        long.xats_team = "x".repeat(MAX_DECLARED_XATS_IDENTITY_LEN + 1);
+        assert!(long.validate().is_err());
+
+        let mut at_limit = PaneConfig::new("claude", "/tmp", false, true);
+        at_limit.xats_team = "x".repeat(MAX_DECLARED_XATS_IDENTITY_LEN);
+        at_limit.validate().unwrap();
+    }
+
+    #[test]
+    fn only_one_declared_part_is_still_a_declaration() {
+        let mut pane = PaneConfig::new("claude", "/tmp", false, true);
+        pane.xats_team = "monkeys".to_string();
+
+        assert!(pane.declares_xats_identity());
+        assert!(pane.xats_agent_name.is_empty());
+    }
+
+    #[test]
+    fn a_pane_without_cross_agent_team_declares_nothing() {
+        let mut pane = PaneConfig::new("claude", "/tmp", false, false);
+        pane.xats_team = "monkeys".to_string();
+
+        assert!(!pane.declares_xats_identity());
+        assert_eq!(pane.xats_team, "monkeys", "the value is kept, not erased");
     }
 
     #[test]

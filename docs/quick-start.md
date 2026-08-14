@@ -155,6 +155,25 @@ pane is created through a dialog, which is such an interface.  The distinction
 is whether the pane was given a chance to be configured, not whether you were
 attached.
 
+### Naming a Cross Agent Team pane
+
+A pane with Cross Agent Team on can also carry a declared xats identity: a team
+and an agent name, each optional, entered per pane in the New Session dialog
+beside the switch that turns the feature on.  Leaving both empty keeps today's
+behavior exactly, down to the launch command.
+
+What a declaration buys is that the pane no longer has to be told who it is
+after every rebuild.  The values are stored on that pane's own slot, so sibling
+panes name themselves independently, and they survive restart, resume and
+cold-start recovery.  They reach the pane as the `XATS_TEAM` and
+`XATS_AGENT_NAME` environment variables, and a Codex pane additionally hands
+them to the daemon before it starts, because a Codex tool process reads the
+shared app-server's environment rather than its own pane's.
+
+Unlike the identity key, these are role names and not credentials: they appear
+on command lines and in logs, and AoE never interprets, guesses, or defaults
+them from anything else it knows about the session.
+
 ## Next Steps
 
 - [Workflow Guide](guides/workflow.md) -- recommended setup with bare repos and parallel agents

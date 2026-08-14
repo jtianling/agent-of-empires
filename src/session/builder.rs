@@ -347,7 +347,10 @@ pub fn resolve_pane_config(
         yolo_mode,
         cross_agent_team,
     );
+    pane.xats_team = draft.xats_team;
+    pane.xats_agent_name = draft.xats_agent_name;
     pane.worktree = worktree;
+    pane = pane.normalized();
     pane.validate()?;
     Ok(PaneBuildResult {
         config: pane,
@@ -632,6 +635,8 @@ mod tests {
                 working_dir: path.to_string_lossy().to_string(),
                 yolo_mode: false,
                 cross_agent_team: false,
+                xats_team: String::new(),
+                xats_agent_name: String::new(),
                 worktree: Some(PaneWorktreeInfo {
                     worktree_path: Some(path.to_string_lossy().to_string()),
                     worktree: Some(if managed {

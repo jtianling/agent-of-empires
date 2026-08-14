@@ -913,6 +913,12 @@ const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp@latest";
 /// not named `*_TOKEN`: the xats project already uses `XATS_TOKEN` for the
 /// daemon's bearer credential, and both appear in the same launcher shell.
 const XATS_IDENTITY_KEY_ENV: &str = "XATS_IDENTITY_KEY";
+/// Environment variables carrying a pane's declared xats identity. Unlike the
+/// identity key these are public role names, not credentials: they may appear on
+/// argv and in logs, which is what lets the Codex bootstrap pass them as
+/// arguments where reading the environment is not an option.
+const XATS_TEAM_ENV: &str = "XATS_TEAM";
+const XATS_AGENT_NAME_ENV: &str = "XATS_AGENT_NAME";
 /// TTL for the Codex pane pre-registration row, in seconds. The daemon's
 /// documented ceiling; its 120s default TTL can expire before a Codex cold
 /// start finishes, closing the poke-back window the identity recovery needs.
@@ -924,15 +930,96 @@ const CODEX_XATS_MISSING_UUIDGEN: &str =
 const CODEX_XATS_MISSING_NC: &str = "[xats] Missing nc required to check the Codex app-server.";
 const CODEX_XATS_MISSING_NPX: &str = "[xats] Missing npx required for Codex pre-registration.";
 const CODEX_XATS_INVALID_UUID: &str = "[xats] uuidgen returned an invalid Codex agent UUID.";
-/// Terminal: a failed pre-registration is never retried without the pane's
-/// identity key. The key is the only thing by which the daemon recognizes which
-/// identity a pane belongs to, so a keyless registration produces a pane that
-/// looks healthy and is never prompted to re-register -- and neither observed
-/// failure (npx cannot resolve the package; the daemon refuses to displace a
-/// live keyed row) would clear on an immediate second attempt anyway.
+/// Terminal: reported only once the minimal `--pane`/`--agent-id` call has failed
+/// too, so the pane really cannot be pre-registered at all rather than merely
+/// having been refused the flags AoE added on top.
 const CODEX_XATS_PREREGISTER_FAILED: &str = "[xats] Failed to pre-register the Codex pane.";
 fn codex_xats_app_server_unavailable(url: &str) -> String {
     format!("[xats] Codex app-server is not listening on {url}.")
+}
+
+/// The declared xats identity a pane carries into its environment, as the env
+/// pairs to prefix its launch command with.
+///
+/// Only the declared parts are returned. The daemon cannot tell "not declared"
+/// from "declared as the empty string", so injecting an empty variable would
+/// turn a decidable state into an ambiguous one. A pane that declares nothing
+/// therefore gets no variables at all, and its command is what it was before
+/// this existed.
+///
+/// Injected for every tool that can join a Cross Agent Team, not only the ones
+/// whose agent reads its own environment: what an agent does with the values is
+/// its business, and Codex gets them through pre-registration on top of this.
+fn declared_xats_identity_env(pane: &PaneConfig) -> Vec<(&'static str, &str)> {
+    if !pane.declares_xats_identity() {
+        return Vec::new();
+    }
+    [
+        (XATS_TEAM_ENV, pane.xats_team.as_str()),
+        (XATS_AGENT_NAME_ENV, pane.xats_agent_name.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .collect()
+}
+
+/// The declared xats identity as arguments to append to the Codex
+/// pre-registration call, empty when the pane declares nothing.
+///
+/// This is Codex's only channel for the declaration: its tool processes run
+/// inside a shared app-server, so they read that server's environment rather
+/// than their own pane's and cannot see the variables the launch prefix sets.
+/// Handing the values to the daemon before Codex starts is what lets it address
+/// the pane by identity when the pane's key resolves to no holder.
+///
+/// The values reach a `sh -c` script, so they go through `shell_escape` rather
+/// than hand-written quotes. They are role names, not credentials, so unlike the
+/// identity key they are allowed on this argv at all.
+fn codex_declared_identity_args(pane: &PaneConfig) -> String {
+    if !pane.declares_xats_identity() {
+        return String::new();
+    }
+    [
+        ("--team", &pane.xats_team),
+        ("--agent-name", &pane.xats_agent_name),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .map(|(flag, value)| format!(" {flag} {}", shell_escape(value)))
+    .collect()
+}
+
+/// The one retry the bootstrap is allowed: drop the declared-identity flags a
+/// stale CLI may not parse, and nothing else.
+///
+/// The identity key and the TTL stay on the retry. Retrying without the key is
+/// prohibited: the key is the only thing by which the daemon recognizes which
+/// identity a pane belongs to, so a pane that registers without one is never
+/// prompted to re-register and silently stays outside Cross Agent Team for the
+/// rest of its life. A pane that declares no identity emits no retry at all, so
+/// its script is byte for byte the one AoE built before declared identities
+/// existed.
+fn codex_declared_identity_retry(declared_args: &str, keyed: bool) -> String {
+    if declared_args.is_empty() {
+        return String::new();
+    }
+    let key_flag = if keyed {
+        format!(" --identity-key-env {XATS_IDENTITY_KEY_ENV}")
+    } else {
+        String::new()
+    };
+    format!(
+        " \
+         if [ -n \"${{pre_register_failed:-}}\" ]; then \
+             pre_register_failed=; \
+             npx --no-install {package} pre-register-codex-pane \
+                 --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"{key_flag} \
+                 --ttl {ttl} \
+                 || pre_register_failed=1; \
+         fi;",
+        package = CODEX_XATS_PACKAGE,
+        ttl = CODEX_XATS_PREREGISTER_TTL_SECONDS,
+    )
 }
 
 /// A pane command that reports why the bootstrap could not be built and exits
@@ -1638,11 +1725,9 @@ impl Instance {
         }
     }
 
-    fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str, working_dir: &str) -> String {
+    fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str, pane: &PaneConfig) -> String {
         match codex_app_server_endpoint() {
-            Ok(endpoint) => {
-                self.codex_xats_bootstrap_command_for(cmd, base, working_dir, &endpoint)
-            }
+            Ok(endpoint) => self.codex_xats_bootstrap_command_for(cmd, base, pane, &endpoint),
             Err(diagnostic) => {
                 tracing::warn!("{}", diagnostic);
                 codex_xats_aborted_command(&diagnostic)
@@ -1669,11 +1754,12 @@ impl Instance {
         &self,
         cmd: &str,
         base: &str,
-        working_dir: &str,
+        pane: &PaneConfig,
         endpoint: &CodexAppServerEndpoint,
     ) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
-        let working_dir = shell_escape(working_dir);
+        let working_dir = shell_escape(&pane.working_dir);
+        let declared_identity_args = codex_declared_identity_args(pane);
         let app_server_url = shell_escape(&endpoint.url);
         let codex_command = format!(
             "{base} --remote {app_server_url} -C {working_dir} \
@@ -1722,13 +1808,13 @@ impl Instance {
              if [ -n \"${{{identity_env}:-}}\" ]; then \
                  npx --no-install {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
-                     --identity-key-env {identity_env} --ttl {ttl} \
-                     || pre_register_failed=1; \
+                     --identity-key-env {identity_env} --ttl {ttl}{declared} \
+                     || pre_register_failed=1;{keyed_retry} \
              else \
                  npx --no-install {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
-                     --ttl {ttl} \
-                     || pre_register_failed=1; \
+                     --ttl {ttl}{declared} \
+                     || pre_register_failed=1;{keyless_retry} \
              fi; \
              if [ -n \"${{pre_register_failed:-}}\" ]; then \
                  printf '%s\\n' '{prereg_failed}' >&2; \
@@ -1740,6 +1826,9 @@ impl Instance {
             package = CODEX_XATS_PACKAGE,
             identity_env = XATS_IDENTITY_KEY_ENV,
             ttl = CODEX_XATS_PREREGISTER_TTL_SECONDS,
+            declared = declared_identity_args,
+            keyed_retry = codex_declared_identity_retry(&declared_identity_args, true),
+            keyless_retry = codex_declared_identity_retry(&declared_identity_args, false),
             missing_pane = CODEX_XATS_MISSING_PANE,
             missing_uuidgen = CODEX_XATS_MISSING_UUIDGEN,
             missing_nc = CODEX_XATS_MISSING_NC,
@@ -2605,11 +2694,7 @@ impl Instance {
                             }
                             "codex" => {
                                 let base = self.pane_base_command(&pane.tool, is_primary);
-                                cmd = self.codex_xats_bootstrap_command(
-                                    &cmd,
-                                    &base,
-                                    &pane.working_dir,
-                                );
+                                cmd = self.codex_xats_bootstrap_command(&cmd, &base, &pane);
                             }
                             _ => {}
                         }
@@ -2621,6 +2706,7 @@ impl Instance {
                             env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                         }
                     }
+                    env_vars.extend(declared_xats_identity_env(&pane));
                     Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
                 })
             } else {
@@ -2652,7 +2738,7 @@ impl Instance {
                         }
                         "codex" => {
                             let base = self.pane_base_command(&pane.tool, is_primary);
-                            cmd = self.codex_xats_bootstrap_command(&cmd, &base, &pane.working_dir);
+                            cmd = self.codex_xats_bootstrap_command(&cmd, &base, &pane);
                         }
                         _ => {}
                     }
@@ -2664,6 +2750,7 @@ impl Instance {
                         env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                     }
                 }
+                env_vars.extend(declared_xats_identity_env(&pane));
                 if self.expects_shell() && env_vars.is_empty() {
                     let escaped_dir = shell_escape(&self.project_path);
                     let shell = crate::session::environment::user_posix_shell();
@@ -3052,6 +3139,12 @@ impl Instance {
         // cannot tell that apart from the parent legitimately restarting: the
         // later caller silently takes the identity and the earlier one goes quiet.
         fork.xats_identity_key = None;
+        // Same reasoning, one step more literal: the declared identity IS the
+        // (team, name) the daemon would hand over. Inheriting it would put two
+        // live panes on one declaration, which is the collision AoE cannot
+        // detect from its own side -- it has no global view of who is running.
+        fork.primary_pane.xats_team.clear();
+        fork.primary_pane.xats_agent_name.clear();
         // Pre-allocate a new session UUID for the fork if the tool supports it.
         // This is passed via `--session-id <uuid>` alongside the fork template.
         fork.agent_session_id = crate::agents::get_agent(&self.tool)
@@ -5693,8 +5786,12 @@ mod tests {
     fn codex_bootstrap_names_the_configured_endpoint_everywhere() {
         let inst = codex_xats_instance();
         let endpoint = parse_codex_app_server_url("ws://localhost:8899").unwrap();
-        let cmd =
-            inst.codex_xats_bootstrap_command_for("codex", "codex", &inst.project_path, &endpoint);
+        let cmd = inst.codex_xats_bootstrap_command_for(
+            "codex",
+            "codex",
+            inst.primary_pane_config(),
+            &endpoint,
+        );
 
         assert!(
             cmd.contains("ws://localhost:8899"),
@@ -5717,12 +5814,9 @@ mod tests {
         let mut inst = codex_xats_instance();
         inst.project_path = "/tmp/primary".to_string();
         let endpoint = parse_codex_app_server_url("ws://localhost:8899").unwrap();
-        let cmd = inst.codex_xats_bootstrap_command_for(
-            "codex",
-            "codex",
-            "/tmp/secondary path",
-            &endpoint,
-        );
+        let secondary_pane = PaneConfig::new("codex", "/tmp/secondary path", false, true);
+        let cmd =
+            inst.codex_xats_bootstrap_command_for("codex", "codex", &secondary_pane, &endpoint);
         let secondary = shell_escape("/tmp/secondary path").replace('\'', "'\\''");
         let primary = shell_escape("/tmp/primary").replace('\'', "'\\''");
 
@@ -5909,6 +6003,8 @@ mod tests {
             yolo_mode: false,
             cross_agent_team: true,
             worktree_info: None,
+            xats_team: String::new(),
+            xats_agent_name: String::new(),
             model: String::new(),
             model_fingerprint: String::new(),
             last_seen_at: 1,
@@ -5988,6 +6084,126 @@ mod tests {
             !argv.contains(&key),
             "identity key must not also appear in the command arguments, got: {cmd}"
         );
+    }
+
+    #[test]
+    fn test_declared_identity_is_injected_alongside_the_key() {
+        let mut inst = claude_xats_instance();
+        inst.ensure_xats_identity_key();
+        inst.primary_pane.xats_team = "monkeys team".to_string();
+        inst.primary_pane.xats_agent_name = "mvr 'coder'".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(cmd.contains("XATS_TEAM='monkeys team'"), "got: {cmd}");
+        assert!(
+            cmd.contains(r#"XATS_AGENT_NAME='mvr '\''coder'\'''"#),
+            "the value has to survive the shell verbatim, got: {cmd}"
+        );
+        assert!(cmd.contains("XATS_IDENTITY_KEY="), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_only_the_declared_half_is_injected() {
+        let mut inst = claude_xats_instance();
+        inst.primary_pane.xats_team = "monkeys".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(cmd.contains("XATS_TEAM='monkeys'"), "got: {cmd}");
+        assert!(
+            !cmd.contains("XATS_AGENT_NAME"),
+            "an undeclared half must not be injected as empty, got: {cmd}"
+        );
+    }
+
+    /// What this proves: an undeclared pane's command carries none of the
+    /// machinery this capability added, and clearing a declaration returns the
+    /// command to exactly that state.
+    ///
+    /// What it does NOT prove: equality with the command AoE built before this
+    /// capability existed -- that needs a recorded golden, and a golden of a
+    /// shell-escaped launch command is unreadable and moves for reasons that
+    /// have nothing to do with declarations. The fingerprint below is the
+    /// honest substitute: it names every token the capability can introduce.
+    #[test]
+    fn test_an_undeclared_pane_command_carries_no_declaration_machinery() {
+        let mut declared = claude_xats_instance();
+        declared.xats_identity_key = Some("fixed-key".to_string());
+        let mut undeclared = declared.clone();
+        declared.primary_pane.xats_team = "monkeys".to_string();
+        declared.primary_pane.xats_agent_name = "mvr-coder".to_string();
+
+        let before = undeclared.build_agent_command(None).unwrap();
+        for token in [XATS_TEAM_ENV, XATS_AGENT_NAME_ENV, "--team", "--agent-name"] {
+            assert!(
+                !before.contains(token),
+                "an undeclared pane must not carry {token}: {before}"
+            );
+        }
+
+        undeclared.primary_pane.xats_team = String::new();
+        undeclared.primary_pane.xats_agent_name = String::new();
+        assert_eq!(
+            undeclared.build_agent_command(None).unwrap(),
+            before,
+            "an undeclared pane's command must not move"
+        );
+        assert_ne!(
+            declared.build_agent_command(None).unwrap(),
+            before,
+            "and a declared one must, or nothing is being carried"
+        );
+    }
+
+    /// Every tool that can join a team gets the same injection, including the
+    /// ones that do not take the identity key through their environment: what an
+    /// agent does with the declaration is its business, not AoE's.
+    #[test]
+    fn test_declared_identity_injection_does_not_depend_on_the_tool() {
+        for tool in ["claude", "codex", "opencode", "kimi"] {
+            let mut pane = PaneConfig::new(tool, "/tmp", false, true);
+            assert!(pane.cross_agent_team, "the premise: {tool} can join a team");
+            pane.xats_team = "monkeys".to_string();
+            pane.xats_agent_name = "mvr-coder".to_string();
+
+            assert_eq!(
+                declared_xats_identity_env(&pane),
+                vec![("XATS_TEAM", "monkeys"), ("XATS_AGENT_NAME", "mvr-coder")],
+                "{tool} must be injected the same way"
+            );
+        }
+    }
+
+    /// Restart, resume and cold-start recovery all rebuild the pane from its
+    /// slot, so the declaration reaches the relaunched pane through the same
+    /// route the identity key does.
+    #[test]
+    fn test_a_slot_relaunch_carries_the_declared_identity() {
+        let inst = claude_xats_instance();
+        let mut row = slot(0, "slot-key");
+        row.xats_team = "monkeys".to_string();
+        row.xats_agent_name = "mvr-coder".to_string();
+
+        let cmd = inst
+            .build_pane_command(&row.pane_config(), None, true, Some(&row.xats_identity_key))
+            .unwrap();
+
+        assert!(cmd.contains("XATS_TEAM='monkeys'"), "got: {cmd}");
+        assert!(cmd.contains("XATS_AGENT_NAME='mvr-coder'"), "got: {cmd}");
+        assert!(cmd.contains("XATS_IDENTITY_KEY='slot-key'"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_declared_identity_is_not_injected_without_cross_agent_team() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.primary_pane = PaneConfig::new("claude", "/tmp/test", false, false);
+        inst.primary_pane.xats_team = "leftover".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        assert!(!cmd.contains("XATS_TEAM"), "got: {cmd}");
     }
 
     #[test]
@@ -6198,6 +6414,8 @@ mod tests {
             yolo_mode: false,
             cross_agent_team: true,
             worktree_info: None,
+            xats_team: String::new(),
+            xats_agent_name: String::new(),
             model: String::new(),
             model_fingerprint: String::new(),
             last_seen_at: 1,
@@ -6305,6 +6523,28 @@ mod tests {
             fork.xats_identity_key, inst.xats_identity_key,
             "a fork must mint its own identity key"
         );
+    }
+
+    #[test]
+    fn test_fork_does_not_inherit_the_declared_identity() {
+        // The same collision the key clearing prevents, one step more literal:
+        // the declaration names the identity outright, so inheriting it puts two
+        // live panes on one (team, name).
+        let mut inst = claude_xats_instance();
+        inst.primary_pane.xats_team = "monkeys".to_string();
+        inst.primary_pane.xats_agent_name = "monkeys-coder".to_string();
+        inst.resume_token = Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11".to_string());
+
+        let fork = inst.create_fork("forked".to_string(), None).unwrap();
+
+        assert_eq!(fork.primary_pane.xats_team, "");
+        assert_eq!(fork.primary_pane.xats_agent_name, "");
+        assert!(
+            !fork.primary_pane.declares_xats_identity(),
+            "a fork starts undeclared and is named by whoever configures it"
+        );
+        // The parent keeps its own declaration.
+        assert_eq!(inst.primary_pane.xats_agent_name, "monkeys-coder");
     }
 
     /// A session whose Cross Agent Team state is set through the pane config the
@@ -6505,6 +6745,7 @@ mod tests {
     fn test_codex_xats_yolo_command_preserves_yolo_flag() {
         let mut inst = codex_xats_instance();
         inst.yolo_mode = true;
+        inst.primary_pane.yolo_mode = true;
 
         let cmd = inst.build_agent_command(None).unwrap();
 
@@ -6610,7 +6851,8 @@ mod tests {
         assert!(cmd.contains("XATS_IDENTITY_KEY='secret-identity-key-value' "));
 
         // Two pre-registration call sites, and only two: the with-key and
-        // without-key branches of the single attempt. A third would be the
+        // without-key branches of the single attempt. A pane that declares no
+        // xats identity emits no retry, so a third call site here would be the
         // retry that discarded the key -- see `CODEX_XATS_PREREGISTER_FAILED`.
         let calls: Vec<usize> = cmd
             .match_indices("pre-register-codex-pane")
@@ -6627,7 +6869,56 @@ mod tests {
         assert_eq!(
             tail.matches("--ttl").count(),
             2,
-            "a pre-registration without a TTL is the retry shape: {cmd}"
+            "every pre-registration call must carry the TTL: {cmd}"
+        );
+    }
+
+    /// The retry a declared identity adds must never be the shape the
+    /// "failure is explicit" requirement prohibits: it drops the declared
+    /// flags a stale CLI may not parse, and keeps the identity key.
+    #[test]
+    fn test_codex_xats_declared_identity_retry_keeps_the_key() {
+        let mut inst = codex_xats_instance();
+        inst.xats_identity_key = Some("secret-identity-key-value".to_string());
+        inst.primary_pane.xats_team = "monkeys".to_string();
+        inst.primary_pane.xats_agent_name = "monkeys-coder".to_string();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+
+        let calls: Vec<usize> = cmd
+            .match_indices("pre-register-codex-pane")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            calls.len(),
+            4,
+            "expected both branches to carry exactly one retry each: {cmd}"
+        );
+        let tail = &cmd[calls[0]..cmd.rfind(" exec ").unwrap()];
+        // Every call keeps the TTL, and the keyed branch keeps naming the key
+        // on its retry: two first attempts plus two retries carry the TTL, and
+        // the key flag appears on the keyed attempt and on its retry.
+        assert_eq!(
+            tail.matches("--ttl").count(),
+            4,
+            "the retry must keep the TTL: {cmd}"
+        );
+        assert_eq!(
+            tail.matches("--identity-key-env").count(),
+            2,
+            "the keyed branch's retry must keep naming the identity key: {cmd}"
+        );
+        // The declared flags are what the retry drops, so they appear only on
+        // the two first attempts.
+        assert_eq!(
+            tail.matches("--team").count(),
+            2,
+            "the retry must drop the declared team flag: {cmd}"
+        );
+        assert_eq!(
+            tail.matches("--agent-name").count(),
+            2,
+            "the retry must drop the declared name flag: {cmd}"
         );
     }
 
@@ -6770,17 +7061,21 @@ mod tests {
         extra_args: &str,
     ) -> (bool, FakeCalls, FakeCalls) {
         let (ok, npx, codex, _) =
-            run_codex_bootstrap_capturing_stderr(identity_key, npx_mode, env, extra_args);
+            run_codex_bootstrap_capturing_stderr(identity_key, npx_mode, env, extra_args, ("", ""));
         (ok, npx, codex)
     }
 
     /// As above, plus the script's stderr, for the cases that assert on which
     /// diagnostic the pane printed rather than only on whether it failed.
+    ///
+    /// `declared` is the pane's declared xats identity as `(team, agent name)`,
+    /// each empty when undeclared.
     fn run_codex_bootstrap_capturing_stderr(
         identity_key: Option<&str>,
         npx_mode: FakeNpx,
         env: &[(&str, Option<&str>)],
         extra_args: &str,
+        declared: (&str, &str),
     ) -> (bool, FakeCalls, FakeCalls, String) {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
@@ -6800,7 +7095,11 @@ mod tests {
         } else {
             format!("{base} {extra_args}")
         };
-        let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base, &inst.project_path);
+        let mut pane = inst.primary_pane_config().clone();
+        pane.working_dir = inst.project_path.clone();
+        pane.xats_team = declared.0.to_string();
+        pane.xats_agent_name = declared.1.to_string();
+        let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base, &pane);
 
         let out = execute_bootstrap_script(&script, &bin, identity_key, env);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -6878,36 +7177,73 @@ mod tests {
         assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
     }
 
-    /// A keyed pre-registration that fails is not retried without the key. The
-    /// keyless registration such a retry produced looked healthy and left the
-    /// pane permanently unrecognizable to the daemon.
+    /// AoE cannot know which flags the CLI on this machine parses: it runs
+    /// whatever `npx --no-install ...@latest` finds in the local cache, and that
+    /// CLI turns an unknown flag into a hard error. The declared-identity flags
+    /// are therefore retried without -- but the retry stops there. A pane that
+    /// declares no identity adds no flag this machine might not know, so it has
+    /// nothing to fall back from, and falling back anyway would mean dropping
+    /// the identity key: a pane that registers without one looks healthy and is
+    /// never prompted to re-register again.
     #[test]
-    fn test_codex_xats_keyed_preregister_failure_is_not_retried_without_the_key() {
+    fn test_codex_xats_keyed_undeclared_preregister_failure_is_never_retried() {
         let (ok, npx, codex) =
             run_codex_bootstrap_with_fakes(Some("live-key-123"), FakeNpx::FailFirst, &[], "");
 
-        assert!(!ok, "a failed pre-registration must fail the launch");
-        assert_eq!(npx.len(), 1, "exactly one attempt, no retry: {npx:?}");
+        assert!(
+            !ok,
+            "the failure must stay fatal rather than retry: {npx:?}"
+        );
+        assert_eq!(npx.len(), 1, "no second attempt exists: {npx:?}");
         assert!(npx[0].iter().any(|a| a == "--identity-key-env"));
         assert!(codex.is_empty(), "codex must not launch: {codex:?}");
     }
 
-    /// The reviewer's reproduction, kept because the hazard outlived the retry
-    /// it was written for: `sh` imports `SHELLOPTS=errexit` from the
+    /// The reviewer's reproduction: `sh` imports `SHELLOPTS=errexit` from the
     /// environment, under which a plain failing command exits the script before
-    /// any `$?` check. The failure must still reach its diagnostic rather than
-    /// dying silently at the failing `npx`.
+    /// any `$?` check. The fallback must still fire rather than the script dying
+    /// silently at the failing `npx`.
     #[test]
-    fn test_codex_xats_preregister_failure_survives_inherited_errexit() {
-        let (ok, npx, codex, stderr) = run_codex_bootstrap_capturing_stderr(
+    fn test_codex_xats_preregister_retry_survives_inherited_errexit() {
+        let (ok, npx, codex, _) = run_codex_bootstrap_capturing_stderr(
             Some("live-key-123"),
             FakeNpx::FailFirst,
             &[("SHELLOPTS", Some("errexit"))],
             "",
+            ("monkeys", "mvr-coder"),
+        );
+
+        assert!(ok, "errexit must not skip the retry: {npx:?}");
+        assert_eq!(
+            npx.len(),
+            2,
+            "declared attempt then the declared-flags-dropped retry: {npx:?}"
+        );
+        assert!(
+            npx[1].iter().any(|a| a == "--identity-key-env"),
+            "the retry must keep naming the identity key: {npx:?}"
+        );
+        assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+    }
+
+    /// Both attempts failing is a pane that cannot pre-register at all, which
+    /// stays fatal -- and says so even under an inherited `errexit`.
+    #[test]
+    fn test_codex_xats_preregister_failure_survives_inherited_errexit() {
+        let (ok, npx, codex, stderr) = run_codex_bootstrap_capturing_stderr(
+            Some("live-key-123"),
+            FakeNpx::FailAll,
+            &[("SHELLOPTS", Some("errexit"))],
+            "",
+            ("", ""),
         );
 
         assert!(!ok);
-        assert_eq!(npx.len(), 1, "exactly one attempt, no retry: {npx:?}");
+        assert_eq!(
+            npx.len(),
+            1,
+            "an undeclared pane has no retry to make: {npx:?}"
+        );
         assert!(codex.is_empty(), "codex must not launch: {codex:?}");
         assert!(
             stderr.contains(CODEX_XATS_PREREGISTER_FAILED),
@@ -6998,8 +7334,100 @@ mod tests {
         let (ok, npx, codex) =
             run_codex_bootstrap_with_fakes(Some("live-key-123"), FakeNpx::FailAll, &[], "");
         assert!(!ok, "a failed pre-registration must fail the launch");
-        assert_eq!(npx.len(), 1, "no second attempt: {npx:?}");
+        assert_eq!(
+            npx.len(),
+            1,
+            "an undeclared pane makes one attempt and no more: {npx:?}"
+        );
         assert!(codex.is_empty(), "codex must not launch: {codex:?}");
+    }
+
+    #[test]
+    fn test_codex_xats_preregister_carries_the_declared_identity() {
+        let (ok, npx, codex, _) = run_codex_bootstrap_capturing_stderr(
+            Some("live-key-123"),
+            FakeNpx::Succeed,
+            &[],
+            "",
+            ("monkeys team", "mvr 'coder'"),
+        );
+
+        assert!(ok);
+        assert_eq!(npx.len(), 1);
+        let flags: Vec<&str> = npx[0].iter().map(String::as_str).collect();
+        let team = flags
+            .iter()
+            .position(|a| *a == "--team")
+            .expect("the declared team must be passed");
+        assert_eq!(flags[team + 1], "monkeys team", "{npx:?}");
+        let name = flags
+            .iter()
+            .position(|a| *a == "--agent-name")
+            .expect("the declared agent name must be passed");
+        assert_eq!(flags[name + 1], "mvr 'coder'", "{npx:?}");
+        assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+    }
+
+    #[test]
+    fn test_codex_xats_preregister_omits_an_undeclared_half() {
+        let (ok, npx, _codex, _) = run_codex_bootstrap_capturing_stderr(
+            Some("live-key-123"),
+            FakeNpx::Succeed,
+            &[],
+            "",
+            ("monkeys", ""),
+        );
+
+        assert!(ok);
+        assert!(npx[0].iter().any(|a| a == "--team"), "{npx:?}");
+        assert!(
+            !npx[0].iter().any(|a| a == "--agent-name"),
+            "an undeclared half is not passed as empty: {npx:?}"
+        );
+    }
+
+    /// A CLI that rejects the declared-identity flags must cost the declaration,
+    /// not the launch.
+    #[test]
+    fn test_codex_xats_declared_identity_retry_drops_only_the_declared_flags() {
+        let (ok, npx, codex, _) = run_codex_bootstrap_capturing_stderr(
+            Some("live-key-123"),
+            FakeNpx::FailFirst,
+            &[],
+            "",
+            ("monkeys", "mvr-coder"),
+        );
+
+        assert!(ok, "the pane must still launch: {npx:?}");
+        assert_eq!(npx.len(), 2);
+        assert!(
+            !npx[1].iter().any(|a| a == "--team" || a == "--agent-name"),
+            "the retry drops the declared-identity flags: {npx:?}"
+        );
+        // What the retry must NOT drop. Registering without the key leaves the
+        // pane looking healthy while it is permanently unrecoverable, which is
+        // the failure the "failure is explicit" requirement exists to prevent.
+        assert!(
+            npx[1].iter().any(|a| a == "--identity-key-env"),
+            "the retry must keep naming the identity key: {npx:?}"
+        );
+        assert!(
+            npx[1].iter().any(|a| a == "--ttl"),
+            "the retry must keep the TTL: {npx:?}"
+        );
+        assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+    }
+
+    #[test]
+    fn test_codex_xats_undeclared_pane_passes_no_identity_flags() {
+        let (ok, npx, _codex) =
+            run_codex_bootstrap_with_fakes(Some("live-key-123"), FakeNpx::Succeed, &[], "");
+
+        assert!(ok);
+        assert!(
+            !npx[0].iter().any(|a| a == "--team" || a == "--agent-name"),
+            "an undeclared pane pre-registers as it did before: {npx:?}"
+        );
     }
 
     #[test]
@@ -7896,6 +8324,8 @@ mod tests {
             yolo_mode: false,
             cross_agent_team: false,
             worktree_info: None,
+            xats_team: String::new(),
+            xats_agent_name: String::new(),
             model: String::new(),
             model_fingerprint: String::new(),
             last_seen_at: 0,
@@ -8349,7 +8779,7 @@ mod tests {
             working_dir: "/tmp".to_string(),
             yolo_mode: true,
             cross_agent_team: true,
-            worktree: None,
+            ..Default::default()
         };
         hydrated.hydrate_legacy_primary_pane();
         assert!(!hydrated.primary_pane.yolo_mode);
