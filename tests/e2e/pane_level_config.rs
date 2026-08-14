@@ -101,12 +101,16 @@ fn right_pane_line(screen: &str) -> &str {
         .unwrap_or("")
 }
 
+/// One key per redraw: pressing again before the TUI has redrawn presses
+/// against a stale screen, and the surplus presses are still queued when the
+/// loop decides it is done, so they move the selection past what it just saw.
 fn select_codex_right_pane(h: &TuiTestHarness) {
     for _ in 0..32 {
         if right_pane_line(&h.capture_screen()).contains("● codex") {
             return;
         }
         h.send_keys("Right");
+        std::thread::sleep(Duration::from_millis(120));
     }
     panic!(
         "codex was not selectable as the right pane agent\n{}",
@@ -234,6 +238,11 @@ fn new_session_persists_independent_pane_launch_config() {
     h.send_keys("Tab");
     h.send_keys("Tab");
     h.send_keys("Space");
+    // That Space turned Cross Agent Team on for the right pane, which is what
+    // makes its two declared-identity fields exist. Skip them to reach the
+    // worktree field.
+    h.send_keys("Tab");
+    h.send_keys("Tab");
     h.send_keys("Tab");
     h.type_text("right-pane");
     h.send_keys("Enter");

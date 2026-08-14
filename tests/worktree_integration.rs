@@ -98,6 +98,10 @@ fn test_worktree_info_persists_across_save_load() {
         created_at: Utc::now(),
         cleanup_on_delete: true,
     });
+    // The pane owns the worktree and this field mirrors it, so a record built
+    // from the legacy field has to be synced the way producers do -- otherwise
+    // the load-time hydration derives it straight back to None.
+    instance.sync_primary_pane_from_legacy();
 
     storage.save(&[instance.clone()]).unwrap();
 

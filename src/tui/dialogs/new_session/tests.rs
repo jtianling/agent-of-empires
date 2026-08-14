@@ -405,6 +405,50 @@ fn render_orders_primary_before_divided_secondary_and_omits_sandbox() {
     assert!(!screen.contains("Sandbox:"));
 }
 
+/// The dialog does not scroll: when its content is taller than the terminal it
+/// is clamped and the bottom rows are simply cut off, so a field can become
+/// invisible and unreachable. Every optional row on at once is the tallest the
+/// dialog gets, and it has to fit the smallest terminal AoE is tested against.
+#[test]
+fn the_tallest_dialog_still_fits_a_short_terminal() {
+    let mut dialog = dialog();
+    dialog.set_right_pane_selection(1);
+    dialog.primary.cross_agent_team = true;
+    if let Some(pane) = dialog.secondary.as_mut() {
+        pane.cross_agent_team = true;
+    }
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            dialog.render(frame, area, &crate::tui::styles::Theme::default());
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for label in [
+        "Tool:",
+        "Path:",
+        "xats Team:",
+        "Right Pane Agent:",
+        "Right Pane Path:",
+    ] {
+        assert!(
+            screen.contains(label),
+            "'{label}' fell outside a 30-row terminal:\n{screen}"
+        );
+    }
+}
+
 #[test]
 fn escape_cancels_and_enter_submits_session_metadata() {
     let mut cancelled = dialog();

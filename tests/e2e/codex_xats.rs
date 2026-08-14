@@ -409,9 +409,18 @@ fn assert_codex_shell_panes(h: &CodexXatsHarness, session: &str, key: &str) {
     );
 }
 
+/// Cycle a radio field until it shows `tool`, one key per redraw.
+///
+/// The wait after each key is what makes this correct, not merely faster: the
+/// capture reads the screen, so pressing again before the TUI has redrawn means
+/// pressing against a stale picture. Every extra press is still queued when the
+/// screen finally catches up, so the loop returns on a screen that shows the
+/// right tool while presses that move past it are already in flight, and the
+/// Enter that follows submits something else.
 fn select_dialog_tool(h: &CodexXatsHarness, field: &str, tool: &str) {
     let selected = format!("● {tool}");
-    for _ in 0..32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         let screen = h.capture(&h.outer_session);
         let line = screen
             .lines()
@@ -421,6 +430,7 @@ fn select_dialog_tool(h: &CodexXatsHarness, field: &str, tool: &str) {
             return;
         }
         h.send_key("Right");
+        std::thread::sleep(Duration::from_millis(120));
     }
     panic!("could not select {tool} in {field}");
 }
@@ -431,7 +441,11 @@ fn create_codex_shell_session(h: &CodexXatsHarness, title: &str) -> String {
     h.type_text(title);
     h.send_key("Tab");
 
-    for _ in 0..6 {
+    // Title -> Right Pane Agent, one Tab per field in between: group, tool,
+    // path, YOLO, Cross Agent Team, xats Team, xats agent name, worktree. The
+    // two xats fields are here because this harness leaves Cross Agent Team on,
+    // which is what makes them exist.
+    for _ in 0..8 {
         h.send_key("Tab");
     }
     select_dialog_tool(h, "Right Pane Agent:", "shell");

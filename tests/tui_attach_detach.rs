@@ -199,28 +199,37 @@ fn test_attach_uses_terminal_backend() {
         "with_raw_mode_disabled should use terminal.backend_mut() for terminal operations"
     );
 
-    // attach_session must delegate to the helper, not bypass it
-    let attach_fn_start = source
-        .find("fn attach_session(")
-        .expect("attach_session function not found");
+    // `attach_session` is a one-line delegation now; the attach path's terminal
+    // handling lives in `start_session`, so that is where these hold.
+    assert!(
+        fn_body(&source, "fn attach_session(").contains("self.start_session("),
+        "attach_session should delegate to start_session"
+    );
 
-    let attach_fn_section = &source[attach_fn_start..];
-    let attach_fn_end = attach_fn_section
+    let start_fn_body = fn_body(&source, "fn start_session(");
+
+    assert!(
+        start_fn_body.contains("with_raw_mode_disabled"),
+        "the attach path should delegate to with_raw_mode_disabled"
+    );
+
+    assert!(
+        !start_fn_body.contains("std::io::stdout()"),
+        "the attach path should not use std::io::stdout() directly"
+    );
+}
+
+/// The body of a method, from its signature to the next one at the same level.
+fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} not found"));
+    let section = &source[start..];
+    let end = section
         .find("\n    fn ")
-        .or_else(|| attach_fn_section.find("\n}\n"))
-        .unwrap_or(attach_fn_section.len());
-
-    let attach_fn_body = &attach_fn_section[..attach_fn_end];
-
-    assert!(
-        attach_fn_body.contains("with_raw_mode_disabled"),
-        "attach_session should delegate to with_raw_mode_disabled"
-    );
-
-    assert!(
-        !attach_fn_body.contains("std::io::stdout()"),
-        "attach_session should not use std::io::stdout() directly"
-    );
+        .or_else(|| section.find("\n}\n"))
+        .unwrap_or(section.len());
+    &section[..end]
 }
 
 #[test]
@@ -241,32 +250,24 @@ fn test_zoom_aware_pane_switch_binding_configured() {
 fn test_attach_session_auto_zooms_narrow_multi_pane_sessions() {
     let source = std::fs::read_to_string("src/tui/app.rs").expect("Failed to read app.rs");
 
-    let attach_fn_start = source
-        .find("fn attach_session(")
-        .expect("attach_session function not found");
-
-    let attach_fn_section = &source[attach_fn_start..];
-    let attach_fn_end = attach_fn_section
-        .find("\n    fn ")
-        .or_else(|| attach_fn_section.find("\n}\n"))
-        .unwrap_or(attach_fn_section.len());
-
-    let attach_fn_body = &attach_fn_section[..attach_fn_end];
+    // The attach path runs through `start_session`, which is where the zoom
+    // decision lives.
+    let start_fn_body = fn_body(&source, "fn start_session(");
 
     assert!(
-        attach_fn_body.contains("self.home.is_narrow_layout(width)"),
-        "attach_session should reuse the TUI narrow-layout threshold"
+        start_fn_body.contains("self.home.is_narrow_layout(width)"),
+        "the attach path should reuse the TUI narrow-layout threshold"
     );
     assert!(
-        attach_fn_body.contains("tmux_session.pane_count() > 1"),
-        "attach_session should only auto-zoom multi-pane sessions"
+        start_fn_body.contains("tmux_session.pane_count() > 1"),
+        "the attach path should only auto-zoom multi-pane sessions"
     );
     assert!(
-        attach_fn_body.contains("resize-pane\", \"-Z\", \"-t\", &agent_pane_target"),
-        "attach_session should auto-zoom pane 0 before attaching"
+        start_fn_body.contains("resize-pane\", \"-Z\", \"-t\", &agent_pane_target"),
+        "the attach path should auto-zoom pane 0 before attaching"
     );
     assert!(
-        attach_fn_body.contains("format!(\"{session_name}:.0\")"),
-        "attach_session should target the agent pane when auto-zooming"
+        start_fn_body.contains("format!(\"{session_name}:.0\")"),
+        "the attach path should target the agent pane when auto-zooming"
     );
 }
