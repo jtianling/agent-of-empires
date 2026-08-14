@@ -1845,9 +1845,22 @@ fn enable_cross_agent_team(h: &TuiTestHarness, title: &str) {
         .iter_mut()
         .find(|s| s["title"] == title)
         .expect("created session");
+    // The pane owns this flag and the instance field is derived from it, so
+    // setting only the instance field is undone the moment the record is read
+    // back.
     session["cross_agent_team"] = serde_json::Value::Bool(true);
+    session["primary_pane"]["cross_agent_team"] = serde_json::Value::Bool(true);
+    let instance_id = session["id"].as_str().expect("session id").to_string();
     std::fs::write(&path, serde_json::to_string_pretty(&sessions).unwrap())
         .expect("enable Cross Agent Team");
+
+    // The launch that already happened provisioned slot 0 with the flag off,
+    // and a stored slot config wins over the instance record when a pane is
+    // rebuilt -- so turning it on after the fact has to reach the slot too.
+    sqlite_query(
+        &db_path(h),
+        &format!("UPDATE agent_slot SET cross_agent_team=1 WHERE instance_id='{instance_id}';"),
+    );
 }
 
 /// A Cross Agent Team Claude instance recovered with a second slot that records
@@ -2210,6 +2223,12 @@ fn at_b3_r_on_a_live_no_slot_shell_instance_relaunches_its_override() {
 
     h.spawn_tui();
     h.wait_for("Agent of Empires");
+    // A launch provisions slot 0 to hold that pane's config, so the untracked
+    // state this test is about has to be constructed rather than assumed.
+    sqlite_query(
+        &db,
+        &format!("DELETE FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
     assert_eq!(
         sqlite_query(
             &db,
@@ -2291,6 +2310,12 @@ fn at_b3_r_on_a_default_command_codex_instance_does_not_read_the_pane() {
 
     h.spawn_tui();
     h.wait_for("Agent of Empires");
+    // A launch provisions slot 0 to hold that pane's config, so the untracked
+    // state this test is about has to be constructed rather than assumed.
+    sqlite_query(
+        &db,
+        &format!("DELETE FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
     assert_eq!(
         sqlite_query(
             &db,

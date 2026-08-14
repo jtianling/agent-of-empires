@@ -72,6 +72,16 @@ fn start_cross_agent_team_session(h: &TuiTestHarness, title: &str) -> String {
     )
     .expect("enable Cross Agent Team");
 
+    // The launch that already happened provisioned slot 0 with the flag off, and
+    // a stored slot config wins over the instance record when a pane is rebuilt.
+    let db = db_path(h);
+    if db.exists() {
+        sqlite_query(
+            &db,
+            &format!("UPDATE agent_slot SET cross_agent_team=1 WHERE instance_id='{id}';"),
+        );
+    }
+
     let start = h.run_cli_in_tmux(&["session", "start", title]);
     assert!(
         start.status.success(),
@@ -528,11 +538,14 @@ fn identity_key_survives_a_clean_recovery() {
     sqlite_query(
         &db,
         &format!(
+            // Cross Agent Team lives on the slot now, and this row replaces the
+            // one the launch provisioned -- leaving the column out would turn
+            // the feature off for the pane recovery rebuilds from it.
             "INSERT OR REPLACE INTO agent_slot \
              (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
-              last_seen_at) \
+              cross_agent_team, last_seen_at) \
              VALUES ('{id}', 0, 'claude', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa0', '{}', '%0', \
-              '', {now});",
+              '{before}', 1, {now});",
             h.project_path().to_str().unwrap()
         ),
     );

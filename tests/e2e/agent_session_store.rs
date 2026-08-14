@@ -465,11 +465,14 @@ fn deleting_session_purges_durable_records() {
     let instance_id = add_and_start(&h, "Store Delete Cleanup");
     let db = db_path(&h);
 
-    // Seed durable + volatile rows tied to this instance/pane.
+    // Seed durable + volatile rows tied to this instance/pane. The launch has
+    // already provisioned slot 0 to hold that pane's config, so this replaces
+    // that row rather than colliding with it -- what the test is about is that
+    // `remove` purges whatever durable rows the instance has.
     sqlite_query(
         &db,
         &format!(
-            "INSERT INTO agent_slot \
+            "INSERT OR REPLACE INTO agent_slot \
              (instance_id, slot, agent, native_session_id, cwd, last_seen_at) \
              VALUES ('{instance_id}', 0, 'claude', 'sess-del', '/tmp', 1);"
         ),

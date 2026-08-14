@@ -313,7 +313,14 @@ fn reconcile_advances_agent_slot_from_monitor_while_poller_idle() {
         "capture for the attached pane should succeed"
     );
 
-    // Precondition: nothing has snapshotted the capture into agent_slot yet.
+    // Precondition: nothing has snapshotted the capture into agent_slot yet. The
+    // launch provisions slot 0 to hold that pane's config, so that row is
+    // cleared first -- what this test watches is reconcile writing one, not
+    // whether one exists.
+    sqlite_query(
+        &db,
+        &format!("DELETE FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
     let before = sqlite_query(
         &db,
         &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),

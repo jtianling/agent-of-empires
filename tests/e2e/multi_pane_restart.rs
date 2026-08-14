@@ -438,6 +438,13 @@ fn no_tracked_panes_restarts_primary_pane_fresh() {
     // No __record-pane capture -> reconciler records zero agent_slot rows.
     h.spawn_tui();
     h.wait_for("Agent of Empires");
+    // A launch provisions slot 0 to hold that pane's config, so the state this
+    // test is about -- an instance with nothing tracked, as one from before pane
+    // config was durable would be -- has to be constructed rather than assumed.
+    sqlite_query(
+        &db,
+        &format!("DELETE FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
     let slot_count = sqlite_query(
         &db,
         &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
@@ -513,6 +520,13 @@ fn no_tracked_panes_restart_keeps_a_shell_instance_alive() {
 
     h.spawn_tui();
     h.wait_for("Agent of Empires");
+    // A launch provisions slot 0 to hold that pane's config, so the state this
+    // test is about -- an instance with nothing tracked, as one from before pane
+    // config was durable would be -- has to be constructed rather than assumed.
+    sqlite_query(
+        &db,
+        &format!("DELETE FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
     let slot_count = sqlite_query(
         &db,
         &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
@@ -582,6 +596,13 @@ fn no_tracked_panes_restarts_the_agent_the_pane_actually_runs() {
 
     h.spawn_tui();
     h.wait_for("Agent of Empires");
+    // A launch provisions slot 0 to hold that pane's config, so the state this
+    // test is about -- an instance with nothing tracked, as one from before pane
+    // config was durable would be -- has to be constructed rather than assumed.
+    sqlite_query(
+        &db,
+        &format!("DELETE FROM agent_slot WHERE instance_id='{instance_id}';"),
+    );
     let slot_count = sqlite_query(
         &db,
         &format!("SELECT count(*) FROM agent_slot WHERE instance_id='{instance_id}';"),
