@@ -5027,9 +5027,11 @@ mod tests {
         assert!(!inst.is_yolo_mode());
 
         inst.yolo_mode = true;
+        inst.sync_primary_pane_from_legacy();
         assert!(inst.is_yolo_mode());
 
         inst.yolo_mode = false;
+        inst.sync_primary_pane_from_legacy();
         assert!(!inst.is_yolo_mode());
     }
 
@@ -5039,6 +5041,7 @@ mod tests {
         assert!(!inst.is_sandboxed());
 
         inst.yolo_mode = true;
+        inst.sync_primary_pane_from_legacy();
         assert!(inst.is_yolo_mode());
         assert!(!inst.is_sandboxed());
     }
@@ -5187,6 +5190,7 @@ mod tests {
         inst.tool = "claude".to_string();
         inst.extra_args = "--model sonnet".to_string();
         inst.yolo_mode = true;
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst
             .build_agent_command(Some("4dc7a3c8-934e-40c1-95f8-8b00fe11cf11"))
@@ -5211,6 +5215,7 @@ mod tests {
         inst.tool = "codex".to_string();
         inst.extra_args = "--model gpt-5".to_string();
         inst.yolo_mode = true;
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst
             .build_agent_command(Some("019d1af9-a899-7df1-8f7d-a244126e5ded"))
@@ -5258,6 +5263,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "claude".to_string();
         inst.cross_agent_team = true;
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst.build_agent_command(None).unwrap();
         assert!(
@@ -5507,6 +5513,7 @@ mod tests {
         inst.tool = "claude".to_string();
         inst.yolo_mode = true;
         inst.cross_agent_team = true;
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst.build_agent_command(None).unwrap();
         assert!(
@@ -5527,6 +5534,7 @@ mod tests {
         inst.tool = "claude".to_string();
         inst.cross_agent_team = true;
         inst.cross_agent_team_channel = "server:my-channel".to_string();
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst.build_agent_command(None).unwrap();
         assert!(
@@ -5942,6 +5950,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "codex".to_string();
         inst.cross_agent_team = true;
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst.build_agent_command(None).unwrap();
         assert!(
@@ -6033,9 +6042,12 @@ mod tests {
 
     #[test]
     fn test_no_slot_needs_a_key_without_cross_agent_team() {
-        let mut inst = Instance::new("test", "/tmp/test");
-        inst.tool = "claude".to_string();
-        assert!(!inst.slot_needs_identity_key(&slot(1, "")));
+        let inst = Instance::new("test", "/tmp/test");
+        // Cross Agent Team is a per-slot switch, so it is the slot's own flag
+        // that decides, not the instance's.
+        let off = recovered_slot(1, "claude", "/tmp/test", "%1");
+        assert!(!off.cross_agent_team, "the fixture has the switch off");
+        assert!(!inst.slot_needs_identity_key(&off));
     }
 
     #[test]
@@ -7471,6 +7483,7 @@ mod tests {
     fn test_codex_cross_agent_team_disabled_uses_normal_command() {
         let mut inst = codex_xats_instance();
         inst.cross_agent_team = false;
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst.build_agent_command(None).unwrap();
 
@@ -7485,6 +7498,7 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/expected path");
         inst.tool = "shell".to_string();
         inst.command = shell.clone();
+        inst.sync_primary_pane_from_legacy();
 
         let cmd = inst.build_agent_command(None).unwrap();
         let escaped_dir = shell_escape("/tmp/expected path");
@@ -8163,26 +8177,34 @@ mod tests {
     /// launches it, including slot 0.
     #[test]
     fn test_adopted_slot_zero_needs_its_own_identity_key() {
-        let mut inst = Instance::new("test", "/tmp/test");
-        inst.tool = "claude".to_string();
-        inst.cross_agent_team = true;
+        let inst = Instance::new("test", "/tmp/test");
+        let enabled = |slot: i64, agent: &str, pane: &str| {
+            let mut s = recovered_slot(slot, agent, "/tmp/test", pane);
+            s.cross_agent_team = true;
+            s
+        };
 
-        let own = recovered_slot(0, "claude", "/tmp/test", "%0");
+        // Slot 0 has no privileged key source -- it needs its own, like any
+        // other slot.
         assert!(
-            inst.slot_needs_identity_key(&own),
+            inst.slot_needs_identity_key(&enabled(0, "claude", "%0")),
             "slot 0 stores its key in its own durable slot"
         );
-
-        let adopted = recovered_slot(0, "vibe", "/tmp/test", "%0");
         assert!(
-            inst.slot_needs_identity_key(&adopted),
-            "an adopted slot 0 has no other key source, so it must get its own"
+            inst.slot_needs_identity_key(&enabled(1, "claude", "%1")),
+            "a secondary adopted slot keeps needing its own key"
         );
 
-        let secondary = recovered_slot(1, "vibe", "/tmp/test", "%1");
+        // What decides is the slot's own switch and its own agent, not the
+        // instance's: an adopted pane running a tool with no xats support has
+        // nothing to do with a key.
         assert!(
-            inst.slot_needs_identity_key(&secondary),
-            "a secondary adopted slot keeps needing its own key"
+            !inst.slot_needs_identity_key(&enabled(0, "vibe", "%0")),
+            "a tool without Cross Agent Team support gets no key"
+        );
+        assert!(
+            !inst.slot_needs_identity_key(&recovered_slot(0, "claude", "/tmp/test", "%0")),
+            "the switch is off for this slot, so it gets no key"
         );
     }
 
