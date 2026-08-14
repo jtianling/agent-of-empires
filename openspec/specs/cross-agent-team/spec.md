@@ -650,6 +650,24 @@ no declaration.
   Codex bootstrap cannot distinguish the daemon rejecting a bad value from an
   older CLI rejecting an unknown flag, and would drop the declaration silently
 
+#### Scenario: A declaration carries no quote and no line terminator
+
+- **WHEN** a user types a double quote into either declared-identity field
+- **THEN** the field SHALL refuse it, because the daemon interpolates a declared
+  name into a notice as `name="${name}"` and a quote closes that early
+- **AND** both fields SHALL likewise refuse U+2028 and U+2029, which terminate a
+  line without belonging to the control-character category a general "no control
+  characters" rule tests
+
+#### Scenario: A tightened daemon rule reaches this validation
+
+- **WHEN** the daemon starts refusing a character these fields still accept
+- **THEN** this validation SHALL be updated to match
+- **AND** the reason it SHALL not be left to the daemon alone is that the Codex
+  bootstrap's retry turns a value the daemon refuses into a launch that looks
+  healthy and carries no declaration -- so a rule tightened on one side and not
+  the other fails silently on this side
+
 #### Scenario: Fields are inert when the feature is off
 
 - **WHEN** Cross Agent Team is off for a pane

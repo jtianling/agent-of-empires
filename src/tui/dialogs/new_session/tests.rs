@@ -302,6 +302,47 @@ fn a_declared_identity_field_refuses_the_characters_xats_reads_as_syntax() {
     assert_eq!(dialog.primary.xats_team.value(), "mon:keysx");
 }
 
+/// Two refusals that are not about addressing, and that both fields share.
+///
+/// The double quote is the one that bites without any malice: the daemon writes
+/// a declared name into a notice as `name="${name}"`, so `mvr"coder` closes the
+/// quoting early and the agent copies a broken argument into its registration.
+///
+/// U+2028 and U+2029 are the ones a "no control characters" rule silently
+/// misses -- they are `Zl`/`Zp`, not `Cc`, so `char::is_control` says false
+/// while they still terminate a line.
+#[test]
+fn a_declared_identity_field_refuses_quotes_and_line_separators() {
+    let mut dialog = dialog();
+    dialog.primary.cross_agent_team = true;
+
+    for (field, refused) in [
+        (dialog.field_layout().xats_agent_name, '"'),
+        (dialog.field_layout().xats_team, '"'),
+        (dialog.field_layout().xats_agent_name, '\u{2028}'),
+        (dialog.field_layout().xats_team, '\u{2029}'),
+    ] {
+        dialog.focused_field = field;
+        dialog.primary.xats_team = tui_input::Input::new(String::new());
+        dialog.primary.xats_agent_name = tui_input::Input::new(String::new());
+
+        dialog.handle_key(key(KeyCode::Char('a')));
+        dialog.handle_key(key(KeyCode::Char(refused)));
+        dialog.handle_key(key(KeyCode::Char('b')));
+
+        let value = if field == dialog.field_layout().xats_team {
+            dialog.primary.xats_team.value()
+        } else {
+            dialog.primary.xats_agent_name.value()
+        };
+        assert_eq!(
+            value, "ab",
+            "U+{:04X} must never enter a declaration",
+            refused as u32
+        );
+    }
+}
+
 #[test]
 fn new_session_state_has_no_sandbox_entry() {
     let dialog = dialog();

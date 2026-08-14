@@ -135,6 +135,18 @@ pub const MAX_DECLARED_XATS_IDENTITY_LEN: usize = 128;
 const XATS_NAME_RESERVED: [char; 3] = [':', '(', ')'];
 const XATS_TEAM_RESERVED: [char; 2] = ['(', ')'];
 
+/// Refused in both fields, for reasons that are not about addressing.
+///
+/// The daemon writes a declared name into a notice as `name="${name}"`, so a
+/// double quote closes the quoting early and the agent copies a broken argument
+/// into its registration -- no malice needed, just a name with a quote in it.
+///
+/// `char::is_control` is the `Cc` category, which covers `\n`, `\r`, `\t` and
+/// NEL, but NOT U+2028 and U+2029: those are `Zl`/`Zp`. They terminate a line
+/// all the same, so "a declaration carries no line terminator" is only true if
+/// they are named explicitly.
+const XATS_LABEL_REFUSED: [char; 3] = ['"', '\u{2028}', '\u{2029}'];
+
 /// Whether a declared xats agent name is safe to store and carry.
 ///
 /// Two different reasons to refuse, and they are worth telling apart. AoE's own
@@ -160,7 +172,9 @@ pub fn is_valid_declared_xats_team(value: &str) -> bool {
 }
 
 fn is_storable_declared_value(value: &str) -> bool {
-    value.len() <= MAX_DECLARED_XATS_IDENTITY_LEN && !value.chars().any(char::is_control)
+    value.len() <= MAX_DECLARED_XATS_IDENTITY_LEN
+        && !value.chars().any(char::is_control)
+        && !value.contains(XATS_LABEL_REFUSED)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,7 +294,8 @@ impl PaneConfig {
             if !valid(value) {
                 bail!(
                     "Declared xats {} must be at most {} characters, free of control \
-                     characters, and free of {} (xats reads those as addressing syntax)",
+                     characters and line separators, free of double quotes, and free \
+                     of {} (xats reads those as addressing syntax)",
                     label,
                     MAX_DECLARED_XATS_IDENTITY_LEN,
                     reserved
@@ -415,13 +430,29 @@ mod tests {
     fn declared_xats_identity_survives_a_json_round_trip_with_quotes_and_spaces() {
         let mut pane = PaneConfig::new("claude", "/tmp", false, true);
         pane.xats_team = "team 'one'".to_string();
-        pane.xats_agent_name = "a \"coder\" here".to_string();
+        pane.xats_agent_name = "a 'coder' here".to_string();
         pane.validate().unwrap();
 
         let json = serde_json::to_string(&pane).unwrap();
         let restored: PaneConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored, pane);
+    }
+
+    /// The single quote stays legal and the double quote does not: the daemon
+    /// interpolates a declared name into `name="${name}"`, so a double quote
+    /// closes the quoting early and hands the agent a broken argument.
+    #[test]
+    fn a_declared_identity_refuses_double_quotes_and_line_separators() {
+        for value in ["a \"coder\"", "line\u{2028}break", "line\u{2029}break"] {
+            let mut pane = PaneConfig::new("claude", "/tmp", false, true);
+            pane.xats_agent_name = value.to_string();
+            assert!(pane.validate().is_err(), "{value:?} must not reach storage");
+
+            let mut pane = PaneConfig::new("claude", "/tmp", false, true);
+            pane.xats_team = value.to_string();
+            assert!(pane.validate().is_err(), "{value:?} must not reach storage");
+        }
     }
 
     #[test]
