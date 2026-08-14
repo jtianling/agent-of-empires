@@ -209,6 +209,10 @@ fn test_new_session_shell_right_pane_starts_in_project_path() {
             break;
         }
         h.send_keys("Right");
+        // One key per redraw: capturing before the TUI has caught up means
+        // pressing against a stale screen, and the surplus presses land after
+        // the loop is satisfied.
+        std::thread::sleep(Duration::from_millis(120));
     }
     assert!(
         right_pane_line(&h.capture_screen()).contains("● shell"),

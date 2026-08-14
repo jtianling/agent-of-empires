@@ -59,7 +59,12 @@ fn start_cross_agent_team_session(h: &TuiTestHarness, title: &str) -> String {
         .iter_mut()
         .find(|s| s["title"] == title)
         .expect("created session");
+    // The pane owns this flag and the instance field is derived from it, so
+    // setting only the instance field is undone the moment the record is read
+    // back: the load-time hydration keeps the pane `aoe add` wrote and derives
+    // the instance field from it again.
     session["cross_agent_team"] = serde_json::Value::Bool(true);
+    session["primary_pane"]["cross_agent_team"] = serde_json::Value::Bool(true);
     let id = session["id"].as_str().expect("session id").to_string();
     std::fs::write(
         sessions_path(h),
@@ -358,6 +363,10 @@ fn new_session_right_pane_is_launched_with_its_own_key() {
             break;
         }
         h.send_keys("Right");
+        // One key per redraw: capturing before the TUI has caught up means
+        // pressing against a stale screen, and the surplus presses land after
+        // the loop is satisfied.
+        std::thread::sleep(Duration::from_millis(120));
     }
     assert!(
         right_pane_line(&h.capture_screen()).contains("● claude"),

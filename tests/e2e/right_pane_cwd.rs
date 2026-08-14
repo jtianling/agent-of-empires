@@ -223,6 +223,10 @@ fn create_session_with_right_pane(
             break;
         }
         h.send_keys("Right");
+        // One key per redraw: capturing before the TUI has caught up means
+        // pressing against a stale screen, and the surplus presses land after
+        // the loop is satisfied.
+        std::thread::sleep(Duration::from_millis(120));
     }
     assert!(
         right_pane_line(&h.capture_screen()).contains("● shell"),
@@ -439,6 +443,7 @@ fn select_add_pane_agent(h: &TuiTestHarness, agent: &str) {
             return;
         }
         h.send_keys("Right");
+        std::thread::sleep(Duration::from_millis(120));
     }
     panic!(
         "Could not select agent {} in the add-pane dialog\n\n--- Screen capture ---\n{}\n--- End screen capture ---",
