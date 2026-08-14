@@ -988,6 +988,8 @@ fn test_codex_fork_not_ready_hint_points_to_resume_restart() {
     setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
     let mut inst = Instance::new("codexsession", "/tmp/codex");
+    // The pane is authoritative for the tool; the instance field mirrors it.
+    inst.primary_pane.tool = "codex".to_string();
     inst.tool = "codex".to_string();
     inst.resume_token = None;
     storage.save(&[inst]).unwrap();

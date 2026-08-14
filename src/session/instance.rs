@@ -9099,8 +9099,14 @@ mod tests {
 
     // --- Fork session tests ----------------------------------------------
 
+    /// The pane is authoritative and the instance-level `tool`/`yolo_mode`/
+    /// worktree fields are derived from it, so a fixture that sets only the
+    /// derived side is silently undone by the `sync_legacy_primary_fields` at
+    /// the end of `create_fork`.
     fn parent_instance(tool: &str, token: Option<&str>) -> Instance {
         let mut inst = Instance::new("parent", "/tmp/project");
+        inst.primary_pane.tool = tool.to_string();
+        inst.primary_pane.yolo_mode = true;
         inst.tool = tool.to_string();
         inst.group_path = "work".to_string();
         inst.extra_args = "--verbose".to_string();
@@ -9206,12 +9212,18 @@ mod tests {
     #[test]
     fn test_create_fork_clears_worktree_cleanup_flag() {
         let mut parent = parent_instance("claude", Some("abc"));
-        parent.worktree_info = Some(WorktreeInfo {
-            branch: "main".to_string(),
-            main_repo_path: "/tmp/project".to_string(),
-            managed_by_aoe: true,
-            created_at: Utc::now(),
-            cleanup_on_delete: true,
+        // Set on the pane, which is where a worktree now lives; the instance
+        // field is derived from it.
+        parent.primary_pane.worktree = Some(crate::session::PaneWorktreeInfo {
+            worktree_path: None,
+            worktree: Some(WorktreeInfo {
+                branch: "main".to_string(),
+                main_repo_path: "/tmp/project".to_string(),
+                managed_by_aoe: true,
+                created_at: Utc::now(),
+                cleanup_on_delete: true,
+            }),
+            workspace: None,
         });
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let wt = fork.worktree_info.expect("worktree inherited");
