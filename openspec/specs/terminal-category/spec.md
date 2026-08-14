@@ -11,11 +11,11 @@ session management interface used for AI coding agents. Shell sessions use the u
 shell and skip agent-specific features like YOLO mode and worktree management.
 ## Requirements
 ### Requirement: Shell tool is available in tool picker
-The system SHALL include "shell" as a selectable tool in the new session dialog's tool picker. Shell SHALL appear after "gemini" and before "cursor" in the tool list. The alias "terminal" SHALL resolve to "shell" for backwards compatibility.
+The system SHALL include "shell" as a selectable tool in the new session dialog's tool picker. Shell SHALL appear after "kimi" and before "vibe" in the tool list. The alias "terminal" SHALL resolve to "shell" for backwards compatibility.
 
 #### Scenario: Shell shown in tool picker
 - **WHEN** the user opens the new session dialog
-- **THEN** "shell" appears in the tool list between "gemini" and "cursor"
+- **THEN** "shell" appears in the tool list between "kimi" and "vibe"
 
 #### Scenario: Shell is always available
 - **WHEN** the system detects available tools at startup

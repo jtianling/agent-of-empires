@@ -210,7 +210,6 @@ start a session with that agent, and the hook is a no-op outside AoE sessions.
 | Agent  | File                    |
 | ------ | ----------------------- |
 | Claude | `~/.claude/settings.json` |
-| Gemini | `~/.gemini/settings.json` |
 | Cursor | `~/.cursor/settings.json` |
 
 Entries you wrote yourself are preserved; AoE adds, replaces, and removes only

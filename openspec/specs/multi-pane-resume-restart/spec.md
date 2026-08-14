@@ -61,7 +61,7 @@ A pane that cannot be resumed SHALL degrade to a fresh restart of that pane only
 
 #### Scenario: Pane without resume support restarts fresh
 - **WHEN** the user presses `R`
-- **AND** one tracked pane runs an agent with no `ResumeConfig` (e.g. gemini, shell)
+- **AND** one tracked pane runs an agent with no `ResumeConfig` (e.g. copilot, shell)
 - **AND** another tracked pane runs `claude` with a persisted `native_session_id`
 - **THEN** the no-resume pane SHALL be respawned with a fresh command (no resume flag)
 - **AND** the `claude` pane SHALL be respawned with its `--resume <native_session_id>` command

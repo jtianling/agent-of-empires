@@ -162,18 +162,18 @@ fn test_cli_fork_rejects_unsupported_tool() {
     let h = TuiTestHarness::new("fork_cli_unsupported");
     let project = h.project_path();
 
-    // Create a session with gemini tool (not forkable).
+    // Create a session with copilot tool (not forkable).
     h.run_cli(&[
         "add",
         project.to_str().unwrap(),
         "-t",
-        "gemini-session",
+        "copilot-session",
         "-c",
-        "gemini",
+        "copilot",
     ]);
-    inject_resume_token(&h, "gemini-session", "ignored");
+    inject_resume_token(&h, "copilot-session", "ignored");
 
-    let output = h.run_cli(&["session", "fork", "gemini-session", "--no-launch"]);
+    let output = h.run_cli(&["session", "fork", "copilot-session", "--no-launch"]);
     assert!(
         !output.status.success(),
         "fork should fail for unsupported tool"
@@ -351,21 +351,21 @@ fn test_tui_fork_shows_not_ready_without_token_codex() {
 
 #[test]
 #[serial]
-fn test_tui_fork_shows_not_supported_for_gemini() {
+fn test_tui_fork_shows_not_supported_for_copilot() {
     require_tmux!();
 
     let mut h = TuiTestHarness::new("fork_tui_unsupported");
     let project = h.project_path();
 
-    // Create a fake gemini stub
+    // Create a fake copilot stub
     let stub_dir = h.home_path().join("fake-bin");
     std::fs::create_dir_all(&stub_dir).unwrap();
-    let gemini_stub = stub_dir.join("gemini");
-    std::fs::write(&gemini_stub, "#!/bin/sh\nexit 0\n").unwrap();
+    let copilot_stub = stub_dir.join("copilot");
+    std::fs::write(&copilot_stub, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gemini_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&copilot_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     h.run_cli(&[
@@ -374,7 +374,7 @@ fn test_tui_fork_shows_not_supported_for_gemini() {
         "-t",
         "gem-session",
         "-c",
-        "gemini",
+        "copilot",
     ]);
 
     h.spawn_tui();

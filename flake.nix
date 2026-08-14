@@ -56,7 +56,7 @@
                 AI agents in parallel across different branches of your codebase,
                 each in its own isolated session with optional Docker sandboxing.
 
-                Supports Claude Code, OpenCode, Mistral Vibe, Codex CLI, and Gemini CLI.
+                Supports Claude Code, Codex CLI, OpenCode, Kimi Code, and Mistral Vibe.
               '';
               homepage = "https://github.com/njbrake/agent-of-empires";
               license = licenses.mit;

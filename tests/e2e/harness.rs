@@ -716,7 +716,7 @@ last_seen_version = "{}"
     }
 
     /// Install a long-lived stub for an agent binary (e.g. "claude", "codex",
-    /// "gemini") into the harness stub dir so `which <name>` succeeds AND the
+    /// "copilot") into the harness stub dir so `which <name>` succeeds AND the
     /// agent pane launched for it stays alive. The default `claude` stub exits
     /// immediately; the restart/recovery tests need the instance's primary pane
     /// to survive long enough to be tracked and then respawned with a resume

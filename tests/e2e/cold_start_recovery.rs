@@ -1874,15 +1874,15 @@ fn at_cat_recovery_decorates_each_pane_and_types_into_no_other() {
     // then records every line its stdin receives. An Enter that reaches it
     // shows up as a recorded line -- the original defect, made observable.
     //
-    // Gemini rather than Codex, because Codex's Cross Agent Team bootstrap
+    // Copilot rather than Codex, because Codex's Cross Agent Team bootstrap
     // checks a live app-server port and pre-registers the pane before it execs
     // the agent. Neither exists here, so the stub would never run and the
     // "nothing was typed" assertion would hold vacuously -- the pane it speaks
-    // for would not exist. Gemini is decorated by neither integration, so it
+    // for would not exist. Copilot is decorated by neither integration, so it
     // reaches the stub, which is what makes the assertion mean anything.
     let typed = h.home_path().join("adopted-received-input.txt");
     h.install_stub_script(
-        "gemini",
+        "copilot",
         &format!(
             "#!/bin/sh\n\
              : > '{0}'\n\
@@ -1909,7 +1909,7 @@ fn at_cat_recovery_decorates_each_pane_and_types_into_no_other() {
                 cwd: &project,
             },
             SlotSeed {
-                agent: "gemini",
+                agent: "copilot",
                 native: "bbbb2222-2222-4222-8222-222222222222",
                 cwd: &project,
             },

@@ -52,11 +52,11 @@ EnvVar(key, value)   -- prepend env var to command (e.g. "OPENCODE_PERMISSION=..
 | Name | Binary | YOLO | Instruction Flag | Host Launch | Own Title | Resume | Notes |
 |------|--------|------|-----------------|-------------|-----------|--------|-------|
 | `claude` | `claude` | `--dangerously-skip-permissions` | `--append-system-prompt {}` | Yes | Yes | Yes | Default agent |
-| `opencode` | `opencode` | `OPENCODE_PERMISSION={"*":"allow"}` | None | No | No | No | Container-only |
-| `vibe` | `vibe` | `--agent auto-approve` | None | Yes | No | No | Detection: `vibe --version` |
 | `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--config developer_instructions={}` | Yes | No | Yes | |
-| `gemini` | `gemini` | `--approval-mode yolo` | None | Yes | Yes | No | |
+| `opencode` | `opencode` | `OPENCODE_PERMISSION={"*":"allow"}` | None | Yes | No | Yes | Exact session on an AoE-owned server |
+| `kimi` | `kimi` | `--yolo` | None | Yes | No | Yes | Exact session on a user-owned shared server. Alias: `kimi-code` |
 | `shell` | `shell` | None | None | Yes | No | No | Plain shell, no status detection. Alias: `terminal` |
+| `vibe` | `vibe` | `--agent auto-approve` | None | Yes | No | No | Detection: `vibe --version` |
 | `cursor` | `agent` | `--yolo` | None | Yes | No | No | Binary is `agent`, aliases: `["agent"]` |
 
 ## Name Resolution
@@ -83,7 +83,7 @@ Agents may declare env vars that are always injected into container sessions:
 - **FR-006**: Agents with `supports_host_launch: false` MUST only be launched inside containers.
 - **FR-007**: Adding a new agent MUST NOT require changes outside `src/agents.rs` and `src/tmux/status_detection.rs`.
 - **FR-008**: Agents with `sets_own_title: false` SHALL have their tmux pane title managed by AoE based on detected status. AoE SHALL prefix the title with a waiting icon when the agent's status is `Waiting`.
-- **FR-009**: Agents with `sets_own_title: true` (claude, gemini) SHALL NOT have their pane title overwritten by AoE.
+- **FR-009**: Agents with `sets_own_title: true` (claude) SHALL NOT have their pane title overwritten by AoE.
 
 ### Requirement: All agents MUST have a yolo mode configured
 All agents MUST have a `yolo` mode configured, except for non-agent tools (e.g., shell) where `yolo: None` is permitted.
@@ -97,7 +97,7 @@ All agents MUST have a `yolo` mode configured, except for non-agent tools (e.g.,
 - **THEN** it returns `None`
 
 ### Requirement: Shell entry in registry
-The agent registry SHALL include a `shell` entry with `name: "shell"`, positioned after `gemini` and before `cursor` in the `AGENTS` array. The alias `"terminal"` SHALL resolve to `"shell"`.
+The agent registry SHALL include a `shell` entry with `name: "shell"`, positioned after `kimi` and before `vibe` in the `AGENTS` array. The alias `"terminal"` SHALL resolve to `"shell"`.
 
 #### Scenario: Shell is registered
 - **WHEN** looking up agent by name "shell"
@@ -109,11 +109,11 @@ The agent registry SHALL include a `shell` entry with `name: "shell"`, positione
 
 #### Scenario: Registry order includes shell
 - **WHEN** listing all agent names in registry order
-- **THEN** the list is `["claude", "opencode", "vibe", "codex", "gemini", "shell", "cursor"]`
+- **THEN** the list is `["claude", "codex", "opencode", "kimi", "shell", "vibe", "cursor", "copilot", "pi"]`
 
 #### Scenario: Settings index accounts for shell
 - **WHEN** converting "shell" to a settings index
-- **THEN** the result is `6` (gemini=5, shell=6, cursor=7)
+- **THEN** the result is `5` (kimi=4, shell=5, vibe=6)
 
 ### Requirement: AgentDef supports optional resume configuration
 `AgentDef` SHALL include a `resume: Option<ResumeConfig>` field. Agents that support session resumption declare their exit sequence, output pattern, and resume CLI flag via this field. Agents that do not support resume set this to `None`.
@@ -135,7 +135,7 @@ The agent registry SHALL include a `shell` entry with `name: "shell"`, positione
   - timeout of 10 seconds
 
 #### Scenario: Agents without resume support
-- **WHEN** agent definitions for opencode, vibe, gemini, shell, or cursor are loaded
+- **WHEN** agent definitions for vibe, shell, cursor, copilot, or pi are loaded
 - **THEN** their `resume` field SHALL be `None`
 
 ### Requirement: ResumeConfig structure

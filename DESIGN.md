@@ -1,7 +1,7 @@
 # Design System -- Agent of Empires
 
 ## Product Context
-- **What this is:** Terminal session manager for AI coding agents (Claude Code, Gemini CLI, OpenCode, Codex, Mistral Vibe, etc.)
+- **What this is:** Terminal session manager for AI coding agents (Claude Code, Codex, OpenCode, Kimi Code, Mistral Vibe, etc.)
 - **Who it's for:** Developers who run multiple AI coding agents in parallel and want a single dashboard to manage them
 - **Space/industry:** Developer tools, terminal utilities, AI coding infrastructure
 - **Project type:** Open source CLI/TUI tool with a marketing/docs website (Astro + Tailwind)

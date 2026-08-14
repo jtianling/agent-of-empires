@@ -82,7 +82,7 @@ status_bar = "auto"          # auto | enabled | disabled
 mouse = "auto"               # auto | enabled | disabled
 
 [session]
-default_tool = ""            # optional: claude | opencode | vibe | codex | gemini | cursor
+default_tool = ""            # optional: claude | codex | opencode | kimi | shell | vibe | cursor
 yolo_mode_default = false
 
 [diff]

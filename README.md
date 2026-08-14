@@ -35,7 +35,7 @@ This fork builds on the original AoE with several quality-of-life improvements f
 
 ## Features
 
-- **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, and Pi.dev
+- **Multi-agent support** -- Claude Code, Codex CLI, OpenCode, Kimi Code, Mistral Vibe, Cursor CLI, Copilot CLI, and Pi.dev
 - **TUI dashboard** -- visual interface to create, monitor, and manage sessions
 - **Agent + terminal views** -- toggle between your AI agents and paired shell terminals with `t`
 - **Status detection** -- see which agents are running, waiting for input, or idle
@@ -114,7 +114,7 @@ Nothing. Sessions are tmux sessions running in the background. Open and close `a
 
 ### Which AI tools are supported?
 
-Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, and Pi.dev. AoE auto-detects which are installed on your system.
+Claude Code, Codex CLI, OpenCode, Kimi Code, Mistral Vibe, Cursor CLI, Copilot CLI, and Pi.dev. AoE auto-detects which are installed on your system.
 
 ## Troubleshooting
 

@@ -360,7 +360,7 @@ pub fn apply_all_tmux_options(
 
     // Set an initial pane title so agents that don't write their own OSC 0
     // (e.g. Codex CLI) show something meaningful instead of the hostname.
-    // Agents that do set titles (Claude Code, Gemini) will overwrite this.
+    // Agents that do set titles (Claude Code) will overwrite this.
     if let Err(e) = set_initial_pane_title(session_name, title) {
         tracing::debug!("Failed to set initial pane title: {}", e);
     }

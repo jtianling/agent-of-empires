@@ -103,17 +103,6 @@ const AGENT_CONFIG_MOUNTS: &[AgentConfigMount] = &[
         preserve_files: &[],
     },
     AgentConfigMount {
-        tool_name: "gemini",
-        host_rel: ".gemini",
-        container_suffix: ".gemini",
-        skip_entries: &["sandbox"],
-        seed_files: &[],
-        copy_dirs: &[],
-        keychain_credential: None,
-        home_seed_files: &[],
-        preserve_files: &[],
-    },
-    AgentConfigMount {
         tool_name: "vibe",
         host_rel: ".vibe",
         container_suffix: ".vibe",

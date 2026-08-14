@@ -230,49 +230,6 @@ pub const AGENTS: &[AgentDef] = &[
         supports_cross_agent_team: true,
     },
     AgentDef {
-        name: "opencode",
-        binary: "opencode",
-        aliases: &["open-code"],
-        detection: DetectionMethod::Which("opencode"),
-        yolo: Some(YoloMode::EnvVar("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)),
-        instruction_flag: None,
-        set_default_command: false,
-        supports_host_launch: true,
-        detect_status: status_detection::detect_opencode_status,
-        container_env: &[],
-        hook_config: None,
-        resume: Some(ResumeConfig {
-            exit_sequence: &[&["C-c"], &["C-c"]],
-            resume_pattern: r"(ses_[A-Za-z0-9_-]+)",
-            resume_flag: "--session {}",
-            timeout_secs: 10,
-        }),
-        fork_template: Some("--session {} --fork"),
-        session_id_flag: None,
-        sets_own_title: false,
-        exact_session_runtime: Some(ExactSessionRuntime::OwnedServer),
-        supports_cross_agent_team: true,
-    },
-    AgentDef {
-        name: "vibe",
-        binary: "vibe",
-        aliases: &["mistral-vibe"],
-        detection: DetectionMethod::RunWithArg("vibe", "--version"),
-        yolo: Some(YoloMode::CliFlag("--agent auto-approve")),
-        instruction_flag: None,
-        set_default_command: false,
-        supports_host_launch: true,
-        detect_status: status_detection::detect_vibe_status,
-        container_env: &[],
-        hook_config: None,
-        resume: None,
-        fork_template: None,
-        session_id_flag: None,
-        sets_own_title: false,
-        exact_session_runtime: None,
-        supports_cross_agent_team: false,
-    },
-    AgentDef {
         name: "codex",
         binary: "codex",
         aliases: &[],
@@ -301,47 +258,55 @@ pub const AGENTS: &[AgentDef] = &[
         supports_cross_agent_team: true,
     },
     AgentDef {
-        name: "gemini",
-        binary: "gemini",
-        aliases: &[],
-        detection: DetectionMethod::Which("gemini"),
-        yolo: Some(YoloMode::CliFlag("--approval-mode yolo")),
+        name: "opencode",
+        binary: "opencode",
+        aliases: &["open-code"],
+        detection: DetectionMethod::Which("opencode"),
+        yolo: Some(YoloMode::EnvVar("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)),
         instruction_flag: None,
         set_default_command: false,
         supports_host_launch: true,
-        detect_status: status_detection::detect_gemini_status,
+        detect_status: status_detection::detect_opencode_status,
         container_env: &[],
-        hook_config: Some(AgentHookConfig {
-            settings_rel_path: ".gemini/settings.json",
-            events: &[
-                HookEvent {
-                    name: "BeforeTool",
-                    matcher: None,
-                    status: Some("running"),
-                },
-                HookEvent {
-                    name: "BeforeAgent",
-                    matcher: None,
-                    status: Some("running"),
-                },
-                HookEvent {
-                    name: "AfterAgent",
-                    matcher: None,
-                    status: Some("idle"),
-                },
-                HookEvent {
-                    name: "Notification",
-                    matcher: Some("ToolPermission"),
-                    status: Some("waiting"),
-                },
-            ],
+        hook_config: None,
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: r"(ses_[A-Za-z0-9_-]+)",
+            resume_flag: "--session {}",
+            timeout_secs: 10,
         }),
-        resume: None,
+        fork_template: Some("--session {} --fork"),
+        session_id_flag: None,
+        sets_own_title: false,
+        exact_session_runtime: Some(ExactSessionRuntime::OwnedServer),
+        supports_cross_agent_team: true,
+    },
+    AgentDef {
+        name: "kimi",
+        binary: "kimi",
+        aliases: &["kimi-code"],
+        detection: DetectionMethod::Which("kimi"),
+        yolo: Some(YoloMode::CliFlag("--yolo")),
+        instruction_flag: None,
+        set_default_command: false,
+        supports_host_launch: true,
+        detect_status: status_detection::detect_kimi_status,
+        container_env: &[],
+        hook_config: None,
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: r"(session_[0-9a-fA-F-]+)",
+            resume_flag: "--session {}",
+            timeout_secs: 10,
+        }),
+        // Forking is the agent's own operation and kimi exposes none; a fork of
+        // an exact session on a shared server would also need a second identity
+        // AoE never minted.
         fork_template: None,
         session_id_flag: None,
-        sets_own_title: true,
-        exact_session_runtime: None,
-        supports_cross_agent_team: false,
+        sets_own_title: false,
+        exact_session_runtime: Some(ExactSessionRuntime::SharedServer),
+        supports_cross_agent_team: true,
     },
     AgentDef {
         name: "shell",
@@ -353,6 +318,25 @@ pub const AGENTS: &[AgentDef] = &[
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_terminal_status,
+        container_env: &[],
+        hook_config: None,
+        resume: None,
+        fork_template: None,
+        session_id_flag: None,
+        sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: false,
+    },
+    AgentDef {
+        name: "vibe",
+        binary: "vibe",
+        aliases: &["mistral-vibe"],
+        detection: DetectionMethod::RunWithArg("vibe", "--version"),
+        yolo: Some(YoloMode::CliFlag("--agent auto-approve")),
+        instruction_flag: None,
+        set_default_command: false,
+        supports_host_launch: true,
+        detect_status: status_detection::detect_vibe_status,
         container_env: &[],
         hook_config: None,
         resume: None,
@@ -422,33 +406,6 @@ pub const AGENTS: &[AgentDef] = &[
         sets_own_title: false,
         exact_session_runtime: None,
         supports_cross_agent_team: false,
-    },
-    AgentDef {
-        name: "kimi",
-        binary: "kimi",
-        aliases: &["kimi-code"],
-        detection: DetectionMethod::Which("kimi"),
-        yolo: Some(YoloMode::CliFlag("--yolo")),
-        instruction_flag: None,
-        set_default_command: false,
-        supports_host_launch: true,
-        detect_status: status_detection::detect_kimi_status,
-        container_env: &[],
-        hook_config: None,
-        resume: Some(ResumeConfig {
-            exit_sequence: &[&["C-c"], &["C-c"]],
-            resume_pattern: r"(session_[0-9a-fA-F-]+)",
-            resume_flag: "--session {}",
-            timeout_secs: 10,
-        }),
-        // Forking is the agent's own operation and kimi exposes none; a fork of
-        // an exact session on a shared server would also need a second identity
-        // AoE never minted.
-        fork_template: None,
-        session_id_flag: None,
-        sets_own_title: false,
-        exact_session_runtime: Some(ExactSessionRuntime::SharedServer),
-        supports_cross_agent_team: true,
     },
 ];
 
@@ -559,7 +516,6 @@ mod tests {
         assert_eq!(get_agent("opencode").unwrap().binary, "opencode");
         assert_eq!(get_agent("vibe").unwrap().binary, "vibe");
         assert_eq!(get_agent("codex").unwrap().binary, "codex");
-        assert_eq!(get_agent("gemini").unwrap().binary, "gemini");
         assert_eq!(get_agent("shell").unwrap().binary, "shell");
         assert_eq!(get_agent("cursor").unwrap().binary, "agent");
         assert_eq!(get_agent("copilot").unwrap().binary, "copilot");
@@ -588,10 +544,7 @@ mod tests {
         let names = agent_names();
         assert_eq!(
             names,
-            vec![
-                "claude", "opencode", "vibe", "codex", "gemini", "shell", "cursor", "copilot",
-                "pi", "kimi"
-            ]
+            vec!["claude", "codex", "opencode", "kimi", "shell", "vibe", "cursor", "copilot", "pi"]
         );
     }
 
@@ -601,7 +554,6 @@ mod tests {
         assert_eq!(resolve_tool_name("open-code"), Some("opencode"));
         assert_eq!(resolve_tool_name("mistral-vibe"), Some("vibe"));
         assert_eq!(resolve_tool_name("codex"), Some("codex"));
-        assert_eq!(resolve_tool_name("gemini"), Some("gemini"));
         assert_eq!(resolve_tool_name("shell"), Some("shell"));
         assert_eq!(resolve_tool_name("terminal"), Some("shell"));
         assert_eq!(resolve_tool_name("cursor"), Some("cursor"));
@@ -619,21 +571,25 @@ mod tests {
     fn test_settings_index_roundtrip() {
         assert_eq!(settings_index_from_name(None), 0);
         assert_eq!(settings_index_from_name(Some("claude")), 1);
-        assert_eq!(settings_index_from_name(Some("gemini")), 5);
-        assert_eq!(settings_index_from_name(Some("shell")), 6);
+        assert_eq!(settings_index_from_name(Some("codex")), 2);
+        assert_eq!(settings_index_from_name(Some("opencode")), 3);
+        assert_eq!(settings_index_from_name(Some("kimi")), 4);
+        assert_eq!(settings_index_from_name(Some("shell")), 5);
+        assert_eq!(settings_index_from_name(Some("vibe")), 6);
         assert_eq!(settings_index_from_name(Some("cursor")), 7);
         assert_eq!(settings_index_from_name(Some("copilot")), 8);
         assert_eq!(settings_index_from_name(Some("pi")), 9);
-        assert_eq!(settings_index_from_name(Some("kimi")), 10);
 
         assert_eq!(name_from_settings_index(0), None);
         assert_eq!(name_from_settings_index(1), Some("claude"));
-        assert_eq!(name_from_settings_index(5), Some("gemini"));
-        assert_eq!(name_from_settings_index(6), Some("shell"));
+        assert_eq!(name_from_settings_index(2), Some("codex"));
+        assert_eq!(name_from_settings_index(3), Some("opencode"));
+        assert_eq!(name_from_settings_index(4), Some("kimi"));
+        assert_eq!(name_from_settings_index(5), Some("shell"));
+        assert_eq!(name_from_settings_index(6), Some("vibe"));
         assert_eq!(name_from_settings_index(7), Some("cursor"));
         assert_eq!(name_from_settings_index(8), Some("copilot"));
         assert_eq!(name_from_settings_index(9), Some("pi"));
-        assert_eq!(name_from_settings_index(10), Some("kimi"));
         assert_eq!(name_from_settings_index(99), None);
     }
 
@@ -649,14 +605,14 @@ mod tests {
             exact_session_runtime("kimi"),
             Some(ExactSessionRuntime::SharedServer)
         );
-        for tool in ["claude", "codex", "gemini", "shell", "unknown-tool"] {
+        for tool in ["claude", "codex", "vibe", "shell", "unknown-tool"] {
             assert_eq!(exact_session_runtime(tool), None, "{tool}");
         }
 
         for tool in ["claude", "codex", "opencode", "kimi"] {
             assert!(supports_cross_agent_team(tool), "{tool}");
         }
-        for tool in ["vibe", "gemini", "shell", "cursor", "copilot", "pi", "nope"] {
+        for tool in ["vibe", "shell", "cursor", "copilot", "pi", "nope"] {
             assert!(!supports_cross_agent_team(tool), "{tool}");
         }
     }

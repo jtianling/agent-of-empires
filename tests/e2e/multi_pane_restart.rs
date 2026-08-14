@@ -82,7 +82,7 @@ fn sqlite_query(db: &std::path::Path, sql: &str) -> String {
 
 /// Invoke the hidden `aoe __record-pane` capture subcommand exactly as the hook
 /// would: pipe hook stdin JSON, set `$TMUX_PANE`/`$AOE_INSTANCE_ID`, and pass an
-/// optional `--agent` so non-default agents (codex, gemini) can be recorded.
+/// optional `--agent` so non-default agents (codex, copilot) can be recorded.
 fn run_record_pane(
     h: &TuiTestHarness,
     tmux_pane: &str,
@@ -130,7 +130,7 @@ fn run_record_pane(
         .success()
 }
 
-/// Add + start an instance whose primary agent is `tool` (claude/codex/gemini).
+/// Add + start an instance whose primary agent is `tool` (claude/codex/copilot).
 ///
 /// The instance tool must match the agent recorded for slot 0 in the test:
 /// `R` builds the primary pane's resume command from `self.tool`
@@ -646,19 +646,19 @@ fn no_resume_pane_restarts_fresh_without_blocking_sibling() {
     require_sqlite3!();
 
     let mut h = TuiTestHarness::new("multi_pane_failure_isolation");
-    let instance_id = add_and_start(&h, "Failure Isolation", "gemini");
+    let instance_id = add_and_start(&h, "Failure Isolation", "copilot");
     let db = db_path(&h);
     let session_name =
         agent_of_empires::tmux::Session::generate_name(&instance_id, "Failure Isolation");
 
-    // Slot 0: gemini (no ResumeConfig) -> must restart fresh.
+    // Slot 0: copilot (no ResumeConfig) -> must restart fresh.
     // Slot 1: claude with a persisted id -> must resume.
     let panes = establish_tracked_panes(
         &mut h,
         &instance_id,
         &session_name,
         &[
-            ("gemini-sess-0", Some("gemini")),
+            ("copilot-sess-0", Some("copilot")),
             ("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1", None),
         ],
         &db,
@@ -673,14 +673,14 @@ fn no_resume_pane_restarts_fresh_without_blocking_sibling() {
         "--resume eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1",
     );
 
-    // ...and the gemini pane restarts fresh (binary only, no resume flag), proving
+    // ...and the copilot pane restarts fresh (binary only, no resume flag), proving
     // its lack of resume support did not block the sibling and did not error.
-    wait_for_pane_start_command_contains(&h, &panes[0], "gemini");
-    let gemini_cmd = pane_start_command(&h, &panes[0]);
+    wait_for_pane_start_command_contains(&h, &panes[0], "copilot");
+    let copilot_cmd = pane_start_command(&h, &panes[0]);
     assert!(
-        !gemini_cmd.contains("resume"),
+        !copilot_cmd.contains("resume"),
         "a no-ResumeConfig pane must restart fresh (no resume flag), got: {:?}",
-        gemini_cmd
+        copilot_cmd
     );
 }
 

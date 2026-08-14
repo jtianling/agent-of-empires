@@ -1133,7 +1133,7 @@ pub struct Instance {
     #[serde(skip)]
     pub acknowledged: bool,
     /// Runtime-only: when `tool == "shell"` and the user detaches from the
-    /// session with an agent (claude/codex/gemini/...) running in the primary
+    /// session with an agent (claude/codex/kimi/...) running in the primary
     /// pane, this field caches the detected agent name. The status poller
     /// uses it to dispatch to that agent's content detector instead of the
     /// shell stub. Cleared to `None` when detection returns `shell` or
@@ -5034,10 +5034,10 @@ mod tests {
     }
 
     #[test]
-    fn test_get_tool_command_gemini() {
+    fn test_get_tool_command_vibe() {
         let mut inst = Instance::new("test", "/tmp/test");
-        inst.tool = "gemini".to_string();
-        assert_eq!(inst.get_tool_command(), "gemini");
+        inst.tool = "vibe".to_string();
+        assert_eq!(inst.get_tool_command(), "vibe");
     }
 
     #[test]
@@ -6474,7 +6474,7 @@ mod tests {
         assert!(inst.cross_agent_team_pane("codex"));
         assert!(inst.cross_agent_team_pane("claude"));
         assert!(inst.cross_agent_team_pane("opencode"));
-        assert!(!inst.cross_agent_team_pane("gemini"));
+        assert!(!inst.cross_agent_team_pane("vibe"));
 
         inst.sandbox_info = Some(SandboxInfo {
             enabled: true,
@@ -7413,11 +7413,11 @@ mod tests {
 
     #[test]
     fn test_build_pane_resume_plan_agent_without_resume_config_restarts_fresh() {
-        // gemini has no ResumeConfig -> fresh launch even with a persisted id.
+        // vibe has no ResumeConfig -> fresh launch even with a persisted id.
         let mut inst = Instance::new("test", "/tmp/test");
-        inst.tool = "gemini".to_string();
+        inst.tool = "vibe".to_string();
         let (cmd, resumed) = inst
-            .build_pane_resume_plan("gemini", "gemini-sess-0", true, RestartMode::Resume, None)
+            .build_pane_resume_plan("vibe", "vibe-sess-0", true, RestartMode::Resume, None)
             .unwrap();
         assert!(!resumed);
         assert!(
@@ -7425,8 +7425,8 @@ mod tests {
             "expected no resume flag, got: {cmd}"
         );
         assert!(
-            cmd.contains(crate::agents::get_agent("gemini").unwrap().binary),
-            "expected gemini binary, got: {cmd}"
+            cmd.contains(crate::agents::get_agent("vibe").unwrap().binary),
+            "expected vibe binary, got: {cmd}"
         );
     }
 
@@ -7462,7 +7462,7 @@ mod tests {
 
     /// Cross Agent Team decoration describes the agent that runs in the pane, not
     /// the instance's tool. A Claude instance's development-channels flag handed
-    /// to an adopted Gemini pane is a flag Gemini does not understand.
+    /// to an adopted Vibe pane is a flag Vibe does not understand.
     #[test]
     fn test_cat_decoration_follows_the_pane_agent_not_the_instance_tool() {
         const FLAG: &str = "--dangerously-load-development-channels";
@@ -7487,8 +7487,8 @@ mod tests {
             );
 
             let adopted = inst
-                .build_pane_command("gemini", None, true, None)
-                .expect("gemini pane command");
+                .build_pane_command("vibe", None, true, None)
+                .expect("vibe pane command");
             assert!(
                 !adopted.contains(FLAG),
                 "an adopted pane running another agent must not get Claude's flag \
@@ -7745,13 +7745,13 @@ mod tests {
             "slot 0 stores its key in its own durable slot"
         );
 
-        let adopted = recovered_slot(0, "gemini", "/tmp/test", "%0");
+        let adopted = recovered_slot(0, "vibe", "/tmp/test", "%0");
         assert!(
             inst.slot_needs_identity_key(&adopted),
             "an adopted slot 0 has no other key source, so it must get its own"
         );
 
-        let secondary = recovered_slot(1, "gemini", "/tmp/test", "%1");
+        let secondary = recovered_slot(1, "vibe", "/tmp/test", "%1");
         assert!(
             inst.slot_needs_identity_key(&secondary),
             "a secondary adopted slot keeps needing its own key"
@@ -8714,10 +8714,10 @@ mod tests {
 
     #[test]
     fn test_create_fork_rejects_unsupported_tool() {
-        let parent = parent_instance("gemini", Some("ignored"));
+        let parent = parent_instance("vibe", Some("ignored"));
         let err = parent
             .create_fork("bad".to_string(), None)
-            .expect_err("gemini does not support forking");
+            .expect_err("vibe does not support forking");
         let msg = err.to_string();
         assert!(
             msg.contains("Fork is not supported"),

@@ -51,7 +51,7 @@ aoe uninstall               -- remove all AoE data and config
 | `--worktree <branch>` | `-w` | Create session on a git worktree |
 | `--branch` | `-b` | Create new branch (used with --worktree) |
 | `--sandbox` | | Enable Docker sandboxing |
-| `--tool <name>` | `-t` | Agent to use (claude, opencode, vibe, codex, gemini, cursor) |
+| `--tool <name>` | `-t` | Agent to use (claude, codex, opencode, kimi, shell, vibe, cursor) |
 | `--yolo` | | Enable YOLO/auto-approve mode |
 | `--title <name>` | | Session display title |
 | `--group <path>` | | Assign to group (e.g. `work/clients`) |

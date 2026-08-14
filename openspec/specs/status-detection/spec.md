@@ -98,7 +98,7 @@ For agents that do not set their own terminal title via OSC 0 (`sets_own_title: 
 
 Title updates are deduplicated (only written when the desired title differs from the last set value) to avoid unnecessary tmux calls. An initial pane title is also set at session creation time via `apply_all_tmux_options`.
 
-Agents with `sets_own_title: true` (claude, gemini) set their own pane title and are not managed by this mechanism.
+Agents with `sets_own_title: true` (claude) set their own pane title and are not managed by this mechanism.
 
 ## Error Caching
 
@@ -293,7 +293,7 @@ If `detect_agent_type_from_pane` returns `Some("shell")` or `None`, the field SH
 
 #### Scenario: Agent detected on detach
 
-- **WHEN** the user detaches from a shell session back to the AoE TUI and the primary pane's foreground process is a known agent (e.g. `claude`, `codex`, `gemini`)
+- **WHEN** the user detaches from a shell session back to the AoE TUI and the primary pane's foreground process is a known agent (e.g. `claude`, `codex`, `kimi`)
 - **THEN** the session's `detected_inner_agent` field is set to `Some("<agent-name>")` and the session's persisted `tool` remains `"shell"`
 
 #### Scenario: No agent detected on detach
