@@ -1431,6 +1431,10 @@ fn test_group_has_managed_worktrees() {
         created_at: Utc::now(),
         cleanup_on_delete: true,
     });
+    // The pane owns the worktree and the instance field mirrors it, so a
+    // record built from the legacy field has to be synced the way producers do
+    // -- otherwise the load-time hydration derives it back to None.
+    inst1.sync_primary_pane_from_legacy();
 
     let mut inst2 = Instance::new("other-session", "/tmp/other");
     inst2.group_path = "other".to_string();

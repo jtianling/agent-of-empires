@@ -440,14 +440,32 @@ mod tests {
 
     /// A leading `~` is expanded by the shell, never by tmux, so submitting the
     /// typed text would pass validation and then fail the split.
+    ///
+    /// The test owns `HOME` rather than reading the ambient one: other tests
+    /// point `HOME` at a temp dir and never restore it, so by the time this
+    /// runs the inherited value can name a directory that has already been
+    /// deleted -- and this dialog refuses to submit a path that does not
+    /// exist. Serial because setting it is process-wide, and restored before
+    /// the assertion so a failure here cannot leave the same trap behind.
     #[test]
+    #[serial_test::serial]
     fn a_tilde_right_pane_path_is_submitted_expanded() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
         let home = dirs::home_dir().expect("home directory");
         let mut dialog = dialog();
         dialog.focused_field = FIELD_RIGHT_PANE_PATH;
         dialog.handle_key(key(KeyCode::Char('~')));
+        let submitted = dialog.handle_key(key(KeyCode::Enter));
 
-        match dialog.handle_key(key(KeyCode::Enter)) {
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        match submitted {
             DialogResult::Submit(data) => {
                 assert_eq!(
                     data.right_pane_path.as_deref(),

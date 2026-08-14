@@ -352,13 +352,29 @@ mod tests {
 
     /// A leading `~` is expanded by the shell, never by tmux.
     #[test]
+    #[serial_test::serial]
     fn a_tilde_directory_is_submitted_expanded() {
+        // Owns `HOME` for the same reason the fork dialog's tilde test does:
+        // tests elsewhere point it at a temp dir and never restore it, so the
+        // inherited value can name a directory that is already gone, and this
+        // dialog refuses a path that does not exist. Restored before the
+        // assertion so a failure cannot leave the trap behind.
+        let temp = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
         let home = dirs::home_dir().expect("home directory");
         let mut dialog = dialog();
         dialog.handle_key(key(KeyCode::Tab));
         dialog.handle_key(key(KeyCode::Char('~')));
+        let submitted = dialog.handle_key(key(KeyCode::Enter));
 
-        match dialog.handle_key(key(KeyCode::Enter)) {
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        match submitted {
             DialogResult::Submit(data) => {
                 assert_eq!(data.path.as_deref(), Some(home.to_string_lossy().as_ref()));
             }

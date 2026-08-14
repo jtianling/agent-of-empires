@@ -116,6 +116,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_storage_roundtrip() -> Result<()> {
         let temp = tempdir()?;
         setup_test_home(temp.path());
@@ -313,6 +314,11 @@ mod tests {
         instance.tool = "opencode".to_string();
         instance.command = "opencode --config test".to_string();
         instance.group_path = "work/clients".to_string();
+        // The pane owns the tool and the instance field mirrors it, so a record
+        // built from the legacy fields has to be synced the way every producer
+        // does (see `cli::add`) -- otherwise the load-time hydration derives the
+        // tool back from an untouched default pane.
+        instance.sync_primary_pane_from_legacy();
 
         storage.save(&[instance.clone()])?;
         let loaded = storage.load()?;

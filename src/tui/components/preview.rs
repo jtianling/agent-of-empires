@@ -357,13 +357,19 @@ mod tests {
         }
     }
 
+    /// The path must be one that cannot exist: `shorten_path` canonicalizes
+    /// when it can, and canonicalizing resolves the real on-disk spelling and
+    /// drops the trailing slash. Preserving the slash is only the untouched
+    /// string's behaviour, so the test has to stay on that branch -- naming a
+    /// directory that happens to exist on the developer's machine tests the
+    /// other one.
     #[test]
     fn test_shorten_path_preserves_trailing_slash() {
         if let Some(home) = dirs::home_dir() {
             if let Some(home_str) = home.to_str() {
-                let path = format!("{}/projects/", home_str);
+                let path = format!("{}/aoe-no-such-directory-for-tests/", home_str);
                 let shortened = shorten_path(&path);
-                assert_eq!(shortened, "~/projects/");
+                assert_eq!(shortened, "~/aoe-no-such-directory-for-tests/");
             }
         }
     }

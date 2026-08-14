@@ -523,8 +523,22 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_full_dialog_respects_config_defaults() {
+        // The dialog resolves the real user config, so "default config" only
+        // holds against a home with no config in it. Reading the developer's
+        // own settings made this assert whatever they happen to have set.
+        let temp = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
         let dialog = full_dialog();
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
         assert!(
             dialog.options.delete_worktree,
             "With default config (auto_cleanup: true), delete_worktree should be true"
