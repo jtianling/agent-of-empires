@@ -230,7 +230,11 @@ cross_agent_team_default = true
             .iter_mut()
             .find(|session| session["title"] == title)
             .expect("created session");
+        // The pane owns this flag and the instance field is derived from it, so
+        // setting only the instance field is undone the moment the record is
+        // read back, and the session starts without the xats bootstrap.
         session["cross_agent_team"] = serde_json::Value::Bool(true);
+        session["primary_pane"]["cross_agent_team"] = serde_json::Value::Bool(true);
         std::fs::write(
             self.sessions_path(),
             serde_json::to_string_pretty(&sessions).unwrap(),
@@ -481,7 +485,9 @@ fn test_new_codex_cross_agent_team_session_bootstraps_xats() {
     assert_eq!(session["cross_agent_team"], true);
 
     let xats_args = std::fs::read_to_string(&h.xats_log).unwrap();
-    assert!(xats_args.contains("--no-install\ncross-agent-teams-mcp\n"));
+    // The package is pinned with `@latest` so a stale cache entry is refreshed;
+    // asserting the bare name would pass for a call that named no version.
+    assert!(xats_args.contains("--no-install\ncross-agent-teams-mcp@latest\n"));
     assert!(xats_args.contains("pre-register-codex-pane"));
     assert!(xats_args.contains(AGENT_ID));
     assert!(xats_args.contains("%"));
