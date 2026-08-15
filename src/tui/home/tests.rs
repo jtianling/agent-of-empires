@@ -2309,6 +2309,76 @@ fn render_status_bar_text(view: &mut HomeView) -> String {
         .collect::<String>()
 }
 
+/// Render the full HomeView into a short off-screen buffer and return every
+/// row joined by newlines.
+fn render_screen_text(view: &mut HomeView, width: u16, height: u16) -> String {
+    use crate::tui::styles::Theme;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let theme = Theme::default();
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &theme, None))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A list longer than the viewport used to render from the top forever, so the
+/// cursor could walk onto sessions that were never drawn.
+#[test]
+#[serial]
+fn test_list_scrolls_to_keep_the_cursor_visible() {
+    let mut env = create_test_env_with_sessions(40);
+    env.view.cursor = env.view.flat_items.len() - 1;
+    env.view.update_selected();
+
+    let last_name = match &env.view.flat_items[env.view.cursor] {
+        Item::Session { id, .. } => env.view.get_instance(id).unwrap().title.clone(),
+        other => panic!("expected a session at the cursor, got: {other:?}"),
+    };
+
+    let screen = render_screen_text(&mut env.view, 120, 20);
+    assert!(
+        screen.contains(&last_name),
+        "the selected session should be scrolled into view, got:\n{screen}"
+    );
+}
+
+/// Scrolling back up has to follow the cursor too, and it should land on the
+/// first row rather than leaving the list stuck at the bottom.
+#[test]
+#[serial]
+fn test_list_scrolls_back_to_the_top() {
+    let mut env = create_test_env_with_sessions(40);
+    env.view.cursor = env.view.flat_items.len() - 1;
+    env.view.update_selected();
+    render_screen_text(&mut env.view, 120, 20);
+
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    let first_name = match &env.view.flat_items[0] {
+        Item::Session { id, .. } => env.view.get_instance(id).unwrap().title.clone(),
+        other => panic!("expected a session at the top, got: {other:?}"),
+    };
+
+    let screen = render_screen_text(&mut env.view, 120, 20);
+    assert!(
+        screen.contains(&first_name),
+        "the list should scroll back up with the cursor, got:\n{screen}"
+    );
+}
+
 /// Fork is reachable from the home screen but was only documented in the help
 /// overlay, which is one keypress further away than the bar that is always on
 /// screen.

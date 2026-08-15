@@ -98,6 +98,9 @@ pub struct HomeView {
 
     // UI state
     pub(super) cursor: usize,
+    /// First visible row of the session list, kept across frames so the
+    /// viewport only scrolls as far as the cursor requires
+    pub(super) list_offset: usize,
     pub(super) selected_session: Option<String>,
     pub(super) selected_group: Option<String>,
     pub(super) sort_order: SortOrder,
@@ -259,6 +262,7 @@ impl HomeView {
             flat_items,
             stable_session_index_cache,
             cursor: 0,
+            list_offset: 0,
             selected_session: None,
             selected_group: None,
             sort_order,

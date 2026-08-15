@@ -194,7 +194,22 @@ impl HomeView {
         let list =
             List::new(list_items).highlight_style(Style::default().bg(theme.session_selection));
 
-        frame.render_widget(list, inner);
+        // The search bar is drawn over the last row of `inner`, so keep the
+        // list out of it to avoid hiding the row the cursor may sit on.
+        let list_area = if self.search_active {
+            Rect {
+                height: inner.height.saturating_sub(1),
+                ..inner
+            }
+        } else {
+            inner
+        };
+
+        let mut list_state = ListState::default()
+            .with_offset(self.list_offset)
+            .with_selected(Some(self.cursor));
+        frame.render_stateful_widget(list, list_area, &mut list_state);
+        self.list_offset = list_state.offset();
 
         // Render search bar if active
         if self.search_active {
