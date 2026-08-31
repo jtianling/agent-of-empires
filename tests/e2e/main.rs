@@ -27,6 +27,7 @@ mod cli;
 mod codex_xats;
 mod cold_start_recovery;
 mod errors;
+mod fallen_agent;
 mod fork;
 mod legacy_schema_heal;
 mod multi_agent_session;

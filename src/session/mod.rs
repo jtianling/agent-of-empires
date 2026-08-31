@@ -23,7 +23,7 @@ pub use groups::{
     expanded_groups, flatten_tree, flatten_tree_all_profiles, validate_group_path, Group,
     GroupTree, Item,
 };
-pub(crate) use instance::{extract_resume_token, is_valid_resume_token};
+pub(crate) use instance::{extract_resume_token, is_valid_resume_token, pane_agent_is_shell};
 pub use instance::{
     IdentityKeyOrigin, Instance, PaneResumeOutcome, RestartMode, SandboxInfo, Status,
     StatusUpdateOptions, TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,

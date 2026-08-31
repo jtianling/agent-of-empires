@@ -96,6 +96,12 @@ pub struct AgentDef {
     /// CLI flag template for custom instruction injection.
     /// `{}` is replaced with the shell-escaped instruction text.
     pub instruction_flag: Option<&'static str>,
+    /// Arguments every AoE-built launch command for this agent must carry, on
+    /// every launch path. Rides the command line only; never written to the
+    /// agent's user configuration. Codex uses this to suppress its blocking
+    /// startup update menu, which turns any stray Enter into an agent-killing
+    /// `npm install -g` update in a managed pane.
+    pub fixed_args: &'static [&'static str],
     /// If true, `builder.rs` sets `instance.command = binary` for this agent.
     pub set_default_command: bool,
     /// If true, the agent can be launched directly on the host (non-sandboxed).
@@ -209,6 +215,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("claude"),
         yolo: Some(YoloMode::CliFlag("--dangerously-skip-permissions")),
         instruction_flag: Some("--append-system-prompt {}"),
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_claude_status,
@@ -238,6 +245,11 @@ pub const AGENTS: &[AgentDef] = &[
             "--dangerously-bypass-approvals-and-sandbox",
         )),
         instruction_flag: Some("--config developer_instructions={}"),
+        // Suppress the interactive startup update menu (gated upstream by
+        // `check_for_update_on_startup` in codex-rs/tui/src/updates.rs): in a
+        // managed pane any Enter reaching that menu selects "Update now" and
+        // kills the agent.
+        fixed_args: &["--config", "check_for_update_on_startup=false"],
         set_default_command: true,
         supports_host_launch: true,
         detect_status: status_detection::detect_codex_status,
@@ -264,6 +276,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("opencode"),
         yolo: Some(YoloMode::EnvVar("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)),
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_opencode_status,
@@ -288,6 +301,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("kimi"),
         yolo: Some(YoloMode::CliFlag("--yolo")),
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_kimi_status,
@@ -315,6 +329,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("sh"),
         yolo: None,
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_terminal_status,
@@ -334,6 +349,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::RunWithArg("vibe", "--version"),
         yolo: Some(YoloMode::CliFlag("--agent auto-approve")),
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_vibe_status,
@@ -353,6 +369,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("agent"),
         yolo: Some(YoloMode::CliFlag("--yolo")),
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_cursor_status,
@@ -375,6 +392,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("copilot"),
         yolo: Some(YoloMode::CliFlag("--yolo")),
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_copilot_status,
@@ -395,6 +413,7 @@ pub const AGENTS: &[AgentDef] = &[
         // Pi runs in full YOLO mode by default (no approval gates), so no flag needed.
         yolo: Some(YoloMode::AlwaysYolo),
         instruction_flag: None,
+        fixed_args: &[],
         set_default_command: false,
         supports_host_launch: true,
         detect_status: status_detection::detect_pi_status,
@@ -647,6 +666,28 @@ mod tests {
         // before launch, and the shared server offers no fork of it.
         assert_eq!(kimi.session_id_flag, None);
         assert_eq!(kimi.fork_template, None);
+    }
+
+    /// Only codex needs launch hardening today: its startup update menu blocks
+    /// the pane and turns any Enter into an agent-killing update. Every other
+    /// agent must stay undecorated so their commands are unaffected.
+    #[test]
+    fn only_codex_carries_fixed_args() {
+        for agent in AGENTS {
+            if agent.name == "codex" {
+                assert_eq!(
+                    agent.fixed_args,
+                    &["--config", "check_for_update_on_startup=false"],
+                    "codex must suppress the startup update check"
+                );
+            } else {
+                assert!(
+                    agent.fixed_args.is_empty(),
+                    "agent '{}' must not carry fixed args",
+                    agent.name
+                );
+            }
+        }
     }
 
     #[test]

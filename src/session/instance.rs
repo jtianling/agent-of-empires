@@ -3057,6 +3057,7 @@ impl Instance {
                 let resume_flag = resume.resume_flag.replace("{}", token);
                 cmd = format!("{} {}", cmd, resume_flag);
             }
+            cmd = append_fixed_args(cmd, agent);
             return append_observed_model(cmd, agent, observed_model);
         }
 
@@ -3099,6 +3100,12 @@ impl Instance {
                 let id_flag = flag.replace("{}", session_id);
                 cmd = format!("{} {}", cmd, id_flag);
             }
+        }
+        // A command override runs verbatim: fixed args decorate only commands
+        // AoE itself builds, the same rule the resume/fork/session-id flags
+        // above already follow.
+        if !self.has_command_override() {
+            cmd = append_fixed_args(cmd, agent);
         }
         if !self.extra_args.is_empty() {
             cmd = format!("{} {}", cmd, self.extra_args);
@@ -4100,6 +4107,14 @@ impl Instance {
         Ok(())
     }
 
+    /// Whether the instance is inside the short post-launch window where the
+    /// pane legitimately still reports the launch wrapper's shell (the
+    /// `zsh -lc '... exec ...'` wrapper until `exec` replaces its image).
+    pub fn within_start_grace_period(&self) -> bool {
+        self.last_start_time
+            .is_some_and(|start| start.elapsed().as_secs() < 3)
+    }
+
     pub fn update_status(&mut self) {
         self.update_status_with_options(StatusUpdateOptions::default());
     }
@@ -4120,11 +4135,9 @@ impl Instance {
             }
         }
 
-        if let Some(start_time) = self.last_start_time {
-            if start_time.elapsed().as_secs() < 3 {
-                self.status = Status::Starting;
-                return;
-            }
+        if self.within_start_grace_period() {
+            self.status = Status::Starting;
+            return;
         }
 
         let session = match self.tmux_session() {
@@ -4474,6 +4487,17 @@ fn resolve_claude_session_from_disk(project_path: &str) -> Option<String> {
     }
 
     best.map(|(_, id)| id)
+}
+
+/// Append the agent's registry-declared fixed launch arguments (empty for
+/// every agent except codex, whose startup update check must be suppressed).
+/// Appended before `extra_args` so a user-supplied `--config` there still
+/// wins under codex's last-value-wins rule.
+fn append_fixed_args(cmd: String, agent: Option<&crate::agents::AgentDef>) -> String {
+    match agent.map(|a| a.fixed_args).filter(|args| !args.is_empty()) {
+        Some(args) => format!("{} {}", cmd, args.join(" ")),
+        None => cmd,
+    }
 }
 
 /// Append `--model <id>` for a Claude pane that has an observed model.
@@ -4867,7 +4891,7 @@ impl Instance {
 /// Whether a tracked pane's recorded agent is a plain shell. Shell panes
 /// should close when their process exits instead of getting the pane-died
 /// fallback (which would respawn another shell).
-fn pane_agent_is_shell(agent: &str) -> bool {
+pub(crate) fn pane_agent_is_shell(agent: &str) -> bool {
     match crate::agents::get_agent(agent) {
         Some(def) => def.name == "shell" || crate::tmux::utils::is_shell_command(def.binary),
         None => crate::tmux::utils::is_shell_command(agent),
@@ -5228,7 +5252,8 @@ mod tests {
         assert!(
             cmd.ends_with(&format!(
                 "{shell} -lc 'stty susp undef; exec env codex resume \
-                 019d1af9-a899-7df1-8f7d-a244126e5ded --model gpt-5 \
+                 019d1af9-a899-7df1-8f7d-a244126e5ded \
+                 --config check_for_update_on_startup=false --model gpt-5 \
                  --dangerously-bypass-approvals-and-sandbox'"
             )),
             "unexpected codex resume command: {cmd}"
@@ -5237,6 +5262,103 @@ mod tests {
             !cmd.contains("AOE_INSTANCE_ID"),
             "a hookless agent's launch must not carry AOE_INSTANCE_ID: {cmd}"
         );
+    }
+
+    const UPDATE_CHECK_SUPPRESSION: &str = "--config check_for_update_on_startup=false";
+
+    /// Every launch path AoE builds a codex command on must suppress the
+    /// startup update menu: a managed pane blocked on it turns any stray Enter
+    /// into an agent-killing `npm install -g` update.
+    #[test]
+    fn codex_launch_paths_carry_the_update_check_suppression() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.sync_primary_pane_from_legacy();
+
+        let fresh = inst.build_agent_command(None).unwrap();
+        assert!(fresh.contains(UPDATE_CHECK_SUPPRESSION), "fresh: {fresh}");
+
+        let resume = inst
+            .build_agent_command(Some("019d1af9-a899-7df1-8f7d-a244126e5ded"))
+            .unwrap();
+        assert!(
+            resume.contains(UPDATE_CHECK_SUPPRESSION),
+            "resume: {resume}"
+        );
+
+        let extra = inst.build_pane_command("codex", None, false, None).unwrap();
+        assert!(
+            extra.contains(UPDATE_CHECK_SUPPRESSION),
+            "extra pane: {extra}"
+        );
+
+        let (fan_out, resumed) = inst
+            .build_pane_resume_plan(
+                "codex",
+                "019d1af9-a899-7df1-8f7d-a244126e5ded",
+                true,
+                RestartMode::Resume,
+                None,
+            )
+            .unwrap();
+        assert!(resumed);
+        assert!(
+            fan_out.contains(UPDATE_CHECK_SUPPRESSION),
+            "resume fan-out: {fan_out}"
+        );
+
+        let (fresh_restart, resumed) = inst
+            .build_pane_resume_plan("codex", "", true, RestartMode::Fresh, None)
+            .unwrap();
+        assert!(!resumed);
+        assert!(
+            fresh_restart.contains(UPDATE_CHECK_SUPPRESSION),
+            "fresh restart: {fresh_restart}"
+        );
+    }
+
+    /// The Cross Agent Team bootstrap wraps the finished command, so the flag
+    /// must survive into the codex invocation the wrap execs.
+    #[test]
+    fn codex_xats_wrap_keeps_the_update_check_suppression_inside() {
+        let cmd = codex_xats_instance().build_agent_command(None).unwrap();
+        let remote = cmd.find("--remote").expect("wrapped codex invocation");
+        let flag = cmd
+            .rfind(UPDATE_CHECK_SUPPRESSION)
+            .expect("suppression flag inside the wrap");
+        assert!(
+            flag > remote,
+            "the flag must ride the exec'd codex invocation: {cmd}"
+        );
+    }
+
+    /// A user command override replaces the built command verbatim; AoE must
+    /// not decorate it, the same rule the resume/session-id flags follow.
+    #[test]
+    fn codex_command_override_is_not_decorated_with_the_suppression() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.command = "codex --instance-override".to_string();
+        inst.sync_primary_pane_from_legacy();
+
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(cmd.contains("--instance-override"), "{cmd}");
+        assert!(!cmd.contains("check_for_update_on_startup"), "{cmd}");
+    }
+
+    #[test]
+    fn non_codex_agents_never_carry_the_update_check_suppression() {
+        for tool in ["claude", "vibe", "cursor", "copilot", "pi"] {
+            let mut inst = Instance::new("test", "/tmp/test");
+            inst.tool = tool.to_string();
+            inst.sync_primary_pane_from_legacy();
+
+            let cmd = inst.build_agent_command(None).unwrap();
+            assert!(
+                !cmd.contains("check_for_update_on_startup"),
+                "{tool}: {cmd}"
+            );
+        }
     }
 
     /// A launch command stays free of `shell_environment_policy` overrides.

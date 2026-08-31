@@ -19,7 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session::{
-    extract_resume_token, is_valid_resume_token, Instance, Status, StatusUpdateOptions,
+    extract_resume_token, is_valid_resume_token, pane_agent_is_shell, Instance, Status,
+    StatusUpdateOptions,
 };
 
 const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -124,6 +125,17 @@ impl StatusPoller {
                 crate::tmux::refresh_pane_info_cache();
             }
 
+            // Slot rows for the shell-fallback check, opened once per cycle.
+            // Without a readable store the check degrades to the primary
+            // pane's tool.
+            let store = if any_pollable {
+                crate::db::Store::open_with_schema(&profile)
+                    .map_err(|e| tracing::debug!("status poller: cannot open store: {}", e))
+                    .ok()
+            } else {
+                None
+            };
+
             // Refresh container health if any sandboxed session exists and interval elapsed
             if any_pollable {
                 let has_sandboxed = instances.iter().any(|i| i.is_sandboxed());
@@ -140,6 +152,15 @@ impl StatusPoller {
                 // Adaptive polling: skip instances whose tier interval hasn't elapsed
                 let tier = polling_tier(inst.status);
                 if tier == 0 || cycle_count % tier != 0 {
+                    continue;
+                }
+
+                // A fallen-agent error is a one-way latch: it clears through
+                // the start/restart paths that reset instance errors, never by
+                // the poller re-evaluating the pane into a healthy state.
+                if inst.status == Status::Error && is_fallen_agent_error(inst.last_error.as_deref())
+                {
+                    next_previous_statuses.insert(inst.id.clone(), Status::Error);
                     continue;
                 }
 
@@ -204,6 +225,15 @@ impl StatusPoller {
                         .skip_capture
                         .then_some(previous_status.unwrap_or(inst.status)),
                 });
+
+                // A tracked agent pane running a plain shell is a dead agent
+                // (the pane-died hook's fallback), whatever the content
+                // detector read off the screen.
+                if let Some(error) = detect_fallen_agent(&inst, &session_name, store.as_ref()) {
+                    inst.status = Status::Error;
+                    inst.last_error = Some(error);
+                    inst.last_error_check = Some(now);
+                }
 
                 let resume_token = if previous_status != Some(Status::Error)
                     && inst.status == Status::Error
@@ -281,6 +311,113 @@ impl StatusPoller {
     }
 }
 
+/// Marker prefix of the error the shell-fallback check raises. The poller uses
+/// it to recognize its own error on later cycles: such an error latches until
+/// a start/restart path resets `last_error`, and is never re-evaluated back to
+/// healthy by the poller itself.
+const FALLEN_AGENT_ERROR_PREFIX: &str = "agent exited;";
+
+fn is_fallen_agent_error(last_error: Option<&str>) -> bool {
+    last_error.is_some_and(|error| error.starts_with(FALLEN_AGENT_ERROR_PREFIX))
+}
+
+/// One tracked pane's inputs to the shell-fallback check.
+struct TrackedPaneObservation<'a> {
+    /// tmux pane id named in the error message (e.g. `%9`).
+    pane: &'a str,
+    /// Agent the pane's `agent_slot` row records (the instance tool when no
+    /// slot row exists).
+    recorded_agent: &'a str,
+    /// The pane's live `#{pane_current_command}` from the batch pane query.
+    live_command: &'a str,
+    /// A shell is this pane's correct state (a command override resolving to
+    /// a shell); recorded shell agents are exempt via `recorded_agent`.
+    shell_expected: bool,
+}
+
+/// The fallen-agent verdict: a tracked pane whose recorded agent is not a
+/// shell but whose live process is one has fallen back through the pane-died
+/// hook. Returns the instance error message naming every fallen pane, or
+/// `None` when no pane has fallen or the launch grace window (during which
+/// the wrapper legitimately reports a shell) is still open.
+fn fallen_agent_error(
+    within_start_grace: bool,
+    panes: &[TrackedPaneObservation],
+) -> Option<String> {
+    if within_start_grace {
+        return None;
+    }
+    let fallen: Vec<&str> = panes
+        .iter()
+        .filter(|pane| {
+            !pane.shell_expected
+                && !pane_agent_is_shell(pane.recorded_agent)
+                && crate::tmux::utils::is_shell_command(pane.live_command)
+        })
+        .map(|pane| pane.pane)
+        .collect();
+    if fallen.is_empty() {
+        return None;
+    }
+    let noun = if fallen.len() == 1 { "pane" } else { "panes" };
+    Some(format!(
+        "{FALLEN_AGENT_ERROR_PREFIX} {noun} {} dropped to shell (restart with r/R or c/C)",
+        fallen.join(", ")
+    ))
+}
+
+/// Join each of the instance's `agent_slot` rows to the live pane it records
+/// (or the primary pane to the instance tool when no slot rows exist) and
+/// return the fallen-agent verdict. Uses only data this cycle already has:
+/// slot rows and the cached batch pane info, no new tmux round-trips.
+fn detect_fallen_agent(
+    inst: &Instance,
+    session_name: &str,
+    store: Option<&crate::db::Store>,
+) -> Option<String> {
+    if matches!(
+        inst.status,
+        Status::Starting | Status::Stopped | Status::Deleting | Status::Restarting
+    ) {
+        return None;
+    }
+    let panes = crate::tmux::get_all_cached_pane_infos(session_name)?;
+    let slots = store
+        .and_then(|store| store.read_slots_for_instance(&inst.id).ok())
+        .unwrap_or_default();
+
+    let mut observations = Vec::new();
+    if slots.is_empty() {
+        if let Some(info) = panes.first().filter(|info| !info.is_dead) {
+            observations.push(TrackedPaneObservation {
+                pane: &info.pane_id,
+                recorded_agent: &inst.tool,
+                live_command: &info.current_command,
+                shell_expected: inst.expects_shell(),
+            });
+        }
+    } else {
+        for slot in &slots {
+            if slot.tmux_pane.is_empty() {
+                continue;
+            }
+            let Some(info) = panes
+                .iter()
+                .find(|pane| pane.pane_id == slot.tmux_pane && !pane.is_dead)
+            else {
+                continue;
+            };
+            observations.push(TrackedPaneObservation {
+                pane: &info.pane_id,
+                recorded_agent: &slot.agent,
+                live_command: &info.current_command,
+                shell_expected: slot.slot == 0 && inst.expects_shell(),
+            });
+        }
+    }
+    fallen_agent_error(inst.within_start_grace_period(), &observations)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ActivityGateDecision {
     activity_changed: bool,
@@ -317,6 +454,106 @@ fn decide_activity_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn obs<'a>(
+        pane: &'a str,
+        recorded_agent: &'a str,
+        live_command: &'a str,
+        shell_expected: bool,
+    ) -> TrackedPaneObservation<'a> {
+        TrackedPaneObservation {
+            pane,
+            recorded_agent,
+            live_command,
+            shell_expected,
+        }
+    }
+
+    // Scenario: fallen codex pane surfaces as an error naming the pane and
+    // the restart keys.
+    #[test]
+    fn test_fallen_codex_pane_is_an_error_naming_pane_and_restart_keys() {
+        let error = fallen_agent_error(false, &[obs("%9", "codex", "zsh", false)])
+            .expect("a codex slot running zsh has fallen");
+        assert!(error.contains("%9"), "{error}");
+        assert!(error.contains("r/R"), "{error}");
+        assert!(error.contains("c/C"), "{error}");
+    }
+
+    // Scenario: multiple fallen panes are reported together, not just the
+    // first one detected.
+    #[test]
+    fn test_multiple_fallen_panes_are_reported_together() {
+        let error = fallen_agent_error(
+            false,
+            &[
+                obs("%9", "codex", "zsh", false),
+                obs("%12", "claude", "-bash", false),
+            ],
+        )
+        .expect("both panes have fallen");
+        assert!(error.contains("%9"), "{error}");
+        assert!(error.contains("%12"), "{error}");
+    }
+
+    // A mixed instance reports only the fallen pane, not its healthy or
+    // shell siblings.
+    #[test]
+    fn test_only_the_fallen_pane_is_named() {
+        let error = fallen_agent_error(
+            false,
+            &[
+                obs("%1", "codex", "codex", false),
+                obs("%2", "shell", "zsh", false),
+                obs("%3", "codex", "zsh", false),
+            ],
+        )
+        .expect("%3 has fallen");
+        assert!(error.contains("%3"), "{error}");
+        assert!(!error.contains("%1"), "{error}");
+        assert!(!error.contains("%2"), "{error}");
+    }
+
+    // Scenario: shell tools and shell slots are exempt -- a shell in the pane
+    // is their correct state.
+    #[test]
+    fn test_shell_tools_and_shell_slots_are_exempt() {
+        assert!(fallen_agent_error(false, &[obs("%1", "shell", "zsh", false)]).is_none());
+        assert!(fallen_agent_error(false, &[obs("%2", "bash", "bash", false)]).is_none());
+    }
+
+    // Scenario: command overrides naming a shell are exempt.
+    #[test]
+    fn test_command_override_resolving_to_a_shell_is_exempt() {
+        assert!(fallen_agent_error(false, &[obs("%1", "codex", "sh", true)]).is_none());
+    }
+
+    // Scenario: the launch window does not false-positive -- the wrapper
+    // legitimately reports a shell until `exec` replaces it.
+    #[test]
+    fn test_start_grace_window_suppresses_detection() {
+        assert!(fallen_agent_error(true, &[obs("%1", "codex", "zsh", false)]).is_none());
+    }
+
+    // A healthy agent pane (agent binary, or an interpreter like the codex
+    // npm shim) is never a fallen agent.
+    #[test]
+    fn test_non_shell_live_commands_are_healthy() {
+        assert!(fallen_agent_error(false, &[obs("%1", "codex", "codex", false)]).is_none());
+        assert!(fallen_agent_error(false, &[obs("%2", "codex", "node", false)]).is_none());
+        assert!(fallen_agent_error(false, &[]).is_none());
+    }
+
+    // Scenario: the error clears only through start/restart resets. The latch
+    // must recognize its own message and nothing else, so other errors keep
+    // re-evaluating normally.
+    #[test]
+    fn test_latch_recognizes_only_the_fallen_agent_error() {
+        let error = fallen_agent_error(false, &[obs("%9", "codex", "zsh", false)]).unwrap();
+        assert!(is_fallen_agent_error(Some(&error)));
+        assert!(!is_fallen_agent_error(Some("Container is not running")));
+        assert!(!is_fallen_agent_error(None));
+    }
 
     #[test]
     fn test_activity_gate_skips_when_activity_unchanged_and_recent() {
