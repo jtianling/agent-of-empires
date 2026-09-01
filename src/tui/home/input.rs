@@ -784,7 +784,7 @@ impl HomeView {
                 // Deletion only allowed in Agent View
                 if let Some(session_id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(session_id) {
-                        if inst.status == Status::Deleting {
+                        if inst.status == Status::Deleting || inst.restart_in_flight {
                             return None;
                         }
 
@@ -933,7 +933,7 @@ impl HomeView {
             KeyCode::Enter => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
-                        if inst.status == Status::Deleting {
+                        if inst.status == Status::Deleting || inst.restart_in_flight {
                             return None;
                         }
                     }
@@ -992,7 +992,7 @@ impl HomeView {
     ) -> Option<Action> {
         let id = self.selected_session.as_ref()?;
         if let Some(inst) = self.get_instance(id) {
-            if inst.status == Status::Deleting {
+            if inst.status == Status::Deleting || inst.restart_in_flight {
                 return None;
             }
         }
@@ -1015,7 +1015,7 @@ impl HomeView {
             self.update_selected();
         }
         if let Some(inst) = self.get_instance(&session_id) {
-            if inst.status != Status::Deleting {
+            if inst.status != Status::Deleting && !inst.restart_in_flight {
                 return Some(Action::AttachSession(session_id));
             }
         }

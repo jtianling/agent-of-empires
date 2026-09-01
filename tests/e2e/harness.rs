@@ -361,10 +361,30 @@ last_seen_version = "{}"
         self.spawn(&[]);
     }
 
+    /// Spawn the TUI like [`spawn_tui`], but scrub `$TMUX`/`$TMUX_PANE` from
+    /// the `aoe` process itself, so it runs the way production usually does:
+    /// launched from a plain terminal rather than from inside a tmux pane.
+    ///
+    /// The harness hosts the process in a tmux pane to drive keystrokes, and
+    /// the tmux server always exports `$TMUX` into its panes. A
+    /// `tmux attach-session` spawned by such a process is then refused by the
+    /// server's nested-client check (`server_client_check_nested`: client
+    /// `$TMUX` set AND the client tty being one of the server's own pane
+    /// ttys), so from an un-scrubbed TUI an attach can never succeed in this
+    /// harness topology. A test that must prove a real attach from the TUI
+    /// uses this entry point.
+    pub fn spawn_tui_without_tmux_env(&mut self) {
+        let aoe_cmd = self.build_tmux_command(&[]);
+        self.spawn_command_string(format!("env -u TMUX -u TMUX_PANE {aoe_cmd}"));
+    }
+
     /// Spawn `aoe <args>` inside a detached tmux session.
     pub fn spawn(&mut self, args: &[&str]) {
         let cmd_str = self.build_tmux_command(args);
+        self.spawn_command_string(cmd_str);
+    }
 
+    fn spawn_command_string(&mut self, cmd_str: String) {
         let output = Command::new("tmux")
             .arg("-S")
             .arg(&self.socket_path)

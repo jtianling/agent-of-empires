@@ -1570,11 +1570,15 @@ impl Instance {
     /// pane in the session", which reaches hand-split shells and panes belonging
     /// to other agents.
     ///
-    /// Runs SYNCHRONOUSLY before the caller attaches: at this point the panes
-    /// exist and Claude renders into the tmux virtual terminal even with no
-    /// client attached, and there is no concurrent `tmux attach` to contend with
-    /// the capture/send subprocesses (a background thread would stall once attach
-    /// starts). No-ops when the session is not in Cross Agent Team mode.
+    /// Runs before any client attaches to THIS session: the panes exist and
+    /// Claude renders into the tmux virtual terminal even with no client
+    /// attached, so the capture/send subprocesses never contend with the user's
+    /// own typing. The attach restart variants call it synchronously before
+    /// attaching; the StayOnHome restart worker calls it from its background
+    /// thread while attach to the restarting instance is gated
+    /// (`restart_in_flight`). A user attached to a DIFFERENT session meanwhile
+    /// is ordinary concurrent tmux server traffic. No-ops when the session is
+    /// not in Cross Agent Team mode.
     ///
     /// Each pane carries its own progress. A shared "everything went quiet"
     /// signal finishes as soon as the fastest pane settles, which abandons any

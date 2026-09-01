@@ -466,10 +466,35 @@ impl HomeView {
         let desc_style = Style::default().fg(theme.dimmed);
         let sep_style = Style::default().fg(theme.border);
 
-        let mut spans = vec![
+        let mut spans = Vec::new();
+
+        // The in-flight restart marker leads the bar: the hint row behind it is
+        // wider than narrow terminals and truncates from the right, so a
+        // trailing marker would be the first thing cut off.
+        if let Some(selected_id) = &self.selected_session {
+            if let Some(inst) = self.get_instance(selected_id) {
+                if inst.status == Status::Restarting {
+                    let frame_idx = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_millis() / 150)
+                        .unwrap_or(0) as usize)
+                        % STATUS_BAR_SPINNER_FRAMES.len();
+                    spans.extend([
+                        Span::styled(
+                            format!(" {} ", STATUS_BAR_SPINNER_FRAMES[frame_idx]),
+                            Style::default().fg(theme.waiting).bold(),
+                        ),
+                        Span::styled(" Restarting... ", desc_style),
+                        Span::styled("│", sep_style),
+                    ]);
+                }
+            }
+        }
+
+        spans.extend([
             Span::styled(" j/k", key_style),
             Span::styled(" Nav ", desc_style),
-        ];
+        ]);
         if let Some(enter_action_text) = match self.flat_items.get(self.cursor) {
             Some(Item::Group {
                 collapsed: true, ..
@@ -565,26 +590,6 @@ impl HomeView {
                     Style::default().fg(theme.waiting).bold(),
                 ),
             ]);
-        }
-
-        if let Some(selected_id) = &self.selected_session {
-            if let Some(inst) = self.get_instance(selected_id) {
-                if inst.status == Status::Restarting {
-                    let frame = (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|duration| duration.as_millis() / 150)
-                        .unwrap_or(0) as usize)
-                        % STATUS_BAR_SPINNER_FRAMES.len();
-                    spans.extend([
-                        Span::styled("│", sep_style),
-                        Span::styled(
-                            format!(" {} ", STATUS_BAR_SPINNER_FRAMES[frame]),
-                            Style::default().fg(theme.waiting).bold(),
-                        ),
-                        Span::styled(" Restarting... ", desc_style),
-                    ]);
-                }
-            }
         }
 
         // Right-aligned sort indicator: `o Sort: <label>`, plus a `J/K Move`

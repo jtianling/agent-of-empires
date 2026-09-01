@@ -55,13 +55,13 @@ fn reapply_tui_title(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     let _ = tab_title::set_tui_title(terminal.backend_mut(), profile);
 }
 
-fn skipped_slot_warning(skipped: usize) -> Option<String> {
+pub(super) fn skipped_slot_warning(skipped: usize) -> Option<String> {
     (skipped > 0).then(|| {
         format!("Skipped {skipped} invalid tracked pane(s); repair their stored pane configuration")
     })
 }
 
-fn combine_pane_errors(first: Option<String>, second: Option<String>) -> Option<String> {
+pub(super) fn combine_pane_errors(first: Option<String>, second: Option<String>) -> Option<String> {
     match (first, second) {
         (Some(first), Some(second)) => Some(format!("{first}; {second}")),
         (Some(error), None) | (None, Some(error)) => Some(error),
@@ -236,6 +236,11 @@ impl App {
 
             // Check for and apply deletion results (non-blocking)
             if self.home.apply_deletion_results() {
+                refresh_needed = true;
+            }
+
+            // Check for and apply background restart results (non-blocking)
+            if self.home.apply_restart_results() {
                 refresh_needed = true;
             }
 
@@ -455,6 +460,20 @@ impl App {
                         };
                     }
 
+                    // StayOnHome runs the whole respawn pipeline on the
+                    // background worker; the event loop only parks the
+                    // instance in Restarting. Attach stays synchronous:
+                    // auto-confirm must finish before the attach.
+                    if post == PostRestart::StayOnHome {
+                        self.home.enqueue_restart(
+                            &id,
+                            mode,
+                            super::restart_poller::RestartPath::Respawn,
+                        );
+                        self.needs_redraw = true;
+                        return Ok(());
+                    }
+
                     let profile = self.home.storage.profile().to_string();
                     // Distinguish "no tracked panes" from "could not read the
                     // store". A read failure is not an empty slot set: degrade to
@@ -546,16 +565,23 @@ impl App {
                     }
                     crate::tmux::refresh_session_cache();
 
-                    match post {
-                        // Auto-attach so the user sees the restarted agent immediately
-                        PostRestart::Attach => self.attach_session(&id, terminal)?,
-                        PostRestart::StayOnHome => self.needs_redraw = true,
-                    }
+                    // Auto-attach so the user sees the restarted agent immediately
+                    self.attach_session(&id, terminal)?;
                 }
             }
-            Action::RecoverInstance(id, mode, post) => {
-                self.recover_instance(&id, mode, post, terminal)?;
-            }
+            Action::RecoverInstance(id, mode, post) => match post {
+                PostRestart::Attach => self.recover_instance(&id, mode, terminal)?,
+                // StayOnHome recovery runs on the background worker, same as
+                // the respawn path above.
+                PostRestart::StayOnHome => {
+                    self.home.enqueue_restart(
+                        &id,
+                        mode,
+                        super::restart_poller::RestartPath::Recover,
+                    );
+                    self.needs_redraw = true;
+                }
+            },
             Action::StopSession(id) => {
                 if let Some(inst) = self.home.get_instance(&id) {
                     let inst_clone = inst.clone();
@@ -589,16 +615,17 @@ impl App {
         Ok(())
     }
 
-    /// Cold-start recover a single focused instance: rebuild its tmux session
-    /// from persisted slots and launch each pane in `mode` (resume its
-    /// conversation, or start it clean). Recoverability is re-checked at action
-    /// time against the store and live tmux, so a no-longer-recoverable (or
-    /// now-alive) instance is a silent no-op.
+    /// Cold-start recover a single focused instance synchronously, then attach
+    /// (the `R`/`C` variants): rebuild its tmux session from persisted slots and
+    /// launch each pane in `mode` (resume its conversation, or start it clean).
+    /// Recoverability is re-checked at action time against the store and live
+    /// tmux, so a no-longer-recoverable (or now-alive) instance is a silent
+    /// no-op. The StayOnHome variants run the same pipeline on the
+    /// `RestartPoller` worker instead.
     fn recover_instance(
         &mut self,
         id: &str,
         mode: crate::session::RestartMode,
-        post: PostRestart,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         let Some(inst) = self.home.get_instance(id).cloned() else {
@@ -677,13 +704,7 @@ impl App {
         crate::tmux::refresh_session_cache();
         self.home.refresh_recoverable_cache();
 
-        match post {
-            PostRestart::Attach => self.attach_session(id, terminal),
-            PostRestart::StayOnHome => {
-                self.needs_redraw = true;
-                Ok(())
-            }
-        }
+        self.attach_session(id, terminal)
     }
 
     fn attach_session(

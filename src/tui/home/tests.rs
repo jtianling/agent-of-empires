@@ -2672,3 +2672,163 @@ fn a_named_right_pane_directory_is_used_as_given() {
         "a named directory is not worktree-resolved: it is not the session's repo"
     );
 }
+
+// --- In-flight background restarts gate conflicting operations ---
+//
+// The in-flight state is set directly (as `enqueue_restart` would) and results
+// are injected into the poller's channel, so no real restart pipeline runs and
+// nothing can reach tmux beyond the isolated per-process test socket.
+
+fn set_restart_in_flight(env: &mut TestEnv, id: &str) {
+    env.view.mutate_instance(id, |inst| {
+        inst.restart_in_flight = true;
+        inst.status = crate::session::Status::Restarting;
+    });
+}
+
+#[test]
+#[serial]
+fn test_restart_keys_are_gated_while_restart_in_flight() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.selected_session.clone().expect("selected session");
+
+    assert!(
+        env.view.handle_key(key(KeyCode::Char('r'))).is_some(),
+        "baseline: r produces a restart action before the in-flight window"
+    );
+
+    set_restart_in_flight(&mut env, &id);
+
+    for pressed in [
+        key(KeyCode::Char('r')),
+        key(KeyCode::Char('c')),
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
+    ] {
+        assert!(
+            env.view.handle_key(pressed).is_none(),
+            "restart key {:?} must be a no-op while the restart is in flight",
+            pressed.code
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn test_attach_and_delete_are_gated_while_restart_in_flight() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.selected_session.clone().expect("selected session");
+    set_restart_in_flight(&mut env, &id);
+
+    assert!(
+        env.view.handle_key(key(KeyCode::Enter)).is_none(),
+        "Enter must not attach while the restart is in flight"
+    );
+
+    // Number jump attach: `1` then space resolves to this session's index.
+    assert!(env.view.handle_key(key(KeyCode::Char('1'))).is_none());
+    assert!(
+        env.view.handle_key(key(KeyCode::Char(' '))).is_none(),
+        "number jump must not attach while the restart is in flight"
+    );
+
+    assert!(env.view.handle_key(key(KeyCode::Char('d'))).is_none());
+    assert!(
+        env.view.unified_delete_dialog.is_none(),
+        "d must not open a delete dialog while the restart is in flight"
+    );
+}
+
+#[test]
+#[serial]
+fn test_apply_restart_results_merges_fields_and_clears_in_flight() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.selected_session.clone().expect("selected session");
+    set_restart_in_flight(&mut env, &id);
+
+    env.view
+        .restart_poller
+        .inject_result(crate::tui::restart_poller::RestartResult {
+            session_id: id.clone(),
+            identity: Some(crate::tui::restart_poller::RestartIdentity {
+                agent_session_id: Some("new-agent-session-id".to_string()),
+                fork_pending: None,
+                resume_token: None,
+                xats_identity_key: Some("minted-key".to_string()),
+                last_start_time: Some(std::time::Instant::now()),
+            }),
+            last_error: Some(Some("1 pane(s) failed to restart: boom".to_string())),
+            status: crate::session::Status::Starting,
+        });
+
+    // The result may not have crossed the channel yet; poll like the event
+    // loop does.
+    let mut applied = false;
+    for _ in 0..100 {
+        if env.view.apply_restart_results() {
+            applied = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(applied, "the injected result must be applied");
+
+    let inst = env.view.get_instance(&id).expect("instance");
+    assert!(!inst.restart_in_flight);
+    assert_eq!(inst.status, crate::session::Status::Starting);
+    assert_eq!(
+        inst.agent_session_id.as_deref(),
+        Some("new-agent-session-id")
+    );
+    assert_eq!(inst.xats_identity_key.as_deref(), Some("minted-key"));
+    assert_eq!(
+        inst.last_error.as_deref(),
+        Some("1 pane(s) failed to restart: boom")
+    );
+}
+
+#[test]
+#[serial]
+fn test_operations_reenable_after_apply_restart_results() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.selected_session.clone().expect("selected session");
+    set_restart_in_flight(&mut env, &id);
+    assert!(env.view.handle_key(key(KeyCode::Char('r'))).is_none());
+
+    env.view
+        .restart_poller
+        .inject_result(crate::tui::restart_poller::RestartResult {
+            session_id: id.clone(),
+            identity: None,
+            last_error: None,
+            status: crate::session::Status::Idle,
+        });
+    let mut applied = false;
+    for _ in 0..100 {
+        if env.view.apply_restart_results() {
+            applied = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(applied, "the injected result must be applied");
+
+    assert!(
+        env.view.handle_key(key(KeyCode::Char('r'))).is_some(),
+        "restart keys work again once the result is applied"
+    );
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Enter)),
+        Some(Action::AttachSession(id.clone())),
+        "attach works again once the result is applied"
+    );
+    env.view.handle_key(key(KeyCode::Char('d')));
+    assert!(
+        env.view.unified_delete_dialog.is_some(),
+        "delete works again once the result is applied"
+    );
+}

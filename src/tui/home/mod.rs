@@ -27,6 +27,7 @@ use super::dialogs::{
     ProfilePickerDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
+use super::restart_poller::{RestartPath, RestartPoller, RestartRequest, RestartResult};
 use super::settings::SettingsView;
 use super::status_poller::StatusPoller;
 
@@ -157,6 +158,9 @@ pub struct HomeView {
 
     // Performance: background deletion
     pub(super) deletion_poller: DeletionPoller,
+
+    // Performance: background StayOnHome restarts
+    pub(super) restart_poller: RestartPoller,
 
     // Performance: background session creation for hooks
     pub(super) creation_poller: CreationPoller,
@@ -298,6 +302,7 @@ impl HomeView {
             pending_status_refresh: false,
             skip_stale_errors: HashSet::new(),
             deletion_poller: DeletionPoller::new(),
+            restart_poller: RestartPoller::new(),
             creation_poller: CreationPoller::new(),
             creation_cancelled: false,
             on_launch_hooks_ran: HashSet::new(),
@@ -513,6 +518,84 @@ impl HomeView {
             return true;
         }
         false
+    }
+
+    /// Park the instance in `Restarting` and hand its restart to the
+    /// background worker. The keypress returns immediately;
+    /// [`apply_restart_results`](Self::apply_restart_results) merges the
+    /// outcome back and clears the in-flight flag.
+    pub fn enqueue_restart(
+        &mut self,
+        id: &str,
+        mode: crate::session::RestartMode,
+        path: RestartPath,
+    ) {
+        use crate::session::Status;
+
+        let Some(inst) = self.get_instance(id) else {
+            return;
+        };
+        if inst.restart_in_flight {
+            return;
+        }
+        let prev_status = inst.status;
+        let instance = inst.clone();
+        let profile = self.storage.profile().to_string();
+
+        self.mutate_instance(id, |inst| {
+            inst.restart_in_flight = true;
+            inst.status = Status::Restarting;
+        });
+
+        self.restart_poller.request_restart(RestartRequest {
+            session_id: id.to_string(),
+            instance,
+            profile,
+            mode,
+            path,
+            prev_status,
+        });
+    }
+
+    /// Apply a pending background restart result: merge the fields the worker's
+    /// pipeline mutated on its clone, clear the in-flight flag, and persist.
+    /// Returns true if a result was applied.
+    pub fn apply_restart_results(&mut self) -> bool {
+        let Some(result) = self.restart_poller.try_recv_result() else {
+            return false;
+        };
+        let RestartResult {
+            session_id,
+            identity,
+            last_error,
+            status,
+        } = result;
+
+        let has_identity = identity.is_some();
+        self.mutate_instance(&session_id, |inst| {
+            if let Some(identity) = identity {
+                inst.agent_session_id = identity.agent_session_id;
+                inst.fork_pending = identity.fork_pending;
+                inst.resume_token = identity.resume_token;
+                inst.xats_identity_key = identity.xats_identity_key;
+                inst.last_start_time = identity.last_start_time;
+            }
+            if let Some(error) = last_error {
+                inst.last_error = error;
+            }
+            inst.status = status;
+            inst.restart_in_flight = false;
+        });
+
+        // A result without identity fields ran no pipeline, so there is
+        // nothing to persist or reclassify.
+        if has_identity {
+            if let Err(err) = self.save() {
+                tracing::error!("Failed to save after background restart: {}", err);
+            }
+            self.refresh_recoverable_cache();
+        }
+        true
     }
 
     /// Request background session creation for hook execution.
