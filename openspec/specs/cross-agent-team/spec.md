@@ -155,6 +155,13 @@ and that prohibition wins. A pane that declares no identity SHALL make exactly
 one pre-registration attempt, because it adds no flag to fall back from and any
 fallback would therefore have to drop the key.
 
+Dropping the declaration is a loss of capability, not an equivalent fallback:
+the daemon can then no longer address the pane by name, so its recovery poke
+degrades to a bare token the agent cannot act on. Before the retry runs, the
+bootstrap SHALL print a warning to the pane's stderr that names the rejected
+flags and the declared identity being dropped, so the cause is visible where
+the CLI's own error line lands rather than only reconstructible after the fact.
+
 The retry decision SHALL rest on the exit code alone, not on the CLI's error
 text, and SHALL survive shell options inherited from the environment
 (`SHELLOPTS` carrying `errexit` reaches the bootstrap's `sh`).
@@ -191,6 +198,7 @@ token value. It SHALL rely on the already-configured local xats environment.
 - **WHEN** a Codex Cross Agent Team pane with a declared xats identity launches
 - **AND** the pre-registration call carrying the declared-identity flags exits non-zero
 - **THEN** the bootstrap retries once with the declared-identity flags removed
+- **AND** the pane's stderr carries a warning naming the rejected flags and the dropped identity before the retry
 - **AND** the retry still names the pane's identity key and carries the TTL
 - **AND** a successful retry launches Codex normally
 - **AND** the retry fires even under shell options inherited from the environment

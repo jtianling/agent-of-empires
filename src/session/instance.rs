@@ -989,6 +989,20 @@ fn codex_declared_identity_args(pane: &PaneConfig) -> String {
     .collect()
 }
 
+/// What the retry prints before dropping the declaration. Dropping it is a loss
+/// of capability, not an equivalent fallback: the daemon can no longer address
+/// the pane by name, so its recovery poke degrades to a bare nonce the agent
+/// cannot act on. Without this line the only trace is the CLI's own error in the
+/// pane scrollback, which nothing points at.
+fn codex_declared_identity_dropped_warning(pane: &PaneConfig) -> String {
+    format!(
+        "[xats] The {CODEX_XATS_PACKAGE} CLI rejected --team/--agent-name \
+         (update xats); retrying the pre-registration without the declared \
+         identity {}/{}, so recovery for this pane will not carry it.",
+        pane.xats_team, pane.xats_agent_name
+    )
+}
+
 /// The one retry the bootstrap is allowed: drop the declared-identity flags a
 /// stale CLI may not parse, and nothing else.
 ///
@@ -999,7 +1013,9 @@ fn codex_declared_identity_args(pane: &PaneConfig) -> String {
 /// rest of its life. A pane that declares no identity emits no retry at all, so
 /// its script is byte for byte the one AoE built before declared identities
 /// existed.
-fn codex_declared_identity_retry(declared_args: &str, keyed: bool) -> String {
+///
+/// `warning` is the already shell-escaped line the retry prints to stderr first.
+fn codex_declared_identity_retry(declared_args: &str, warning: &str, keyed: bool) -> String {
     if declared_args.is_empty() {
         return String::new();
     }
@@ -1012,6 +1028,7 @@ fn codex_declared_identity_retry(declared_args: &str, keyed: bool) -> String {
         " \
          if [ -n \"${{pre_register_failed:-}}\" ]; then \
              pre_register_failed=; \
+             printf '%s\\n' {warning} >&2; \
              npx --no-install {package} pre-register-codex-pane \
                  --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\"{key_flag} \
                  --ttl {ttl} \
@@ -1764,6 +1781,7 @@ impl Instance {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
         let working_dir = shell_escape(&pane.working_dir);
         let declared_identity_args = codex_declared_identity_args(pane);
+        let declared_dropped = shell_escape(&codex_declared_identity_dropped_warning(pane));
         let app_server_url = shell_escape(&endpoint.url);
         let codex_command = format!(
             "{base} --remote {app_server_url} -C {working_dir} \
@@ -1831,8 +1849,10 @@ impl Instance {
             identity_env = XATS_IDENTITY_KEY_ENV,
             ttl = CODEX_XATS_PREREGISTER_TTL_SECONDS,
             declared = declared_identity_args,
-            keyed_retry = codex_declared_identity_retry(&declared_identity_args, true),
-            keyless_retry = codex_declared_identity_retry(&declared_identity_args, false),
+            keyed_retry =
+                codex_declared_identity_retry(&declared_identity_args, &declared_dropped, true),
+            keyless_retry =
+                codex_declared_identity_retry(&declared_identity_args, &declared_dropped, false),
             missing_pane = CODEX_XATS_MISSING_PANE,
             missing_uuidgen = CODEX_XATS_MISSING_UUIDGEN,
             missing_nc = CODEX_XATS_MISSING_NC,
@@ -7047,14 +7067,16 @@ mod tests {
             "the keyed branch's retry must keep naming the identity key: {cmd}"
         );
         // The declared flags are what the retry drops, so they appear only on
-        // the two first attempts.
+        // the two first attempts. Matched in flag form (value always
+        // single-quoted by `shell_escape`), since the retry's warning names
+        // the flags in prose.
         assert_eq!(
-            tail.matches("--team").count(),
+            tail.matches("--team '").count(),
             2,
             "the retry must drop the declared team flag: {cmd}"
         );
         assert_eq!(
-            tail.matches("--agent-name").count(),
+            tail.matches("--agent-name '").count(),
             2,
             "the retry must drop the declared name flag: {cmd}"
         );
@@ -7482,7 +7504,7 @@ mod tests {
 
     #[test]
     fn test_codex_xats_preregister_carries_the_declared_identity() {
-        let (ok, npx, codex, _) = run_codex_bootstrap_capturing_stderr(
+        let (ok, npx, codex, stderr) = run_codex_bootstrap_capturing_stderr(
             Some("live-key-123"),
             FakeNpx::Succeed,
             &[],
@@ -7504,6 +7526,10 @@ mod tests {
             .expect("the declared agent name must be passed");
         assert_eq!(flags[name + 1], "mvr 'coder'", "{npx:?}");
         assert!(codex_argv(&codex).iter().any(|a| a == "--remote"));
+        assert!(
+            !stderr.contains("rejected --team/--agent-name"),
+            "no warning when the declaration was accepted: {stderr}"
+        );
     }
 
     #[test]
@@ -7528,7 +7554,7 @@ mod tests {
     /// not the launch.
     #[test]
     fn test_codex_xats_declared_identity_retry_drops_only_the_declared_flags() {
-        let (ok, npx, codex, _) = run_codex_bootstrap_capturing_stderr(
+        let (ok, npx, codex, stderr) = run_codex_bootstrap_capturing_stderr(
             Some("live-key-123"),
             FakeNpx::FailFirst,
             &[],
@@ -7541,6 +7567,12 @@ mod tests {
         assert!(
             !npx[1].iter().any(|a| a == "--team" || a == "--agent-name"),
             "the retry drops the declared-identity flags: {npx:?}"
+        );
+        // Dropping the declaration costs the pane its named recovery, so the
+        // retry must say so where the CLI's own error line lands.
+        assert!(
+            stderr.contains("rejected --team/--agent-name") && stderr.contains("monkeys/mvr-coder"),
+            "the retry must warn that the declared identity was dropped: {stderr}"
         );
         // What the retry must NOT drop. Registering without the key leaves the
         // pane looking healthy while it is permanently unrecoverable, which is
