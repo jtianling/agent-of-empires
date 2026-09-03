@@ -896,18 +896,20 @@ fn codex_app_server_endpoint_from_list(raw: &str) -> Result<CodexAppServerEndpoi
 }
 /// The npx spec for the xats pre-registration CLI, `@latest` included.
 ///
-/// The tag is load-bearing, not decoration. `npx --no-install` resolves against
-/// its cache by the exact spec it was asked for, so a bare name and `@latest`
-/// look up different entries -- and the entry that exists on a machine running
-/// xats is the one its own launcher creates, which is `@latest`. Asking for the
-/// bare name therefore reports the package missing and, with `--no-install`,
-/// refuses to run it: the bootstrap exits, Codex never execs, and the pane
-/// falls back to a shell with npm's error as the only explanation.
+/// The tag is load-bearing, not decoration. npx resolves against its cache by
+/// the exact spec it was asked for, so a bare name and `@latest` look up
+/// different entries -- and the entry that exists on a machine running xats is
+/// the one its own launcher creates, which is `@latest`. The two share that
+/// entry, so whichever of them refreshes it decides what the other loads next.
 ///
-/// A pinned version is no better -- `@0.7.7` misses the `@latest` entry just as
-/// the bare name does, even with 0.7.7 sitting in the cache. And this is not
-/// reaching for the network: the app-server check immediately above already
-/// requires xats to be running here, which is what put the entry there.
+/// The bootstrap runs it with `--yes`, never `--no-install`. Resolving `@latest`
+/// asks the registry either way, so every xats release moves the tag to a
+/// version the cache lacks; `--no-install` then refused to run it, the
+/// bootstrap exited, Codex never exec'ed, and every new or restarted Codex
+/// pane came up as a shell with npm's one-line error as the only explanation,
+/// until someone warmed the cache by hand (0.8.0 and 0.8.6 both did this).
+/// `--yes` downloads the missing version instead: one fetch on the first
+/// launch after a release, and nothing extra when the cache already has it.
 const CODEX_XATS_PACKAGE: &str = "cross-agent-teams-mcp@latest";
 /// Environment variable carrying a pane's opaque xats identity key. Deliberately
 /// not named `*_TOKEN`: the xats project already uses `XATS_TOKEN` for the
@@ -1724,12 +1726,12 @@ impl Instance {
              fi; \
              pre_register_failed=; \
              if [ -n \"${{{identity_env}:-}}\" ]; then \
-                 npx --no-install {package} pre-register-codex-pane \
+                 npx --yes {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
                      --identity-key-env {identity_env} --ttl {ttl} \
                      || pre_register_failed=1; \
              else \
-                 npx --no-install {package} pre-register-codex-pane \
+                 npx --yes {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
                      --ttl {ttl} \
                      || pre_register_failed=1; \
@@ -7815,11 +7817,10 @@ mod tests {
             adopted_codex.contains("codex --remote"),
             "the Codex bootstrap must exec Codex, got: {adopted_codex}"
         );
-        // And the spec it asks npx for must carry the tag. `--no-install`
-        // resolves against its cache by the exact spec, so a bare name misses
-        // the `@latest` entry that xats's own launcher creates -- npx then
-        // reports the package missing, refuses to run it, and the pane comes up
-        // as a shell. Observed on a machine with the right version cached.
+        // And the spec it asks npx for must carry the tag: npx resolves against
+        // its cache by the exact spec, so a bare name misses the `@latest`
+        // entry that xats's own launcher creates and every launch would fetch
+        // afresh. Observed on a machine with the right version cached.
         assert!(
             adopted_codex.contains("cross-agent-teams-mcp@latest"),
             "the bootstrap must ask npx for the tagged spec, not a bare name, \

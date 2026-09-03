@@ -146,6 +146,12 @@ launch commands.) The pre-registration call SHALL also carry a lengthened row
 TTL (`--ttl`, the flag the CLI parses) so the daemon's poke-back window covers
 a Codex cold start.
 
+The pre-registration CLI SHALL be invoked through npx by its `@latest` spec
+with installation allowed (`--yes`), so a release that moved the tag to a
+version the npx cache lacks is fetched on that launch rather than refused;
+refusing it (`--no-install`) turned every Codex launch after a xats release
+into a shell until the cache was warmed by hand.
+
 The bootstrap makes exactly one pre-registration attempt. A failed call is
 not retried in any other shape: a retry that dropped the identity-key flag is
 prohibited by "Codex xats bootstrap failure is explicit", and there is no other

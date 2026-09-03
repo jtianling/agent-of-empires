@@ -483,9 +483,10 @@ fn test_new_codex_cross_agent_team_session_bootstraps_xats() {
     assert_eq!(session["cross_agent_team"], true);
 
     let xats_args = std::fs::read_to_string(&h.xats_log).unwrap();
-    // The package is pinned with `@latest` so a stale cache entry is refreshed;
+    // The package is pinned with `@latest` so a stale cache entry is refreshed,
+    // and `--yes` so a release the cache lacks is fetched rather than refused;
     // asserting the bare name would pass for a call that named no version.
-    assert!(xats_args.contains("--no-install\ncross-agent-teams-mcp@latest\n"));
+    assert!(xats_args.contains("--yes\ncross-agent-teams-mcp@latest\n"));
     assert!(xats_args.contains("pre-register-codex-pane"));
     assert!(xats_args.contains(AGENT_ID));
     assert!(xats_args.contains("%"));
