@@ -446,10 +446,8 @@ fn create_codex_shell_session(h: &CodexXatsHarness, title: &str) -> String {
     h.send_key("Tab");
 
     // Title -> Right Pane Agent, one Tab per field in between: group, tool,
-    // path, YOLO, Cross Agent Team, xats Team, xats agent name, worktree. The
-    // two xats fields are here because this harness leaves Cross Agent Team on,
-    // which is what makes them exist.
-    for _ in 0..8 {
+    // path, YOLO, Cross Agent Team, worktree.
+    for _ in 0..6 {
         h.send_key("Tab");
     }
     select_dialog_tool(h, "Right Pane Agent:", "shell");

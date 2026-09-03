@@ -238,11 +238,6 @@ fn new_session_persists_independent_pane_launch_config() {
     h.send_keys("Tab");
     h.send_keys("Tab");
     h.send_keys("Space");
-    // That Space turned Cross Agent Team on for the right pane, which is what
-    // makes its two declared-identity fields exist. Skip them to reach the
-    // worktree field.
-    h.send_keys("Tab");
-    h.send_keys("Tab");
     h.send_keys("Tab");
     h.type_text("right-pane");
     h.send_keys("Enter");
