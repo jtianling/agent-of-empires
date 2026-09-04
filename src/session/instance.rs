@@ -518,6 +518,9 @@ fn settles_after_answer(reclaims_identity: bool, answered: &[AutoConfirmPrompt])
 pub(crate) enum AutoConfirmStep {
     /// This pane is showing a question that has not been answered yet.
     Answer(AutoConfirmPrompt),
+    /// This pane is showing a question whose highlight sits on the entry that
+    /// exits Claude, so Enter must wait until the highlight has been moved.
+    MoveHighlight(AutoConfirmPrompt),
     /// A question is up, but it is one this pane was already answered for.
     /// Sending again would queue an Enter for whatever screen comes next.
     AlreadyAnswered,
@@ -637,9 +640,36 @@ pub(crate) fn auto_confirm_step(screen: &str, answered: &[AutoConfirmPrompt]) ->
     }
 
     match present.find(|prompt| !answered.contains(prompt)) {
+        Some(AutoConfirmPrompt::WorkspaceTrust) if trust_highlight_is_exit(screen) => {
+            AutoConfirmStep::MoveHighlight(AutoConfirmPrompt::WorkspaceTrust)
+        }
         Some(prompt) => AutoConfirmStep::Answer(prompt),
         None => AutoConfirmStep::AlreadyAnswered,
     }
+}
+
+/// Whether the workspace-trust screen currently highlights its exit entry.
+///
+/// Claude used to highlight "Yes, I trust this folder", so one Enter took it.
+/// Since Claude Code 2.1.260 a folder whose `.claude/settings.local.json`
+/// pre-approves permissions gets a variant of the screen that highlights
+/// "No, exit" instead (and drops the entry numbers). Enter there exits Claude,
+/// and the pane-died hook turns the pane into a bare shell with nothing on it
+/// saying why. The trust entry is the next one down.
+///
+/// Read per line, not on the collapsed screen: the highlight glyph marks one
+/// entry, and which entry is what matters.
+fn trust_highlight_is_exit(screen: &str) -> bool {
+    strip_ansi(screen).lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix('\u{276f}') else {
+            return false;
+        };
+        let entry = rest
+            .trim_start()
+            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.')
+            .trim_start();
+        entry.starts_with("No")
+    })
 }
 
 /// Where the xats identity key a launch injects into a pane came from.
@@ -1571,6 +1601,18 @@ impl Instance {
                         // at most once per pane.
                         submit_xats_reconnect(entry.pane);
                     }
+                    continue;
+                }
+                if let AutoConfirmStep::MoveHighlight(_) = step {
+                    // Not an answer: the next poll reads the screen again and
+                    // sends Enter only once the highlight is off the exit entry.
+                    // Enter in the same send would be handled against the
+                    // selection as it was before the move.
+                    if let Err(err) = tmux::send_keys_to_pane_target(entry.pane, &["Down"]) {
+                        tracing::warn!("auto-confirm send to pane {} failed: {}", entry.pane, err);
+                        entry.settled = true;
+                    }
+                    answered_this_round = true;
                     continue;
                 }
                 let AutoConfirmStep::Answer(prompt) = step else {
@@ -5607,6 +5649,54 @@ mod tests {
             auto_confirm_step(screen, &[]),
             AutoConfirmStep::Answer(AutoConfirmPrompt::WorkspaceTrust)
         );
+    }
+
+    /// Claude Code 2.1.260, folder with pre-approved permissions: the trust
+    /// screen highlights "No, exit" and numbers nothing. Captured from a real
+    /// launch in such a folder.
+    const TRUST_SCREEN_EXIT_HIGHLIGHTED: &str = "\
+ Quick safety check: Is this a project you created or one you trust? (Like your\n\
+ own code, a well-known open source project, or work from your team). If not,\n\
+ take a moment to review what's in this folder first.\n\
+\n\
+ \u{26a0} This folder pre-approves 1 tool permission in .claude/settings.local.json:\n\
+   Bash(/Users/jt/workspace/sub2api/.claude/skills/jt-ju\u{2026}\n\
+\n\
+ \u{276f} No, exit\n\
+   Yes, I trust this folder\n\
+\n\
+ Enter to confirm \u{b7} Esc to cancel";
+
+    #[test]
+    fn test_trust_screen_highlighting_exit_moves_before_answering() {
+        assert_eq!(
+            auto_confirm_step(TRUST_SCREEN_EXIT_HIGHLIGHTED, &[]),
+            AutoConfirmStep::MoveHighlight(AutoConfirmPrompt::WorkspaceTrust),
+            "Enter on this screen exits Claude"
+        );
+        // After one Down the highlight sits on the trust entry.
+        let moved = TRUST_SCREEN_EXIT_HIGHLIGHTED
+            .replace("\u{276f} No, exit", "No, exit")
+            .replace("Yes, I trust", "\u{276f} Yes, I trust");
+        assert_eq!(
+            auto_confirm_step(&moved, &[]),
+            AutoConfirmStep::Answer(AutoConfirmPrompt::WorkspaceTrust)
+        );
+        // A trust screen already answered is not moved again either.
+        assert_eq!(
+            auto_confirm_step(
+                TRUST_SCREEN_EXIT_HIGHLIGHTED,
+                &[AutoConfirmPrompt::WorkspaceTrust]
+            ),
+            AutoConfirmStep::AlreadyAnswered
+        );
+    }
+
+    #[test]
+    fn test_trust_screen_highlighting_exit_is_not_an_input_prompt() {
+        // "\u{276f} No, exit" is glyph-space-text like a typed prompt line, and
+        // must not read as Claude being ready.
+        assert!(!shows_claude_input_prompt(TRUST_SCREEN_EXIT_HIGHLIGHTED));
     }
 
     #[test]

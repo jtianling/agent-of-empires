@@ -75,8 +75,15 @@ Claude is ready or a timeout elapses.
 AoE SHALL recognize at least the development-channels warning screen (identified by
 text such as "Loading development channels" / "I am using this for local
 development") and the workspace-trust screen (identified by text such as "trust
-this folder" / "Quick safety check"). For both screens the safe-to-proceed option
-is the default selection, so confirmation is a single Enter keystroke.
+this folder" / "Quick safety check"). Confirmation is Enter on the
+safe-to-proceed option. AoE SHALL read which entry the screen highlights before
+sending Enter: when the workspace-trust screen highlights its exit entry ("No,
+exit", the default Claude Code 2.1.260 gives a folder whose
+`.claude/settings.local.json` pre-approves permissions), AoE SHALL move the
+highlight down and re-read the screen, and SHALL send Enter only once the
+highlight is off the exit entry. Enter and the move MUST NOT travel in one
+send, because Claude handles them against the selection as it was before the
+move.
 
 If the confirmation screens do not appear within the timeout, AoE SHALL stop
 auto-confirming and leave the pane interactive without erroring the session.
@@ -86,6 +93,12 @@ auto-confirming and leave the pane interactive without erroring the session.
 - **WHEN** the launched claude pane shows the "Loading development channels" warning
 - **THEN** AoE sends Enter to confirm the highlighted "I am using this for local
   development" option
+
+#### Scenario: Trust-folder screen highlighting exit is not confirmed as is
+
+- **WHEN** the launched claude pane shows the workspace-trust screen with "No, exit" highlighted
+- **THEN** AoE sends Down and reads the screen again
+- **AND** sends Enter only once "Yes, I trust this folder" is highlighted
 
 #### Scenario: Trust-folder screen confirmed
 
