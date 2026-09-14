@@ -1725,7 +1725,8 @@ impl Instance {
         let app_server_url = shell_escape(&endpoint.url);
         let codex_command = format!(
             "{base} --remote {app_server_url} -C {working_dir} \
-             -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\"{suffix}"
+             -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\" \
+             -c \"shell_environment_policy.set.XATS_CODEX_LAUNCH_ID=\\\"${{xats_agent_id}}\\\"\"{suffix}"
         );
         let script = format!(
             "if [ -z \"${{TMUX_PANE:-}}\" ]; then \
@@ -5316,12 +5317,9 @@ mod tests {
         }
     }
 
-    /// A launch command stays free of `shell_environment_policy` overrides.
-    /// An earlier fix rode the pane and instance id in through them before a
-    /// live session showed Codex applies that table to its shell tool only,
-    /// never to its hooks -- dead weight on every launch, so none is emitted.
+    /// Only xats Codex launches need a shell-scoped recovery identifier.
     #[test]
-    fn test_no_launch_carries_shell_environment_policy_overrides() {
+    fn test_non_xats_launch_has_no_shell_environment_policy_overrides() {
         for tool in ["codex", "claude"] {
             let mut inst = Instance::new("test", "/tmp/test");
             inst.tool = tool.to_string();
@@ -5333,6 +5331,17 @@ mod tests {
                 "{tool} launch must not carry policy overrides: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn test_xats_codex_shell_recovery_id_matches_launch_marker() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.cross_agent_team = true;
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(cmd.contains("shell_environment_policy.set.XATS_CODEX_LAUNCH_ID"));
+        assert!(cmd.contains("xats.agent_id="));
+        assert_eq!(cmd.matches("${xats_agent_id}").count(), 2);
     }
 
     #[test]
