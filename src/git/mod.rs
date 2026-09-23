@@ -596,6 +596,17 @@ impl GitWorktree {
     /// Delete a local git branch.
     /// Returns an error if the branch doesn't exist or is currently checked out.
     pub fn delete_branch(&self, branch: &str) -> Result<()> {
+        // A branch removed out-of-band (e.g. by the agent) is already in the
+        // desired state; failing here would make the session undeletable.
+        let exists = std::process::Command::new("git")
+            .args(["show-ref", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{branch}"))
+            .current_dir(&self.repo_path)
+            .status()?;
+        if !exists.success() {
+            return Ok(());
+        }
+
         let output = std::process::Command::new("git")
             .args(["branch", "-d", branch])
             .current_dir(&self.repo_path)
@@ -1094,14 +1105,24 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_branch_fails_for_nonexistent_branch() {
+    fn test_delete_branch_succeeds_when_branch_already_gone() {
         let (_dir, repo) = setup_test_repo();
         let repo_path = repo.path().parent().unwrap();
 
         let git_wt = GitWorktree::new(repo_path.to_path_buf()).unwrap();
-        let result = git_wt.delete_branch("nonexistent");
 
-        assert!(result.is_err());
+        assert!(git_wt.delete_branch("nonexistent").is_ok());
+    }
+
+    #[test]
+    fn test_delete_branch_fails_for_checked_out_branch() {
+        let (_dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap();
+        let current = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        let git_wt = GitWorktree::new(repo_path.to_path_buf()).unwrap();
+
+        assert!(git_wt.delete_branch(&current).is_err());
     }
 
     #[test]
