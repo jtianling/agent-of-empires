@@ -53,3 +53,37 @@ fn fallen_agent_pane_surfaces_as_error_and_restart_clears_it() {
     h.send_keys("c");
     h.wait_for_absent("dropped to shell", Duration::from_secs(20));
 }
+
+#[test]
+#[serial]
+fn fallen_error_recovers_when_agent_becomes_live_without_tui_restart() {
+    crate::harness::require_tmux!();
+    require_sqlite3!();
+
+    let mut h = TuiTestHarness::new("fallen_error_recovery");
+    let fixture = seed_instance(
+        &mut h,
+        "Recovered Agent",
+        "codex",
+        None,
+        &[SlotSeed {
+            agent: "codex",
+            native: "019d1af9-a899-7df1-8f7d-a244126e5ded",
+        }],
+    );
+    let pane = &fixture.panes[0];
+    h.send_keys_to_target(pane, "C-c");
+    h.wait_for_timeout("dropped to shell", Duration::from_secs(20));
+    h.assert_screen_contains(pane);
+
+    let native = h.install_native_stub("codex").expect("compile codex stub");
+    let command = format!("exec {}", shell_words::quote(native.to_str().unwrap()));
+    h.send_keys_to_target(pane, &command);
+    h.send_keys_to_target(pane, "Enter");
+    h.wait_for_absent("dropped to shell", Duration::from_secs(90));
+    h.assert_screen_not_contains("Error:");
+    assert_eq!(
+        h.tmux_display_message(pane, "#{pane_current_command}:#{pane_dead}"),
+        "codex:0"
+    );
+}

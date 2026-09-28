@@ -361,8 +361,9 @@ instances whose tool is `shell`, shell slots, instances whose command override
 names a shell, and instances within the `Starting` grace period (the launch
 wrapper legitimately reports a shell until `exec` replaces it).
 
-The error SHALL clear through the paths that already reset instance errors on
-start/restart, not by the poller re-evaluating the pane into a healthy state.
+该错误 SHALL 沿用现有错误重检周期和 30 秒冷却机制, 不得永久跳过轮询.
+当后续检测确认 pane 已恢复正常运行时, 轮询器 SHALL 更新状态并清除错误信息,
+无需用户重启 session 或 TUI.  启动和重启路径 SHALL 继续使用现有错误重置逻辑.
 
 #### Scenario: Fallen codex pane surfaces as an error
 - **WHEN** a pane whose `agent_slot` row records `codex` is running a plain
@@ -396,6 +397,16 @@ start/restart, not by the poller re-evaluating the pane into a healthy state.
   restart path
 - **THEN** the fallen-agent error SHALL be cleared by that path's existing
   error reset
+
+#### Scenario: Agent 启动完成后自动清除旧错误
+- **WHEN** 启动期间的 shell 状态导致 instance 被判定为 `Error`
+- **AND** 同一次启动中的 agent 随后成功运行
+- **THEN** 轮询器 SHALL 在错误冷却结束后的下一次状态重检中更新为实际状态
+- **AND** SHALL 清除 `last_error`, 无需重新启动 session 或 TUI
+
+#### Scenario: Agent 仍停留在 shell 时保留错误
+- **WHEN** 错误重检时仍有受跟踪的非 shell agent pane 运行着普通 shell
+- **THEN** instance SHALL 保持 `Error`, 并报告仍未恢复的 pane
 
 ## Functional Requirements
 

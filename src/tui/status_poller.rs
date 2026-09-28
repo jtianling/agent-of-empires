@@ -155,15 +155,6 @@ impl StatusPoller {
                     continue;
                 }
 
-                // A fallen-agent error is a one-way latch: it clears through
-                // the start/restart paths that reset instance errors, never by
-                // the poller re-evaluating the pane into a healthy state.
-                if inst.status == Status::Error && is_fallen_agent_error(inst.last_error.as_deref())
-                {
-                    next_previous_statuses.insert(inst.id.clone(), Status::Error);
-                    continue;
-                }
-
                 let previous_status = previous_statuses.get(&inst.id).copied();
                 let now = Instant::now();
 
@@ -311,15 +302,7 @@ impl StatusPoller {
     }
 }
 
-/// Marker prefix of the error the shell-fallback check raises. The poller uses
-/// it to recognize its own error on later cycles: such an error latches until
-/// a start/restart path resets `last_error`, and is never re-evaluated back to
-/// healthy by the poller itself.
 const FALLEN_AGENT_ERROR_PREFIX: &str = "agent exited;";
-
-fn is_fallen_agent_error(last_error: Option<&str>) -> bool {
-    last_error.is_some_and(|error| error.starts_with(FALLEN_AGENT_ERROR_PREFIX))
-}
 
 /// One tracked pane's inputs to the shell-fallback check.
 struct TrackedPaneObservation<'a> {
@@ -542,17 +525,6 @@ mod tests {
         assert!(fallen_agent_error(false, &[obs("%1", "codex", "codex", false)]).is_none());
         assert!(fallen_agent_error(false, &[obs("%2", "codex", "node", false)]).is_none());
         assert!(fallen_agent_error(false, &[]).is_none());
-    }
-
-    // Scenario: the error clears only through start/restart resets. The latch
-    // must recognize its own message and nothing else, so other errors keep
-    // re-evaluating normally.
-    #[test]
-    fn test_latch_recognizes_only_the_fallen_agent_error() {
-        let error = fallen_agent_error(false, &[obs("%9", "codex", "zsh", false)]).unwrap();
-        assert!(is_fallen_agent_error(Some(&error)));
-        assert!(!is_fallen_agent_error(Some("Container is not running")));
-        assert!(!is_fallen_agent_error(None));
     }
 
     #[test]
