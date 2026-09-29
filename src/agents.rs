@@ -181,6 +181,13 @@ pub fn identity_key_in_pane_env(tool: &str) -> bool {
     get_agent(tool).map_or(true, AgentDef::identity_key_in_pane_env)
 }
 
+/// Agents a session can be switched between in place.
+pub const SWITCHABLE_AGENTS: &[&str] = &["claude", "codex"];
+
+pub fn is_switchable_agent(tool: &str) -> bool {
+    SWITCHABLE_AGENTS.contains(&tool)
+}
+
 /// Hook events shared by Claude Code and Cursor CLI.
 const CLAUDE_CURSOR_HOOK_EVENTS: &[HookEvent] = &[
     HookEvent {

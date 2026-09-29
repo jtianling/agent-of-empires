@@ -17,6 +17,7 @@ use super::container_config;
 use super::environment::{build_docker_env_args, shell_escape};
 use super::PaneConfig;
 
+mod agent_switch;
 mod codex_restart;
 
 pub(crate) trait PaneConfigTarget {

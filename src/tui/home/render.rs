@@ -100,6 +100,10 @@ impl HomeView {
             dialog.render(frame, area, theme);
         }
 
+        if let Some((dialog, _)) = &self.switch_agent_dialog {
+            dialog.render(frame, area, theme);
+        }
+
         if let Some(dialog) = &self.confirm_dialog {
             dialog.render(frame, area, theme);
         }
@@ -556,6 +560,9 @@ impl HomeView {
                     },
                     desc_style,
                 ),
+                Span::styled("│", sep_style),
+                Span::styled(" A/a", key_style),
+                Span::styled(" Switch ", desc_style),
             ]);
         }
 

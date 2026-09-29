@@ -121,6 +121,7 @@ aoe session add-agent-pane <session> --tool codex --path /path/to/other
 |-----|--------|
 | `n` | New session |
 | `%` | Add an agent pane to the selected session, then attach |
+| `A` / `a` | Switch the selected session between claude and codex (clean restart, keeps the xats name and team); `A` attaches, `a` stays in the list |
 | `Enter` | Attach to session |
 | `d` | Delete session |
 | `t` | Toggle Agent/Terminal view |

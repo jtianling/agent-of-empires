@@ -295,6 +295,33 @@ impl HomeView {
             return None;
         }
 
+        let switch_agent_result = self.switch_agent_dialog.as_mut().map(|(dialog, post)| {
+            (
+                dialog.handle_key(key),
+                dialog.session_id().to_string(),
+                *post,
+            )
+        });
+
+        if let Some((result, id, post)) = switch_agent_result {
+            match result {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.switch_agent_dialog = None;
+                }
+                DialogResult::Submit(target) => {
+                    self.switch_agent_dialog = None;
+                    if let Err(e) = self.commit_agent_switch(&id, &target) {
+                        tracing::error!("Failed to switch '{}' to {}: {}", id, target, e);
+                        self.set_instance_error(&id, Some(format!("Agent switch failed: {e}")));
+                        return None;
+                    }
+                    return self.restart_action_for(&id, crate::session::RestartMode::Fresh, post);
+                }
+            }
+            return None;
+        }
+
         if let Some(dialog) = &mut self.confirm_dialog {
             let action = dialog.action().to_string();
             match dialog.handle_key(key) {
@@ -847,6 +874,14 @@ impl HomeView {
                 return self
                     .restart_action(crate::session::RestartMode::Fresh, PostRestart::StayOnHome);
             }
+            KeyCode::Char('A')
+                if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                self.open_switch_agent_dialog(PostRestart::Attach);
+            }
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::NONE => {
+                self.open_switch_agent_dialog(PostRestart::StayOnHome);
+            }
             KeyCode::Char('e') => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
@@ -991,7 +1026,16 @@ impl HomeView {
             let ids = super::group_restart::restart_targets(&self.instances, group);
             return (!ids.is_empty()).then_some(Action::RestartGroup(ids, mode));
         }
-        let id = self.selected_session.as_ref()?;
+        let id = self.selected_session.as_deref()?;
+        self.restart_action_for(id, mode, post)
+    }
+
+    fn restart_action_for(
+        &self,
+        id: &str,
+        mode: crate::session::RestartMode,
+        post: PostRestart,
+    ) -> Option<Action> {
         if let Some(inst) = self.get_instance(id) {
             if inst.status == Status::Deleting || inst.restart_in_flight {
                 return None;

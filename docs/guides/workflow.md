@@ -115,6 +115,7 @@ This creates:
 | `Enter` | Attach to agent (Agent View) or terminal (Terminal View) |
 | `n` | Create new session |
 | `%` | Add an agent pane to the selected session, then attach (see [Quick Start](../quick-start.md#-on-the-home-screen-vs-ctrlb--while-attached) for how this differs from `Ctrl+b %`) |
+| `A` / `a` | Switch the session between claude and codex; `A` attaches, `a` stays in the list |
 | `d` | Delete session (Agent View only) |
 | `?` | Show help |
 | `Ctrl+b d` | Detach from tmux (return to aoe) |

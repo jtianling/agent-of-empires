@@ -1,5 +1,6 @@
 //! Tests for HomeView
 
+mod agent_switch;
 mod group_restart;
 mod status_updates;
 

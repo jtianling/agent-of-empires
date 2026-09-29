@@ -12,6 +12,7 @@
 //! EXISTS`), so both the migration and a defensive open path can apply it
 //! safely.
 
+mod agent_switch;
 pub mod claude_transcript;
 mod codex_binding;
 pub(crate) mod codex_capture;

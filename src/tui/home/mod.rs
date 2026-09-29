@@ -1,5 +1,6 @@
 //! Home view - main session list and navigation
 
+mod agent_switch;
 mod group_restart;
 mod input;
 mod operations;
@@ -20,12 +21,13 @@ use crate::session::{
 };
 use crate::tmux::AvailableTools;
 
+use super::app::PostRestart;
 use super::creation_poller::{CreationPoller, CreationRequest};
 use super::deletion_poller::DeletionPoller;
 use super::dialogs::{
     AddPaneDialog, ChangelogDialog, ConfirmDialog, ForkSessionDialog, GroupDeleteOptionsDialog,
     GroupRenameDialog, HookTrustDialog, InfoDialog, NewSessionData, NewSessionDialog,
-    ProfilePickerDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
+    ProfilePickerDialog, RenameDialog, SwitchAgentDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::restart_poller::{RestartPath, RestartPoller, RestartRequest, RestartResult};
@@ -112,6 +114,8 @@ pub struct HomeView {
     pub(super) new_dialog: Option<NewSessionDialog>,
     pub(super) fork_dialog: Option<ForkSessionDialog>,
     pub(super) add_pane_dialog: Option<AddPaneDialog>,
+    /// Open switch-agent dialog and what follows a confirmed switch.
+    pub(super) switch_agent_dialog: Option<(SwitchAgentDialog, PostRestart)>,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
@@ -275,6 +279,7 @@ impl HomeView {
             new_dialog: None,
             fork_dialog: None,
             add_pane_dialog: None,
+            switch_agent_dialog: None,
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
@@ -807,6 +812,7 @@ impl HomeView {
             || self.new_dialog.is_some()
             || self.fork_dialog.is_some()
             || self.add_pane_dialog.is_some()
+            || self.switch_agent_dialog.is_some()
             || self.confirm_dialog.is_some()
             || self.unified_delete_dialog.is_some()
             || self.group_delete_options_dialog.is_some()
