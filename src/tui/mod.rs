@@ -7,6 +7,7 @@ mod deletion_poller;
 pub mod dialogs;
 pub mod diff;
 mod home;
+mod managed_pane;
 mod restart_poller;
 pub mod settings;
 mod status_poller;

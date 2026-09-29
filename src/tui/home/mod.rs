@@ -30,7 +30,9 @@ use super::dialogs::{
     ProfilePickerDialog, RenameDialog, SwitchAgentDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
-use super::restart_poller::{RestartPath, RestartPoller, RestartRequest, RestartResult};
+use super::restart_poller::{
+    RestartPath, RestartPoller, RestartRequest, RestartResult, StartRequest,
+};
 use super::settings::SettingsView;
 use super::status_poller::StatusPoller;
 
@@ -547,6 +549,27 @@ impl HomeView {
         mode: crate::session::RestartMode,
         path: RestartPath,
     ) {
+        self.enqueue(id, mode, path, None);
+    }
+
+    /// Launch a session that has never run on the background worker, so
+    /// creating it does not freeze the list while its agents come up.
+    pub fn enqueue_start(&mut self, id: &str, start: StartRequest) {
+        self.enqueue(
+            id,
+            crate::session::RestartMode::Fresh,
+            RestartPath::Start,
+            Some(start),
+        );
+    }
+
+    fn enqueue(
+        &mut self,
+        id: &str,
+        mode: crate::session::RestartMode,
+        path: RestartPath,
+        start: Option<StartRequest>,
+    ) {
         use crate::session::Status;
 
         let Some(inst) = self.get_instance(id) else {
@@ -571,6 +594,7 @@ impl HomeView {
             mode,
             path,
             prev_status,
+            start,
         });
     }
 

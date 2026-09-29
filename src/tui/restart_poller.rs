@@ -15,6 +15,9 @@ use super::app::{combine_pane_errors, skipped_slot_warning};
 use crate::session::{Instance, PaneResumeOutcome, RestartMode, Status};
 
 mod group;
+mod start;
+
+pub use start::StartRequest;
 
 /// Which restart pipeline the worker runs for a request. Decided at enqueue
 /// time: a live tmux session is respawned in place, a dead one with persisted
@@ -25,6 +28,8 @@ pub enum RestartPath {
     Respawn,
     Recover,
     Group,
+    /// First launch of a session that has never run, e.g. one just created.
+    Start,
 }
 
 pub struct RestartRequest {
@@ -38,6 +43,8 @@ pub struct RestartRequest {
     /// Status before the enqueue parked the instance in `Restarting`,
     /// restored when the request turns out to be stale.
     pub prev_status: Status,
+    /// What a `Start` launches; `None` for every other path.
+    pub start: Option<StartRequest>,
 }
 
 /// Identity fields the restart pipeline mutates on the worker's clone.
@@ -145,6 +152,7 @@ impl RestartPoller {
             RestartPath::Respawn => Self::perform_respawn(request),
             RestartPath::Recover => Self::perform_recovery(request),
             RestartPath::Group => Self::perform_group_restart(request),
+            RestartPath::Start => Self::perform_start(request),
         }
     }
 
@@ -384,6 +392,7 @@ mod tests {
             mode: RestartMode::Resume,
             path: RestartPath::Respawn,
             prev_status: Status::Idle,
+            start: None,
         }
     }
 

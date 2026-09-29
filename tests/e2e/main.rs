@@ -20,6 +20,7 @@ mod harness;
 mod agent_session_store;
 mod agent_switch;
 mod attach_reconcile;
+mod background_new_session;
 mod background_restart;
 mod claude_model_continuity;
 mod claude_model_injection;

@@ -246,8 +246,10 @@ impl App {
 
             // Check for and apply creation results (non-blocking)
             if let Some(session_id) = self.home.apply_creation_results() {
-                let post = self.home.new_session_post;
-                self.start_session(&session_id, post, terminal)?;
+                match self.home.new_session_post {
+                    PostRestart::Attach => self.attach_session(&session_id, terminal)?,
+                    PostRestart::StayOnHome => self.start_in_background(&session_id),
+                }
                 refresh_needed = true;
             }
 
@@ -426,7 +428,7 @@ impl App {
                 self.attach_session(&id, terminal)?;
             }
             Action::StartSession(id) => {
-                self.start_session(&id, PostRestart::StayOnHome, terminal)?;
+                self.start_in_background(&id);
             }
             Action::AddAgentPane(id) => {
                 self.add_agent_pane(&id, terminal)?;
@@ -715,6 +717,18 @@ impl App {
         self.home.refresh_recoverable_cache();
 
         self.attach_session(id, terminal)
+    }
+
+    /// Hand a newly created session's launch to the background worker so the
+    /// list stays responsive while its agents come up.
+    fn start_in_background(&mut self, session_id: &str) {
+        let start = super::restart_poller::StartRequest {
+            size: crate::terminal::get_size(),
+            skip_on_launch: self.home.take_on_launch_hooks_ran(session_id),
+            right_pane: self.home.take_pending_right_pane(),
+        };
+        self.home.enqueue_start(session_id, start);
+        self.needs_redraw = true;
     }
 
     fn attach_session(
@@ -1052,11 +1066,6 @@ impl App {
 
     /// Split a managed agent pane into a running session and record its durable
     /// slot, so the pane is restartable and the key the launch minted has a home.
-    ///
-    /// An unset directory falls back to the session's own here rather than when
-    /// the dialog was submitted. A worktree-backed session's directory is
-    /// decided during creation, so a snapshot would put the pane in the original
-    /// repository while the session went to the worktree.
     /// Returns whether the pane was created, so a caller that would otherwise
     /// attach can stay put instead of dropping the user into a session that
     /// gained nothing.
@@ -1065,104 +1074,13 @@ impl App {
         inst: &crate::session::Instance,
         pending: &crate::session::PaneDraft,
     ) -> bool {
-        let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
         let profile = self.home.storage.profile().to_string();
-        let resolved = match crate::session::builder::resolve_pane_config(
-            pending.clone(),
-            Some(&inst.project_path),
-            &profile,
-        ) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                self.report_pane_not_created(&format!("{error:#}"));
-                return false;
-            }
-        };
-        let pane = &resolved.config;
-        let cwd = pane.working_dir.as_str();
-
-        // Splitting anyway would leave an empty pane the user has to close,
-        // with nothing saying why it is empty.
-        let launch = match inst.prepare_extra_pane_config_command(&profile, &session_name, pane) {
-            Ok(launch) => launch,
-            Err(error) => {
-                let detail = Self::append_pane_cleanup_error(
-                    format!("{error:#}"),
-                    crate::session::builder::cleanup_resolved_pane(&resolved),
-                );
+        match super::managed_pane::launch_managed_pane(inst, pending, &profile) {
+            Ok(()) => true,
+            Err(detail) => {
                 self.report_pane_not_created(&detail);
-                return false;
+                false
             }
-        };
-
-        // The directory can be one the user typed, so a split that fails is
-        // surfaced rather than logged: a pane that silently does not appear is
-        // the failure mode a chosen directory introduces.
-        let pane_id = match crate::tmux::split_window_right(
-            &session_name,
-            cwd,
-            &launch.command,
-            pane.tool != "shell",
-        ) {
-            Ok(pane_id) => pane_id,
-            Err(e) => {
-                let detail = Self::append_pane_cleanup_error(
-                    format!("{e:#}"),
-                    inst.rollback_prepared_extra_pane(&profile, &launch),
-                );
-                let detail = Self::append_pane_cleanup_error(
-                    detail,
-                    crate::session::builder::cleanup_resolved_pane(&resolved),
-                );
-                self.report_pane_not_created(&detail);
-                return false;
-            }
-        };
-
-        // The key the launch minted lives on the pane's slot record, so every
-        // later relaunch reuses it instead of handing xats a key no identity
-        // holds. The pane's own directory lives there too, so a restart returns
-        // it here rather than to the session's directory.
-        let recorded = inst.record_launched_extra_pane(
-            &profile,
-            &session_name,
-            &crate::db::reconcile::LaunchedPane {
-                pane_id: &pane_id,
-                config: pane,
-                identity_key: &launch.identity_key,
-                native_session_id: &launch.native_session_id,
-                prepared_slot: launch.prepared_slot,
-                prepared_generation: launch.prepared_generation,
-            },
-        );
-
-        if let Err(e) = recorded {
-            tracing::error!("{:#}", e);
-            let detail = match crate::tmux::kill_pane_exact(&pane_id) {
-                Ok(()) => format!("{e:#}"),
-                Err(rollback_error) => {
-                    format!("{e:#}. Failed to roll back pane {pane_id}: {rollback_error:#}")
-                }
-            };
-            let detail = Self::append_pane_cleanup_error(
-                detail,
-                inst.rollback_prepared_extra_pane(&profile, &launch),
-            );
-            let detail = Self::append_pane_cleanup_error(
-                detail,
-                crate::session::builder::cleanup_resolved_pane(&resolved),
-            );
-            self.report_pane_not_created(&detail);
-            return false;
-        }
-        inst.auto_confirm_launched_pane(&pane_id, pane);
-        true
-    }
-
-    fn append_pane_cleanup_error(detail: String, cleanup: anyhow::Result<()>) -> String {
-        match cleanup {
-            Ok(()) => detail,
-            Err(error) => format!("{detail}. {error:#}"),
         }
     }
 
