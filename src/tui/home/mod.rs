@@ -116,6 +116,9 @@ pub struct HomeView {
     pub(super) add_pane_dialog: Option<AddPaneDialog>,
     /// Open switch-agent dialog and what follows a confirmed switch.
     pub(super) switch_agent_dialog: Option<(SwitchAgentDialog, PostRestart)>,
+    /// Whether a session created from the new-session dialog is attached or
+    /// only started.
+    pub(crate) new_session_post: PostRestart,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
@@ -280,6 +283,7 @@ impl HomeView {
             fork_dialog: None,
             add_pane_dialog: None,
             switch_agent_dialog: None,
+            new_session_post: PostRestart::Attach,
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,

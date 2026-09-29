@@ -524,7 +524,7 @@ impl HomeView {
 
         spans.extend([
             Span::styled("│", sep_style),
-            Span::styled(" n", key_style),
+            Span::styled(" N/n", key_style),
             Span::styled(" New ", desc_style),
         ]);
 

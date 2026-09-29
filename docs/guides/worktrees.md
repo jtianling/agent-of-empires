@@ -41,7 +41,7 @@ aoe remove <session> --delete-worktree
 
 | Key | Action |
 |-----|--------|
-| `n` | New session dialog |
+| `N` / `n` | New session dialog (`N` attaches, `n` stays in the list) |
 | `Tab` | Next field |
 | `Shift+Tab` | Previous field |
 | `Enter` | Submit and create session |

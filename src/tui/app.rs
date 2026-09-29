@@ -246,8 +246,8 @@ impl App {
 
             // Check for and apply creation results (non-blocking)
             if let Some(session_id) = self.home.apply_creation_results() {
-                // Creation succeeded - attach to the new session
-                self.attach_session(&session_id, terminal)?;
+                let post = self.home.new_session_post;
+                self.start_session(&session_id, post, terminal)?;
                 refresh_needed = true;
             }
 
@@ -424,6 +424,9 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::AttachSession(id) => {
                 self.attach_session(&id, terminal)?;
+            }
+            Action::StartSession(id) => {
+                self.start_session(&id, PostRestart::StayOnHome, terminal)?;
             }
             Action::AddAgentPane(id) => {
                 self.add_agent_pane(&id, terminal)?;
@@ -1258,6 +1261,8 @@ pub enum PostRestart {
 pub enum Action {
     Quit,
     AttachSession(String),
+    /// Start a session without attaching to it.
+    StartSession(String),
     RespawnAgentPane(String, crate::session::RestartMode, PostRestart),
     RecoverInstance(String, crate::session::RestartMode, PostRestart),
     RestartGroup(Vec<String>, crate::session::RestartMode),

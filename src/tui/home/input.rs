@@ -596,33 +596,7 @@ impl HomeView {
                     self.cursor = self.search_matches[self.search_match_index];
                     self.update_selected();
                 } else {
-                    let existing_titles: Vec<String> =
-                        self.instances.iter().map(|i| i.title.clone()).collect();
-                    let existing_groups: Vec<String> = self
-                        .group_tree
-                        .get_all_groups()
-                        .iter()
-                        .map(|g| g.path.clone())
-                        .collect();
-                    let group_directories = self.group_tree.get_group_directories();
-                    let current_profile = self.storage.profile().to_string();
-                    // Always use launch_dir (pass None for default_group so
-                    // NewSessionDialog doesn't resolve a group directory as path).
-                    let default_group = self.selected_group_context();
-                    let mut dialog = NewSessionDialog::new(
-                        self.available_tools.clone(),
-                        existing_titles,
-                        existing_groups,
-                        group_directories,
-                        None,
-                        &current_profile,
-                        &self.launch_dir,
-                    );
-                    // Pre-fill the group field but keep path as launch_dir
-                    if let Some(group) = default_group {
-                        dialog.set_group(group);
-                    }
-                    self.new_dialog = Some(dialog);
+                    self.open_new_session_dialog(PostRestart::StayOnHome);
                 }
             }
             KeyCode::Char('N') => {
@@ -635,55 +609,7 @@ impl HomeView {
                     self.cursor = self.search_matches[self.search_match_index];
                     self.update_selected();
                 } else {
-                    // Pre-filled new session from selection
-                    let prefill_path = self
-                        .selected_session
-                        .as_ref()
-                        .and_then(|id| self.get_instance(id))
-                        .map(|inst| {
-                            inst.worktree_info
-                                .as_ref()
-                                .map(|wt| wt.main_repo_path.clone())
-                                .unwrap_or_else(|| inst.project_path.clone())
-                        });
-                    let prefill_group = self
-                        .selected_session
-                        .as_ref()
-                        .and_then(|id| self.get_instance(id))
-                        .and_then(|inst| {
-                            if inst.group_path.is_empty() {
-                                None
-                            } else {
-                                Some(inst.group_path.clone())
-                            }
-                        })
-                        .or_else(|| self.selected_group.clone());
-
-                    if prefill_path.is_some() || prefill_group.is_some() {
-                        let existing_titles: Vec<String> =
-                            self.instances.iter().map(|i| i.title.clone()).collect();
-                        let existing_groups: Vec<String> =
-                            self.groups.iter().map(|g| g.path.clone()).collect();
-                        let group_directories = self.group_tree.get_group_directories();
-                        let current_profile = self.storage.profile().to_string();
-                        let default_group = self.selected_group_context();
-                        let mut dialog = NewSessionDialog::new(
-                            self.available_tools.clone(),
-                            existing_titles,
-                            existing_groups,
-                            group_directories,
-                            default_group,
-                            &current_profile,
-                            &self.launch_dir,
-                        );
-                        if let Some(path) = prefill_path {
-                            dialog.set_path(path);
-                        }
-                        if let Some(group) = prefill_group {
-                            dialog.set_group(group);
-                        }
-                        self.new_dialog = Some(dialog);
-                    }
+                    self.open_new_session_dialog(PostRestart::Attach);
                 }
             }
             KeyCode::Char('%') => {
@@ -1259,7 +1185,10 @@ impl HomeView {
             Ok(session_id) => {
                 self.new_dialog = None;
                 self.pending_right_pane = right_pane;
-                Some(Action::AttachSession(session_id))
+                Some(match self.new_session_post {
+                    PostRestart::Attach => Action::AttachSession(session_id),
+                    PostRestart::StayOnHome => Action::StartSession(session_id),
+                })
             }
             Err(e) => {
                 tracing::error!("Failed to create session: {}", e);
@@ -1269,6 +1198,53 @@ impl HomeView {
                 None
             }
         }
+    }
+
+    /// Open the new-session dialog for the selection. A selected group, or the
+    /// group of a selected session, supplies the group and, when it has one,
+    /// its default directory. `post` decides whether the created session is
+    /// attached or only started.
+    fn open_new_session_dialog(&mut self, post: PostRestart) {
+        let existing_titles: Vec<String> = self.instances.iter().map(|i| i.title.clone()).collect();
+        let existing_groups: Vec<String> = self
+            .group_tree
+            .get_all_groups()
+            .iter()
+            .map(|g| g.path.clone())
+            .collect();
+        let group_directories = self.group_tree.get_group_directories();
+        let default_group = self.selected_group_context();
+        let has_group_directory = default_group
+            .as_ref()
+            .is_some_and(|group| group_directories.contains_key(group));
+        let session_path = self
+            .selected_session
+            .as_ref()
+            .and_then(|id| self.get_instance(id))
+            .map(|inst| {
+                inst.worktree_info
+                    .as_ref()
+                    .map(|wt| wt.main_repo_path.clone())
+                    .unwrap_or_else(|| inst.project_path.clone())
+            });
+        let current_profile = self.storage.profile().to_string();
+        let mut dialog = NewSessionDialog::new(
+            self.available_tools.clone(),
+            existing_titles,
+            existing_groups,
+            group_directories,
+            default_group.clone(),
+            &current_profile,
+            &self.launch_dir,
+        );
+        if let Some(group) = default_group {
+            dialog.set_group(group);
+        }
+        if let (false, Some(path)) = (has_group_directory, session_path) {
+            dialog.set_path(path);
+        }
+        self.new_session_post = post;
+        self.new_dialog = Some(dialog);
     }
 
     /// Open the add-agent-pane dialog for the selected running session.

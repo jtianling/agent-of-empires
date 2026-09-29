@@ -33,8 +33,8 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             vec![
                 ("Enter", "Attach to session"),
                 ("T", "Attach to terminal"),
-                ("n", "New session"),
-                ("N", "New from selection"),
+                ("N", "New session, then attach"),
+                ("n", "New session, stay in list"),
                 ("f", "Fork claude/codex/sandboxed opencode"),
                 ("%", "Add agent pane, then attach"),
                 ("x", "Stop session"),

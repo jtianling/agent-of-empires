@@ -113,7 +113,7 @@ This creates:
 | `t` | Toggle between Agent View and Terminal View |
 | `D` | Open [Diff View](diff-view.md) to review git changes |
 | `Enter` | Attach to agent (Agent View) or terminal (Terminal View) |
-| `n` | Create new session |
+| `N` / `n` | Create new session; `N` attaches, `n` stays in the list |
 | `%` | Add an agent pane to the selected session, then attach (see [Quick Start](../quick-start.md#-on-the-home-screen-vs-ctrlb--while-attached) for how this differs from `Ctrl+b %`) |
 | `A` / `a` | Switch the session between claude and codex; `A` attaches, `a` stays in the list |
 | `d` | Delete session (Agent View only) |

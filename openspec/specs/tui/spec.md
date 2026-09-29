@@ -47,7 +47,8 @@ operations available via CLI are also available in the TUI, plus additional view
 
 | Key | Action |
 |-----|--------|
-| `n` | New session |
+| `N` | New session, then attach to it |
+| `n` | Same as `N`, but start the session in the background and stay on the home list |
 | `Enter` | Attach to selected agent session |
 | `D` | Open diff view for selected session |
 | `d` | Delete selected session |
@@ -119,6 +120,23 @@ without retyping the group path.
 - **AND** the user presses `n`
 - **THEN** the new session dialog SHALL prefill the Group field with that session's `group_path`
 - **AND** the user MAY edit or clear the value before creating the session
+
+#### Scenario: Group default directory prefills the Path field
+- **WHEN** the group context (the selected group, or the selected session's group) has a default directory
+- **AND** the user presses `n` or `N`
+- **THEN** the new session dialog SHALL prefill the Path field with that directory
+- **AND** when the group has no default directory and a session is selected, the Path field SHALL be that session's main repository path, otherwise the launch directory
+
+### Requirement: n and N differ only in attaching the created session
+`n` and `N` SHALL open the same new session dialog with the same prefills.  After a session is created from a dialog opened with `N`, AoE SHALL start it and attach to it.  After a session is created from a dialog opened with `n`, AoE SHALL start it (including its right pane) and keep the user on the home list.  While search matches are active, `n`/`N` SHALL keep cycling matches instead.
+
+#### Scenario: n starts without attaching
+- **WHEN** the user presses `n` and creates a session
+- **THEN** the session SHALL be started and the home list SHALL remain visible
+
+#### Scenario: N attaches
+- **WHEN** the user presses `N` and creates a session
+- **THEN** the session SHALL be started and the user SHALL be attached to it
 
 ### Requirement: Returning from an attached session restores the actual detached session selection
 When the user returns from an attached AoE-managed tmux session to the home screen, AoE SHALL restore selection to the session the user actually detached from, even if they switched sessions inside tmux after the initial attach. The client name for per-client tracking SHALL be resolved from the terminal's tty name.

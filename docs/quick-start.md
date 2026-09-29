@@ -10,7 +10,7 @@ This opens the dashboard. You'll see an empty session list on first run.
 
 ## Create Your First Session
 
-**From the TUI:** Press `n` to open the new session dialog. Fill in the path to your project (or leave it as `.` for the current directory) and press `Enter`.
+**From the TUI:** Press `N` to open the new session dialog. Fill in the path to your project (or leave it as `.` for the current directory) and press `Enter` to create the session and attach to it.  `n` opens the same dialog but starts the session in the background and keeps you on the list.  On a group (or a session inside one), the dialog is prefilled with that group and, when the group has a default directory, its path.
 
 **From the CLI:**
 
@@ -119,7 +119,7 @@ aoe session add-agent-pane <session> --tool codex --path /path/to/other
 
 | Key | Action |
 |-----|--------|
-| `n` | New session |
+| `N` / `n` | New session; `N` attaches, `n` starts it in the background and stays in the list |
 | `%` | Add an agent pane to the selected session, then attach |
 | `A` / `a` | Switch the selected session between claude and codex (clean restart, keeps the xats name and team); `A` attaches, `a` stays in the list |
 | `Enter` | Attach to session |
