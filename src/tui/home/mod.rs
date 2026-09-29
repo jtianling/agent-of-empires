@@ -178,6 +178,9 @@ pub struct HomeView {
     pub(super) creation_cancelled: bool,
     /// Sessions whose on_launch hooks already ran in the creation poller
     pub(super) on_launch_hooks_ran: HashSet<String>,
+    /// Sessions whose in-flight background job is a first launch rather than a
+    /// restart, so the status bar can say so.
+    pub(super) background_starts: HashSet<String>,
 
     // Performance: preview caching
     pub(super) preview_cache: PreviewCache,
@@ -318,6 +321,7 @@ impl HomeView {
             creation_poller: CreationPoller::new(),
             creation_cancelled: false,
             on_launch_hooks_ran: HashSet::new(),
+            background_starts: HashSet::new(),
             preview_cache: PreviewCache::default(),
             sound_config,
             settings_view: None,
@@ -555,6 +559,12 @@ impl HomeView {
     /// Launch a session that has never run on the background worker, so
     /// creating it does not freeze the list while its agents come up.
     pub fn enqueue_start(&mut self, id: &str, start: StartRequest) {
+        if self
+            .get_instance(id)
+            .is_some_and(|inst| !inst.restart_in_flight)
+        {
+            self.background_starts.insert(id.to_string());
+        }
         self.enqueue(
             id,
             crate::session::RestartMode::Fresh,
@@ -613,6 +623,7 @@ impl HomeView {
         } = result;
 
         let has_identity = identity.is_some();
+        self.background_starts.remove(&session_id);
         self.mutate_instance(&session_id, |inst| {
             if let Some(identity) = identity {
                 inst.agent_session_id = identity.agent_session_id;

@@ -64,6 +64,8 @@ fn n_returns_to_the_list_while_the_new_session_launches() {
 
     h.wait_for_timeout("Sort: Oldest", Duration::from_secs(4));
     h.wait_for("Bg New");
-    h.wait_for_absent("Restarting...", Duration::from_secs(30));
+    h.wait_for("Starting...");
+    h.assert_screen_not_contains("Restarting...");
+    h.wait_for_absent("Starting...", Duration::from_secs(30));
     h.assert_screen_contains("Agent of Empires");
 }

@@ -133,7 +133,7 @@ without retyping the group path.
 #### Scenario: n starts without attaching
 - **WHEN** the user presses `n` and creates a session
 - **THEN** the session SHALL be started and the home list SHALL remain visible
-- **AND** the launch (agent startup and right pane) SHALL run on the background restart worker, so the home list keeps accepting input while the session is shown as `Restarting...`
+- **AND** the launch (agent startup and right pane) SHALL run on the background restart worker, so the home list keeps accepting input while the status bar shows `Starting...` for the session
 
 #### Scenario: N attaches
 - **WHEN** the user presses `N` and creates a session

@@ -488,7 +488,14 @@ impl HomeView {
                             format!(" {} ", STATUS_BAR_SPINNER_FRAMES[frame_idx]),
                             Style::default().fg(theme.waiting).bold(),
                         ),
-                        Span::styled(" Restarting... ", desc_style),
+                        Span::styled(
+                            if self.background_starts.contains(selected_id) {
+                                " Starting... "
+                            } else {
+                                " Restarting... "
+                            },
+                            desc_style,
+                        ),
                         Span::styled("│", sep_style),
                     ]);
                 }
