@@ -68,7 +68,7 @@ impl RenameDialog {
             current_group: current_group.to_string(),
             current_profile: current_profile.to_string(),
             available_profiles,
-            new_title: Input::default(),
+            new_title: Input::new(current_title.to_string()),
             new_group: Input::new(current_group.to_string()),
             profile_index,
             focused_field: 0,
@@ -211,7 +211,10 @@ impl RenameDialog {
         match key.code {
             KeyCode::Esc => DialogResult::Cancel,
             KeyCode::Enter => {
-                let title_value = self.new_title.value().trim().to_string();
+                let mut title_value = self.new_title.value().trim().to_string();
+                if title_value == self.current_title {
+                    title_value.clear();
+                }
                 let group_value = self.new_group.value().trim();
                 let selected_profile = self.selected_profile();
                 let profile_changed = selected_profile != self.current_profile;
@@ -526,6 +529,22 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
+    fn clear_title(dialog: &mut RenameDialog) {
+        for _ in 0..dialog.current_title.chars().count() {
+            dialog.handle_key(key(KeyCode::Backspace));
+        }
+    }
+
+    #[test]
+    fn unchanged_prefilled_title_keeps_the_current_one() {
+        let mut dialog =
+            RenameDialog::new("Test", "group", "default", default_profiles(), Vec::new());
+        assert!(matches!(
+            dialog.handle_key(key(KeyCode::Enter)),
+            DialogResult::Cancel
+        ));
+    }
+
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
     }
@@ -554,7 +573,7 @@ mod tests {
         assert_eq!(dialog.current_title, "Original Title");
         assert_eq!(dialog.current_group, "work/frontend");
         assert_eq!(dialog.current_profile, "default");
-        assert_eq!(dialog.new_title.value(), "");
+        assert_eq!(dialog.new_title.value(), "Original Title");
         assert_eq!(dialog.new_group.value(), "work/frontend"); // Pre-populated with current group
         assert_eq!(dialog.profile_index, 0);
         assert_eq!(dialog.focused_field, 0);
@@ -599,6 +618,7 @@ mod tests {
             default_profiles(),
             Vec::new(),
         );
+        clear_title(&mut dialog);
         dialog.handle_key(key(KeyCode::Char('N')));
         dialog.handle_key(key(KeyCode::Char('e')));
         dialog.handle_key(key(KeyCode::Char('w')));
@@ -653,6 +673,7 @@ mod tests {
             default_profiles(),
             Vec::new(),
         );
+        clear_title(&mut dialog);
         // Type title
         for c in "New Title".chars() {
             dialog.handle_key(key(KeyCode::Char(c)));
@@ -767,6 +788,7 @@ mod tests {
     fn test_char_input_goes_to_focused_field() {
         let mut dialog =
             RenameDialog::new("Test", "group", "default", default_profiles(), Vec::new());
+        clear_title(&mut dialog);
 
         // Type in title field
         dialog.handle_key(key(KeyCode::Char('a')));
@@ -789,7 +811,7 @@ mod tests {
         // Typing should not affect anything
         dialog.handle_key(key(KeyCode::Char('a')));
         assert_eq!(dialog.profile_index, 0);
-        assert_eq!(dialog.new_title.value(), "");
+        assert_eq!(dialog.new_title.value(), "Test");
         assert_eq!(dialog.new_group.value(), "group");
     }
 
@@ -797,6 +819,7 @@ mod tests {
     fn test_backspace_removes_char_from_focused_field() {
         let mut dialog =
             RenameDialog::new("Test", "group", "default", default_profiles(), Vec::new());
+        clear_title(&mut dialog);
         dialog.handle_key(key(KeyCode::Char('a')));
         dialog.handle_key(key(KeyCode::Char('b')));
         dialog.handle_key(key(KeyCode::Char('c')));
@@ -814,6 +837,7 @@ mod tests {
             default_profiles(),
             Vec::new(),
         );
+        clear_title(&mut dialog);
         dialog.handle_key(key(KeyCode::Char('N')));
         dialog.handle_key(key(KeyCode::Char('e')));
         dialog.handle_key(key(KeyCode::Char('w')));
@@ -833,6 +857,7 @@ mod tests {
             default_profiles(),
             Vec::new(),
         );
+        clear_title(&mut dialog);
 
         // Type new title
         for c in "Renamed Project".chars() {
@@ -881,6 +906,7 @@ mod tests {
     fn test_whitespace_is_trimmed() {
         let mut dialog =
             RenameDialog::new("Test", "group", "default", default_profiles(), Vec::new());
+        clear_title(&mut dialog);
         for c in "  New Title  ".chars() {
             dialog.handle_key(key(KeyCode::Char(c)));
         }
@@ -907,6 +933,7 @@ mod tests {
     fn test_left_right_arrow_moves_cursor_in_input() {
         let mut dialog =
             RenameDialog::new("Test", "group", "default", default_profiles(), Vec::new());
+        clear_title(&mut dialog);
         dialog.handle_key(key(KeyCode::Char('a')));
         dialog.handle_key(key(KeyCode::Char('b')));
         dialog.handle_key(key(KeyCode::Char('c')));
@@ -1027,6 +1054,7 @@ mod tests {
             multi_profiles(),
             Vec::new(),
         );
+        clear_title(&mut dialog);
 
         // Change title
         for c in "New Title".chars() {

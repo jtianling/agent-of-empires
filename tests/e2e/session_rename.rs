@@ -103,6 +103,7 @@ fn test_tui_rename_updates_tmux_session_name_without_killing_shell() {
     h.wait_for("Old Title");
     h.send_keys("e");
     h.wait_for("Edit Session");
+    h.send_keys("C-u");
     h.type_text("New Title");
     h.send_keys("Enter");
     h.wait_for("New Title");
@@ -162,6 +163,7 @@ fn test_tui_cross_profile_rename_updates_tmux_session_name_without_killing_shell
     h.wait_for("Default Title");
     h.send_keys("e");
     h.wait_for("Edit Session");
+    h.send_keys("C-u");
     h.type_text("Moved Title");
     h.send_keys("Down");
     h.send_keys("Down");
