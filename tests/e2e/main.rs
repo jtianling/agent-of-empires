@@ -38,6 +38,8 @@ mod pane_cwd;
 mod pane_level_config;
 mod pane_session_capture;
 mod profile_picker;
+mod restart_fallen_acceptance;
+mod restart_fallen_support;
 mod right_pane_cwd;
 mod sandbox;
 mod session_rename;

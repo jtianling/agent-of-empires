@@ -321,16 +321,8 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
             live_panes.insert(id.clone());
         }
         let primary = crate::tmux::get_agent_pane_id(&session_name);
-        // A Codex pane cannot report itself through hooks, so its capture is
-        // derived from Codex's rollout files before the snapshot below. Every
-        // pane is offered, in pane-index (creation) order: a Codex pane AoE
-        // added beside the primary one is invisible to restart and recovery
-        // until it has a capture, and the claim refuses panes not running
-        // Codex. Ordering plus the "a claimed thread is never reassigned"
-        // rule keeps a later pane from taking an earlier pane's conversation.
-        for (_, pane_id) in &panes {
-            let is_primary = primary.as_deref() == Some(pane_id.as_str());
-            crate::db::codex_rollout::maybe_claim_for_pane(&store, inst, pane_id, is_primary);
+        if let Err(error) = capture_codex_bindings(&store, inst, &panes, primary.as_deref()) {
+            tracing::debug!("Codex bindings for {} unavailable: {error:#}", inst.id);
         }
         if let Err(e) = reconcile_session(&store, inst, &panes, primary.as_deref()) {
             tracing::debug!("reconcile: session {} failed: {}", inst.id, e);
@@ -339,6 +331,40 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
     }
 
     gc_orphan_pane_live(&store, &live_panes, listed_at);
+}
+
+fn capture_codex_bindings(
+    store: &Store,
+    inst: &Instance,
+    panes: &[(u32, String)],
+    primary: Option<&str>,
+) -> Result<()> {
+    let existing = store.read_slots_for_instance(&inst.id)?;
+    let existing_map = existing
+        .iter()
+        .map(|slot| (slot.slot, slot.tmux_pane.clone()))
+        .collect::<Vec<_>>();
+    for pane in assign_slots(panes, primary, &existing_map) {
+        let is_primary = primary == Some(pane.pane_id.as_str());
+        let cross_agent_team = existing
+            .iter()
+            .find(|slot| slot.slot == pane.slot)
+            .map_or(inst.primary_pane_config().cross_agent_team, |slot| {
+                slot.cross_agent_team
+            });
+        if cross_agent_team {
+            crate::db::codex_capture::maybe_claim_for_pane(
+                store,
+                inst,
+                &pane,
+                is_primary,
+                existing.iter().find(|slot| slot.slot == pane.slot),
+            );
+        } else {
+            crate::db::codex_rollout::maybe_claim_for_pane(store, inst, &pane.pane_id, is_primary);
+        }
+    }
+    Ok(())
 }
 
 fn capture_coherent_layout(
@@ -421,6 +447,14 @@ fn reconcile_session(
         let Some(capture) = store.read_pane_live(&pane.pane_id)? else {
             continue;
         };
+        // Codex writes its capture and proof atomically under the launch generation.
+        if capture.agent == "codex"
+            && existing_configs
+                .get(&pane.slot)
+                .is_some_and(|config| config.cross_agent_team)
+        {
+            continue;
+        }
         if capture.native_session_id.is_empty() {
             continue;
         }
@@ -878,6 +912,32 @@ mod identity_key_tests {
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].slot, 1);
         assert_eq!(slots[0].agent, "codex");
+    }
+
+    #[test]
+    fn raw_codex_capture_cannot_replace_a_verified_slot() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("recon", "/tmp/recon");
+        let thread = "00000000-0000-4000-8000-000000000001";
+        store
+            .record_launched_slot(&inst.id, 0, "codex", "/tmp/recon", "%1", "key", 1)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE agent_slot SET cross_agent_team = 1 WHERE instance_id = ?1",
+                [&inst.id],
+            )
+            .unwrap();
+        let slot = store.read_slots_for_instance(&inst.id).unwrap()[0].clone();
+        store.capture_codex_binding(&slot, thread, thread).unwrap();
+        store
+            .upsert_pane_live("%1", "codex", "unverified", "/tmp/recon", 2)
+            .unwrap();
+        reconcile_session(&store, &inst, &[(0, "%1".to_string())], Some("%1")).unwrap();
+        let slot = store.read_slots_for_instance(&inst.id).unwrap()[0].clone();
+        assert_eq!(slot.native_session_id, thread);
+        assert!(store.codex_resume_verified(&slot).unwrap());
     }
 
     #[test]

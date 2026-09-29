@@ -93,6 +93,9 @@ pub struct AgentDef {
     pub detection: DetectionMethod,
     /// YOLO/auto-approve configuration.
     pub yolo: Option<YoloMode>,
+    /// CLI flag appended when YOLO mode is off, selecting the agent's
+    /// non-YOLO permission level instead of its interactive default.
+    pub default_permission_flag: Option<&'static str>,
     /// CLI flag template for custom instruction injection.
     /// `{}` is replaced with the shell-escaped instruction text.
     pub instruction_flag: Option<&'static str>,
@@ -214,6 +217,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &[],
         detection: DetectionMethod::Which("claude"),
         yolo: Some(YoloMode::CliFlag("--dangerously-skip-permissions")),
+        default_permission_flag: None,
         instruction_flag: Some("--append-system-prompt {}"),
         fixed_args: &[],
         set_default_command: false,
@@ -244,6 +248,7 @@ pub const AGENTS: &[AgentDef] = &[
         yolo: Some(YoloMode::CliFlag(
             "--dangerously-bypass-approvals-and-sandbox",
         )),
+        default_permission_flag: Some("--approve-for-me"),
         instruction_flag: Some("--config developer_instructions={}"),
         // Suppress the interactive startup update menu (gated upstream by
         // `check_for_update_on_startup` in codex-rs/tui/src/updates.rs): in a
@@ -275,6 +280,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &["open-code"],
         detection: DetectionMethod::Which("opencode"),
         yolo: Some(YoloMode::EnvVar("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)),
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,
@@ -300,6 +306,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &["kimi-code"],
         detection: DetectionMethod::Which("kimi"),
         yolo: Some(YoloMode::CliFlag("--yolo")),
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,
@@ -328,6 +335,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &["terminal"],
         detection: DetectionMethod::Which("sh"),
         yolo: None,
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,
@@ -348,6 +356,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &["mistral-vibe"],
         detection: DetectionMethod::RunWithArg("vibe", "--version"),
         yolo: Some(YoloMode::CliFlag("--agent auto-approve")),
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,
@@ -368,6 +377,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &["agent"],
         detection: DetectionMethod::Which("agent"),
         yolo: Some(YoloMode::CliFlag("--yolo")),
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,
@@ -391,6 +401,7 @@ pub const AGENTS: &[AgentDef] = &[
         aliases: &["github-copilot"],
         detection: DetectionMethod::Which("copilot"),
         yolo: Some(YoloMode::CliFlag("--yolo")),
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,
@@ -412,6 +423,7 @@ pub const AGENTS: &[AgentDef] = &[
         detection: DetectionMethod::Which("pi"),
         // Pi runs in full YOLO mode by default (no approval gates), so no flag needed.
         yolo: Some(YoloMode::AlwaysYolo),
+        default_permission_flag: None,
         instruction_flag: None,
         fixed_args: &[],
         set_default_command: false,

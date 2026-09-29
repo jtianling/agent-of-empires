@@ -17,6 +17,8 @@ use super::container_config;
 use super::environment::{build_docker_env_args, shell_escape};
 use super::PaneConfig;
 
+mod codex_restart;
+
 pub(crate) trait PaneConfigTarget {
     fn resolve_for(self, instance: &Instance) -> PaneConfig;
 }
@@ -2582,6 +2584,8 @@ impl Instance {
                 } else {
                     base_cmd
                 }
+            } else if let Some(flag) = agent.and_then(|a| a.default_permission_flag) {
+                format!("{} {}", base_cmd, flag)
             } else {
                 base_cmd
             };
@@ -2605,6 +2609,11 @@ impl Instance {
             ))
         } else {
             let needs_instance_id = agent.and_then(|a| a.hook_config.as_ref()).is_some();
+            let resume_remote_codex = pane.tool == "codex"
+                && pane.cross_agent_team
+                && resume_token.is_some()
+                && !(is_primary && self.has_command_override());
+            let permission_agent = agent.filter(|_| !resume_remote_codex);
             // A shared-server pane keeps its own command path even under an
             // override: the override names the binary, but the session, the
             // server and the engine mode still have to reach the pane, and the
@@ -2644,7 +2653,7 @@ impl Instance {
                         env_vars.push(("AOE_INSTANCE_ID", &self.id));
                     }
                     if pane.yolo_mode {
-                        if let Some(ref yolo) = a.yolo {
+                        if let Some(yolo) = permission_agent.and_then(|a| a.yolo.as_ref()) {
                             match yolo {
                                 crate::agents::YoloMode::CliFlag(flag) => {
                                     cmd = format!("{} {}", cmd, flag);
@@ -2655,6 +2664,10 @@ impl Instance {
                                 crate::agents::YoloMode::AlwaysYolo => {}
                             }
                         }
+                    } else if let Some(flag) =
+                        permission_agent.and_then(|a| a.default_permission_flag)
+                    {
+                        cmd = format!("{} {}", cmd, flag);
                     }
                     if pane.cross_agent_team {
                         match pane.tool.as_str() {
@@ -2691,7 +2704,7 @@ impl Instance {
                     env_vars.push(("AOE_INSTANCE_ID", &self.id));
                 }
                 if pane.yolo_mode {
-                    if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
+                    if let Some(yolo) = permission_agent.and_then(|a| a.yolo.as_ref()) {
                         match yolo {
                             crate::agents::YoloMode::CliFlag(flag) => {
                                 cmd = format!("{} {}", cmd, flag);
@@ -2702,6 +2715,9 @@ impl Instance {
                             crate::agents::YoloMode::AlwaysYolo => {}
                         }
                     }
+                } else if let Some(flag) = permission_agent.and_then(|a| a.default_permission_flag)
+                {
+                    cmd = format!("{} {}", cmd, flag);
                 }
                 if pane.cross_agent_team {
                     match pane.tool.as_str() {
@@ -3408,6 +3424,9 @@ impl Instance {
     }
 
     fn respawn_single_pane(&mut self, mode: RestartMode) -> Result<()> {
+        if self.tool == "codex" && self.primary_pane.cross_agent_team {
+            return self.respawn_single_codex(mode);
+        }
         // A fresh restart must not reuse the pre-allocated `--session-id` or re-fork
         // a persisted parent; prepare a new identity, then commit it only if the
         // respawn succeeds (roll back on failure so a phantom id is not persisted).
@@ -3611,6 +3630,8 @@ impl Instance {
                 Some(identity_key.as_str()).filter(|key| !key.is_empty()),
                 Some(slot.model.as_str()).filter(|model| !model.is_empty()),
                 exact_runtime.as_ref(),
+                slot,
+                true,
             );
             // Every Claude pane this fan-out actually relaunched raises its own
             // startup screens, not just the primary one.
@@ -3803,7 +3824,24 @@ impl Instance {
                 Some(identity_key.as_str()).filter(|key| !key.is_empty()),
                 Some(slot.model.as_str()).filter(|model| !model.is_empty()),
                 exact_runtime.as_ref(),
+                slot,
+                false,
             );
+            let outcome = if pane.tool == "codex" && pane.cross_agent_team {
+                match &outcome {
+                    PaneResumeOutcome::Error(original) => {
+                        match store.record_failed_codex_recovery(slot, new_pane) {
+                            Ok(()) => outcome,
+                            Err(error) => PaneResumeOutcome::Error(format!(
+                                "{original}; could not record recovery pane: {error:#}"
+                            )),
+                        }
+                    }
+                    _ => outcome,
+                }
+            } else {
+                outcome
+            };
             if pane.tool == "claude"
                 && pane.cross_agent_team
                 && !matches!(outcome, PaneResumeOutcome::Error(_))
@@ -3825,15 +3863,20 @@ impl Instance {
                     err
                 );
             }
-            if let Err(e) = store.upsert_agent_slot_config(
-                &slot.instance_id,
-                slot.slot,
-                &pane,
-                &native_session_id,
-                new_pane,
-                &identity_key,
-                now,
-            ) {
+            if let Err(e) = (pane.tool != "codex" || !pane.cross_agent_team)
+                .then(|| {
+                    store.upsert_agent_slot_config(
+                        &slot.instance_id,
+                        slot.slot,
+                        &pane,
+                        &native_session_id,
+                        new_pane,
+                        &identity_key,
+                        now,
+                    )
+                })
+                .transpose()
+            {
                 tracing::error!(
                     "Failed to write back tmux_pane for slot {} of '{}': {}",
                     slot.slot,
@@ -3955,6 +3998,7 @@ impl Instance {
     /// nothing.
     fn slot_resume_source(&self, slot: &crate::db::AgentSlot, mode: RestartMode) -> String {
         let stands_in = mode == RestartMode::Resume
+            && (slot.agent != "codex" || !slot.cross_agent_team)
             && slot.slot == 0
             && slot.native_session_id.is_empty()
             && self.pane_runs_instance_tool(&slot.agent);
@@ -4078,8 +4122,12 @@ impl Instance {
     /// pane legitimately still reports the launch wrapper's shell (the
     /// `zsh -lc '... exec ...'` wrapper until `exec` replaces its image).
     pub fn within_start_grace_period(&self) -> bool {
+        self.within_start_grace_period_at(Instant::now())
+    }
+
+    pub(crate) fn within_start_grace_period_at(&self, observed_at: Instant) -> bool {
         self.last_start_time
-            .is_some_and(|start| start.elapsed().as_secs() < 3)
+            .is_some_and(|start| observed_at.saturating_duration_since(start).as_secs() < 3)
     }
 
     pub fn update_status(&mut self) {
@@ -4779,6 +4827,8 @@ impl Instance {
         slot_identity_key: Option<&str>,
         observed_model: Option<&str>,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
+        slot: &crate::db::AgentSlot,
+        live_source: bool,
     ) -> PaneResumeOutcome {
         if let Some(shape) = self.pane_exact_session_runtime(pane) {
             if mode == RestartMode::Resume
@@ -4817,6 +4867,17 @@ impl Instance {
             return PaneResumeOutcome::Error(format!("unsafe or unknown agent '{}'", pane.tool));
         };
 
+        let codex_restart = match codex_restart::CodexRestart::begin(
+            slot,
+            mode,
+            tmux_pane,
+            live_source,
+            &tmux::Session::generate_name(&self.id, &self.title),
+        ) {
+            Ok(restart) => restart,
+            Err(error) => return PaneResumeOutcome::Error(format!("{error:#}")),
+        };
+
         // The process tree is killed outside tmux (an agent's children can
         // outlive the SIGHUP that `respawn-pane -k` alone would send them), and a
         // pane whose remain-on-exit is off is destroyed by tmux the moment that
@@ -4844,7 +4905,20 @@ impl Instance {
             &pane.working_dir,
             !pane_agent_is_shell(&pane.tool),
         ) {
+            if let Some(restart) = codex_restart {
+                if let Err(rollback) = restart.abort() {
+                    return PaneResumeOutcome::Error(format!(
+                        "{err}; Codex restart rollback failed: {rollback:#}"
+                    ));
+                }
+            }
             return PaneResumeOutcome::Error(err.to_string());
+        }
+
+        if let Some(restart) = codex_restart {
+            if let Err(error) = restart.finish() {
+                return PaneResumeOutcome::Error(format!("{error:#}"));
+            }
         }
 
         if resumed {
@@ -6748,7 +6822,24 @@ mod tests {
         assert!(cmd.contains("xats.agent_id="));
         assert!(cmd.contains("/tmp/project path"));
         assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(cmd.contains("--approve-for-me"));
         assert!(!cmd.contains("CROSS_AGENT_TEAMS_MCP_TOKEN"));
+    }
+
+    #[test]
+    fn test_codex_host_launch_permission_follows_yolo() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        inst.sync_primary_pane_from_legacy();
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(cmd.contains("--approve-for-me"), "{cmd}");
+        assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+
+        inst.yolo_mode = true;
+        inst.sync_primary_pane_from_legacy();
+        let cmd = inst.build_agent_command(None).unwrap();
+        assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("--approve-for-me"), "{cmd}");
     }
 
     #[test]
@@ -6761,6 +6852,7 @@ mod tests {
 
         assert!(cmd.contains("pre-register-codex-pane"));
         assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("--approve-for-me"));
     }
 
     #[test]
@@ -6773,6 +6865,52 @@ mod tests {
         assert!(cmd.contains(&format!("resume {token}")));
         assert!(cmd.find("--remote").unwrap() < cmd.find(&format!("resume {token}")).unwrap());
         assert_codex_xats_preregister_shape(&cmd);
+    }
+
+    #[test]
+    fn test_codex_remote_resume_preserves_permissions_for_each_pane() {
+        let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
+        let inst = codex_xats_instance();
+        for is_primary in [true, false] {
+            for yolo in [false, true] {
+                for cross_agent_team in [false, true] {
+                    let pane = PaneConfig::new("codex", "/tmp/test", yolo, cross_agent_team);
+                    let (cmd, resumed) = inst
+                        .build_pane_resume_plan(&pane, token, is_primary, RestartMode::Resume, None)
+                        .unwrap();
+                    assert!(resumed);
+                    assert!(cmd.contains(&format!("resume {token}")), "{cmd}");
+                    assert_eq!(
+                        cmd.contains("--approve-for-me"),
+                        !cross_agent_team && !yolo,
+                        "{cmd}"
+                    );
+                    assert_eq!(
+                        cmd.contains("--dangerously-bypass-approvals-and-sandbox"),
+                        !cross_agent_team && yolo,
+                        "{cmd}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_codex_xats_command_override_keeps_launch_permissions() {
+        let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
+        let mut inst = codex_xats_instance();
+        inst.command = "/opt/codex".to_string();
+        for yolo in [false, true] {
+            inst.primary_pane.yolo_mode = yolo;
+            let cmd = inst.build_agent_command(Some(token)).unwrap();
+            assert!(!cmd.contains(&format!("resume {token}")), "{cmd}");
+            assert_eq!(cmd.contains("--approve-for-me"), !yolo, "{cmd}");
+            assert_eq!(
+                cmd.contains("--dangerously-bypass-approvals-and-sandbox"),
+                yolo,
+                "{cmd}"
+            );
+        }
     }
 
     #[test]

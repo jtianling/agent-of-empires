@@ -1,6 +1,7 @@
 //! Tests for HomeView
 
 mod group_restart;
+mod status_updates;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serial_test::serial;

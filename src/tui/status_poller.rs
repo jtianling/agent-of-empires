@@ -48,6 +48,7 @@ fn polling_tier(status: Status) -> u64 {
 #[derive(Debug)]
 pub struct StatusUpdate {
     pub id: String,
+    pub last_start_time: Option<Instant>,
     pub status: Status,
     pub last_error: Option<String>,
     pub resume_token: Option<String>,
@@ -62,6 +63,8 @@ pub struct StatusUpdate {
 pub struct StatusPoller {
     request_tx: mpsc::Sender<Vec<Instance>>,
     result_rx: mpsc::Receiver<Vec<StatusUpdate>>,
+    #[cfg(test)]
+    result_tx: mpsc::Sender<Vec<StatusUpdate>>,
     _handle: thread::JoinHandle<()>,
 }
 
@@ -70,6 +73,9 @@ impl StatusPoller {
         let (request_tx, request_rx) = mpsc::channel::<Vec<Instance>>();
         let (result_tx, result_rx) = mpsc::channel::<Vec<StatusUpdate>>();
 
+        #[cfg(test)]
+        let test_result_tx = result_tx.clone();
+
         let handle = thread::spawn(move || {
             Self::polling_loop(request_rx, result_tx, profile);
         });
@@ -77,6 +83,8 @@ impl StatusPoller {
         Self {
             request_tx,
             result_rx,
+            #[cfg(test)]
+            result_tx: test_result_tx,
             _handle: handle,
         }
     }
@@ -122,6 +130,9 @@ impl StatusPoller {
 
             if any_pollable {
                 crate::tmux::refresh_session_cache();
+            }
+            let pane_sample_started_at = Instant::now();
+            if any_pollable {
                 crate::tmux::refresh_pane_info_cache();
             }
 
@@ -172,6 +183,7 @@ impl StatusPoller {
                                 next_previous_statuses.insert(inst.id.clone(), Status::Error);
                                 updates.push(StatusUpdate {
                                     id: inst.id,
+                                    last_start_time: inst.last_start_time,
                                     status: Status::Error,
                                     last_error: Some("Container is not running".to_string()),
                                     resume_token: None,
@@ -210,12 +222,17 @@ impl StatusPoller {
                     last_full_check.insert(inst.id.clone(), now);
                 }
 
-                inst.update_status_with_options(StatusUpdateOptions {
-                    allow_capture: !decision.skip_capture,
-                    reused_status: decision
-                        .skip_capture
-                        .then_some(previous_status.unwrap_or(inst.status)),
-                });
+                // A delayed sample taken during launch cannot prove agent exit.
+                if inst.within_start_grace_period_at(pane_sample_started_at) {
+                    inst.status = Status::Starting;
+                } else {
+                    inst.update_status_with_options(StatusUpdateOptions {
+                        allow_capture: !decision.skip_capture,
+                        reused_status: decision
+                            .skip_capture
+                            .then_some(previous_status.unwrap_or(inst.status)),
+                    });
+                }
 
                 // A tracked agent pane running a plain shell is a dead agent
                 // (the pane-died hook's fallback), whatever the content
@@ -271,6 +288,7 @@ impl StatusPoller {
                 next_previous_statuses.insert(inst.id.clone(), inst.status);
                 updates.push(StatusUpdate {
                     id: inst.id,
+                    last_start_time: inst.last_start_time,
                     status: inst.status,
                     last_error: inst.last_error,
                     resume_token,
@@ -299,6 +317,13 @@ impl StatusPoller {
     /// Returns None if no updates are available yet.
     pub fn try_recv_updates(&self) -> Option<Vec<StatusUpdate>> {
         self.result_rx.try_recv().ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_updates(&self, updates: Vec<StatusUpdate>) {
+        self.result_tx
+            .send(updates)
+            .expect("status result receiver");
     }
 }
 
@@ -516,6 +541,24 @@ mod tests {
     #[test]
     fn test_start_grace_window_suppresses_detection() {
         assert!(fallen_agent_error(true, &[obs("%1", "codex", "zsh", false)]).is_none());
+    }
+
+    #[test]
+    fn test_launch_grace_uses_pane_sample_time() {
+        let mut instance = Instance::new("sample-time", "/tmp/sample-time");
+        let start = Instant::now() - Duration::from_secs(4);
+        instance.last_start_time = Some(start);
+        assert!(!instance.within_start_grace_period());
+
+        for seconds in [0, 2, 3, 4] {
+            let sampled_at = start + Duration::from_secs(seconds);
+            let grace = instance.within_start_grace_period_at(sampled_at);
+            let error = fallen_agent_error(grace, &[obs("%1", "codex", "zsh", false)]);
+            assert_eq!(error.is_none(), seconds < 3);
+        }
+        assert!(instance.within_start_grace_period_at(start - Duration::from_secs(1)));
+        instance.last_start_time = None;
+        assert!(!instance.within_start_grace_period_at(start));
     }
 
     // A healthy agent pane (agent binary, or an interpreter like the codex

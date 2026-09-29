@@ -440,6 +440,13 @@ impl HomeView {
         if let Some(updates) = self.status_poller.try_recv_updates() {
             let mut should_save = false;
             for update in updates {
+                let Some(inst) = self.get_instance(&update.id) else {
+                    continue;
+                };
+                // A completed restart invalidates the previous launch's poll.
+                if inst.restart_in_flight || inst.last_start_time != update.last_start_time {
+                    continue;
+                }
                 let old_status = self.get_instance(&update.id).map(|i| i.status);
                 let resume_token = update.resume_token.clone();
 

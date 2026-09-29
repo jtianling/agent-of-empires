@@ -13,6 +13,8 @@
 //! safely.
 
 pub mod claude_transcript;
+mod codex_binding;
+pub(crate) mod codex_capture;
 pub mod codex_rollout;
 pub mod reconcile;
 
@@ -1092,6 +1094,10 @@ impl Store {
     /// again once the instance is gone.
     pub fn delete_slots_for_instance(&self, instance_id: &str) -> Result<()> {
         self.conn.execute(
+            "DELETE FROM codex_binding WHERE instance_id = ?1",
+            [instance_id],
+        )?;
+        self.conn.execute(
             "DELETE FROM agent_slot WHERE instance_id = ?1",
             [instance_id],
         )?;
@@ -1461,6 +1467,18 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             model              TEXT NOT NULL DEFAULT '',
             model_fingerprint  TEXT NOT NULL DEFAULT '',
             last_seen_at       INTEGER NOT NULL,
+            PRIMARY KEY (instance_id, slot)
+        );
+
+        CREATE TABLE IF NOT EXISTS codex_binding (
+            instance_id TEXT NOT NULL,
+            slot INTEGER NOT NULL CHECK (slot >= 0 AND slot <= 3),
+            generation INTEGER NOT NULL,
+            identity_key TEXT NOT NULL,
+            launch_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'verified'
+                CHECK (state IN ('verified', 'restarting', 'awaiting_launch')),
             PRIMARY KEY (instance_id, slot)
         );
 

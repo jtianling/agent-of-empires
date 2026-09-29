@@ -3,8 +3,13 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use tui_input::Input;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::styles::Theme;
+
+#[cfg(test)]
+#[path = "text_input_render_tests.rs"]
+mod render_tests;
 
 /// Finds the longest common prefix among a set of strings.
 pub fn longest_common_prefix(values: &[String]) -> String {
@@ -163,14 +168,25 @@ pub fn render_text_field_with_ghost(
 
     let value = input.value();
 
-    let mut spans = vec![Span::styled(label, label_style), Span::raw(" ")];
+    let label_width = (label.width().saturating_add(1)).min(area.width as usize) as u16;
+    let label_area = Rect {
+        width: label_width,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(Span::styled(label, label_style)), label_area);
+    let value_area = Rect {
+        x: area.x + label_width,
+        width: area.width - label_width,
+        ..area
+    };
+    let mut spans = Vec::new();
 
     if value.is_empty() && !is_focused {
         if let Some(placeholder_text) = placeholder {
             spans.push(Span::styled(placeholder_text, value_style));
         }
     } else if is_focused {
-        let cursor_pos = input.visual_cursor();
+        let cursor_pos = input.cursor();
         let cursor_style = Style::default().fg(theme.background).bg(theme.accent);
 
         // Split value into: before cursor, char at cursor, after cursor
@@ -196,7 +212,21 @@ pub fn render_text_field_with_ghost(
         spans.push(Span::styled(value, value_style));
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let cursor_width = value
+        .chars()
+        .nth(input.cursor())
+        .and_then(UnicodeWidthChar::width)
+        .unwrap_or(1)
+        .max(1);
+    let scroll = if is_focused {
+        input.visual_scroll((value_area.width as usize).saturating_sub(cursor_width))
+    } else {
+        0
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).scroll((0, scroll.min(u16::MAX as usize) as u16)),
+        value_area,
+    );
 }
 
 #[cfg(test)]
