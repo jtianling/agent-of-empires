@@ -148,3 +148,37 @@ fn confirming_commits_the_switch_then_restarts_fresh() {
     assert_eq!(slots[0].xats_identity_key, "key-0");
     assert!(slots[0].native_session_id.is_empty());
 }
+
+#[test]
+#[serial]
+fn dialog_lists_the_identity_of_every_switched_pane() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    env.view.mutate_instance(&id, |inst| {
+        inst.cross_agent_team = true;
+        inst.sync_primary_pane_from_legacy();
+    });
+    let profile = env.view.storage.profile().to_string();
+    let store = crate::db::Store::open_with_schema(&profile).unwrap();
+    store
+        .upsert_agent_slot(&id, 0, "codex", "", "/tmp/0", "%1", "e2e-key-0", 1)
+        .unwrap();
+    store
+        .upsert_agent_slot(&id, 1, "codex", "", "/tmp/0", "%2", "", 1)
+        .unwrap();
+    store
+        .upsert_agent_slot(&id, 2, "shell", "", "/tmp/0", "%3", "", 1)
+        .unwrap();
+
+    env.view.handle_key(key(KeyCode::Char('a')));
+
+    let (dialog, _) = env.view.switch_agent_dialog.as_ref().expect("dialog opens");
+    let slots: Vec<i64> = dialog.identities().iter().map(|(slot, _)| *slot).collect();
+    assert_eq!(slots, vec![0, 1], "only switched panes are listed");
+    assert_eq!(
+        dialog.identities()[1].1,
+        crate::xats_identity::KeyHolder::NotFound,
+        "a pane without a key has no identity to come back as"
+    );
+}

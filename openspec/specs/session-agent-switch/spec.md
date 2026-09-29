@@ -84,3 +84,18 @@ The switch SHALL keep every slot's xats identity key and the instance's own iden
 #### Scenario: Identity key unchanged
 - **WHEN** a Cross Agent Team session with slot 0 identity key `K` is switched from claude to codex
 - **THEN** slot 0 still holds `K` and the codex launch is bootstrapped with `K`
+
+### Requirement: Identity preview before switching
+For a Cross Agent Team session, opening the switch dialog SHALL ask the xats daemon (`POST /api/identity-key/lookup`) who holds the identity key of every pane the switch touches, and the dialog SHALL list, per pane, the identity the new agent will come back as.  A pane whose key no identity holds, a pane without a key, a daemon without the lookup endpoint (HTTP 404), and a failed lookup SHALL each be shown as a warning instead of an identity.  A 404 SHALL NOT be treated as an unheld key.  The lookup SHALL NOT block the switch.
+
+#### Scenario: Held key
+- **WHEN** the daemon reports pane 1's key is held by `mie-main@mie`
+- **THEN** the dialog shows `Pane 1: comes back as mie-main@mie`
+
+#### Scenario: Unheld key
+- **WHEN** the daemon answers `not_found` for pane 2's key
+- **THEN** the dialog warns that no xats identity holds the key and the pane must register again
+
+#### Scenario: Old daemon
+- **WHEN** the daemon answers HTTP 404 for the lookup
+- **THEN** the dialog warns that the daemon is too old to check the identity, and the switch can still be confirmed

@@ -20,3 +20,4 @@ pub mod tmux;
 pub mod tui;
 pub mod update;
 pub mod xats_control;
+pub mod xats_identity;

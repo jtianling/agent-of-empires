@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 
 use super::HomeView;
-use crate::session::Status;
+use crate::session::{Instance, Status};
 use crate::tui::app::PostRestart;
 use crate::tui::dialogs::{InfoDialog, SwitchAgentDialog};
+use crate::xats_identity::KeyHolder;
 
 impl HomeView {
     pub(super) fn open_switch_agent_dialog(&mut self, post: PostRestart) {
@@ -31,8 +32,51 @@ impl HomeView {
             self.info_dialog = Some(InfoDialog::new("Cannot Switch Agent", &message));
             return;
         }
-        let dialog = SwitchAgentDialog::new(&inst.id, &inst.title, &inst.tool);
+        let identities = self.switched_pane_identities(inst);
+        let dialog = SwitchAgentDialog::new(&inst.id, &inst.title, &inst.tool, identities);
         self.switch_agent_dialog = Some((dialog, post));
+    }
+
+    /// What xats identity each pane the switch touches will come back as.
+    ///
+    /// The new agent recovers its identity only through the pane's key, and
+    /// nothing guarantees xats has that key on the identity the pane runs
+    /// today, so the answer is asked of xats rather than assumed.
+    fn switched_pane_identities(&self, inst: &Instance) -> Vec<(i64, KeyHolder)> {
+        if !inst.cross_agent_team {
+            return Vec::new();
+        }
+        let slots = crate::db::Store::open_with_schema(self.storage.profile())
+            .and_then(|store| store.read_slots_for_instance(&inst.id));
+        let keys: Vec<(i64, String)> = match slots {
+            Ok(slots) if !slots.is_empty() => slots
+                .into_iter()
+                .filter(|slot| crate::agents::is_switchable_agent(&slot.agent))
+                .map(|slot| (slot.slot, slot.xats_identity_key))
+                .collect(),
+            Ok(_) => vec![(0, inst.xats_identity_key.clone().unwrap_or_default())],
+            Err(e) => {
+                let error = format!("reading panes failed: {e:#}");
+                return vec![(0, KeyHolder::Unavailable(error))];
+            }
+        };
+        let (with_key, without_key): (Vec<_>, Vec<_>) =
+            keys.into_iter().partition(|(_, key)| !key.is_empty());
+        let holders = crate::xats_identity::lookup_holders(
+            with_key.iter().map(|(_, key)| key.clone()).collect(),
+        );
+        let mut identities: Vec<(i64, KeyHolder)> = with_key
+            .into_iter()
+            .map(|(slot, _)| slot)
+            .zip(holders)
+            .chain(
+                without_key
+                    .into_iter()
+                    .map(|(slot, _)| (slot, KeyHolder::NotFound)),
+            )
+            .collect();
+        identities.sort_by_key(|(slot, _)| *slot);
+        identities
     }
 
     /// Durably hand the session to `target` before any restart runs: the

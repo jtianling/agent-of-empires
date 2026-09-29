@@ -101,11 +101,7 @@ pub(crate) async fn invoke<T: Serialize + ?Sized>(
         .map_err(classify_reqwest_error)?;
     let status = response.status();
     if status != StatusCode::OK {
-        let error = anyhow::anyhow!(
-            "xats REST returned {} error HTTP {}",
-            status_class(status),
-            status
-        );
+        let error = anyhow::Error::new(HttpStatusError(status));
         return if status == StatusCode::SERVICE_UNAVAILABLE {
             Err(ControlFailure::Retryable(error))
         } else {
@@ -138,6 +134,24 @@ pub(crate) async fn invoke<T: Serialize + ?Sized>(
         .context("xats protocol mismatch: invalid JSON response")
         .map_err(ControlFailure::Fatal)
 }
+
+/// A non-200 reply, kept typed so callers can tell an endpoint the daemon does
+/// not have (404) from one that failed.
+#[derive(Debug)]
+pub(crate) struct HttpStatusError(pub(crate) StatusCode);
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "xats REST returned {} error HTTP {}",
+            status_class(self.0),
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
 
 fn classify_reqwest_error(error: anyhow::Error) -> ControlFailure {
     let retryable = error
