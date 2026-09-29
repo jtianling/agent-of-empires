@@ -236,6 +236,9 @@ fn create_session_with_right_pane(
 
     h.wait_for("Right Pane Path");
     h.send_keys("Tab");
+    for _ in 0..128 {
+        h.send_keys("BSpace");
+    }
     h.type_text(right_pane_dir);
     h.send_keys("Enter");
 }

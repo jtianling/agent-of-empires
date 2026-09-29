@@ -202,6 +202,9 @@ pub(super) struct PaneDialogState {
     pub(super) workspace_repo_adding_new: bool,
     pub(super) workspace_repo_ghost: Option<PathGhostCompletion>,
     pub(super) confirm_reuse_worktree: bool,
+    /// Whether editing has started, so an emptied path stays empty instead of
+    /// being refilled from the session path on the next key.
+    path_edited: bool,
     saved_yolo_mode: Option<bool>,
     saved_cross_agent_team: Option<bool>,
 }
@@ -222,6 +225,7 @@ impl PaneDialogState {
             workspace_repo_adding_new: false,
             workspace_repo_ghost: None,
             confirm_reuse_worktree: false,
+            path_edited: false,
             saved_yolo_mode: None,
             saved_cross_agent_team: None,
         }
@@ -1033,7 +1037,14 @@ impl NewSessionDialog {
                         self.primary.path.handle_text_key(key);
                         self.path_user_edited = true;
                     } else if self.focused_field == layout.right_pane_path {
+                        let session_path = self.primary.path.value().to_string();
                         if let Some(pane) = self.secondary.as_mut() {
+                            // Editing starts from the session's directory, not
+                            // from nothing.
+                            if !pane.path_edited && pane.path.value().is_empty() {
+                                pane.path.set_value(session_path);
+                            }
+                            pane.path_edited = true;
                             pane.path.handle_text_key(key);
                         }
                     } else {

@@ -47,6 +47,11 @@ primary Path SHALL 继续作为 session identity 和 group default directory 的
 - **WHEN** secondary Path 和 Worktree 都为空
 - **THEN** right pane SHALL 在 primary pane 的最终 working directory 启动
 
+#### Scenario: 编辑空 Path 从 primary Path 开始
+- **WHEN** secondary Path 为空且用户第一次在该字段按下编辑键
+- **THEN** secondary Path SHALL 先填入 primary Path 当前的值, 再应用这次按键
+- **AND** 用户之后把字段清空, 字段 SHALL 保持为空, 不再被重新填入
+
 #### Scenario: Directory picker 只写 secondary Path
 - **WHEN** 用户在 secondary Path focus 时通过 `Ctrl+P` 选择目录
 - **THEN** 选择结果 SHALL 写入 secondary Path

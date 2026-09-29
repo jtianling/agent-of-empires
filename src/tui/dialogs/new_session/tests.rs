@@ -289,7 +289,40 @@ fn text_input_routes_to_session_and_each_pane() {
     assert_eq!(dialog.title.value(), "t");
     assert_eq!(dialog.group.value(), "g");
     assert!(dialog.primary.path.value().ends_with('p'));
-    assert_eq!(dialog.secondary.as_ref().unwrap().path.value(), "r");
+    let session_path = dialog.primary.path.value().to_string();
+    assert_eq!(
+        dialog.secondary.as_ref().unwrap().path.value(),
+        format!("{session_path}r")
+    );
+}
+
+#[test]
+fn editing_an_empty_right_pane_path_starts_from_the_session_path() {
+    let mut dialog = dialog();
+    let session_path = dialog.primary.path.value().to_string();
+    dialog.set_right_pane_selection(1);
+    dialog.focused_field = dialog.field_layout().right_pane_path;
+
+    dialog.handle_key(key(KeyCode::Backspace));
+
+    let mut expected = session_path.clone();
+    expected.pop();
+    assert_eq!(dialog.secondary.as_ref().unwrap().path.value(), expected);
+}
+
+#[test]
+fn an_emptied_right_pane_path_is_not_refilled() {
+    let mut dialog = dialog();
+    let session_path = dialog.primary.path.value().to_string();
+    dialog.set_right_pane_selection(1);
+    dialog.focused_field = dialog.field_layout().right_pane_path;
+
+    for _ in 0..=session_path.chars().count() {
+        dialog.handle_key(key(KeyCode::Backspace));
+    }
+    dialog.handle_key(key(KeyCode::Char('/')));
+
+    assert_eq!(dialog.secondary.as_ref().unwrap().path.value(), "/");
 }
 
 #[test]

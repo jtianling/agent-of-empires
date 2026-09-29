@@ -234,6 +234,7 @@ fn new_session_persists_independent_pane_launch_config() {
     select_codex_right_pane(&h);
 
     h.send_keys("Tab");
+    clear_focused_text(&h);
     h.type_text(repo.to_str().expect("UTF-8 repository path"));
     h.send_keys("Tab");
     h.send_keys("Tab");
