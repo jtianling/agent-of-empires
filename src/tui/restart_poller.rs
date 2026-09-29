@@ -14,6 +14,8 @@ use std::thread;
 use super::app::{combine_pane_errors, skipped_slot_warning};
 use crate::session::{Instance, PaneResumeOutcome, RestartMode, Status};
 
+mod group;
+
 /// Which restart pipeline the worker runs for a request. Decided at enqueue
 /// time: a live tmux session is respawned in place, a dead one with persisted
 /// slots is cold-start recovered. The worker re-validates the recovery case
@@ -22,6 +24,7 @@ use crate::session::{Instance, PaneResumeOutcome, RestartMode, Status};
 pub enum RestartPath {
     Respawn,
     Recover,
+    Group,
 }
 
 pub struct RestartRequest {
@@ -141,6 +144,7 @@ impl RestartPoller {
         match request.path {
             RestartPath::Respawn => Self::perform_respawn(request),
             RestartPath::Recover => Self::perform_recovery(request),
+            RestartPath::Group => Self::perform_group_restart(request),
         }
     }
 

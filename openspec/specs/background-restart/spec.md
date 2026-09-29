@@ -25,6 +25,36 @@ Pressing lowercase `c` (fresh) or `r` (resume) on a selected session SHALL enque
 - **THEN** both instances SHALL show `Restarting`
 - **AND** the worker SHALL execute the two restarts one after the other, each with the same pipeline semantics as today
 
+### Requirement: 组级批量重启
+
+选中组时按小写 `r` 或 `c`, 系统 SHALL 对当前组及所有子组的非 shell session 分别执行现有的恢复重启或全新重启流程, 并停留在列表.  所有成员 SHALL 先进入后台串行队列, 由 worker 决定原地重启, 按持久化 pane 恢复或启动无 pane 记录的成员, 不得在事件循环执行启动流程.  目标选择 SHALL 不受组折叠状态影响, SHALL 排除 shell session, shell 命令覆盖的 session, 正在删除和已经排队或执行重启的 session.  大写 `R` 和 `C` SHALL 保持仅作用于单个 session 的语义.
+
+#### Scenario: 重启折叠组及其子组
+
+- **WHEN** 用户选中包含 agent 和 shell session 的折叠组并按 `r`
+- **THEN** 系统 SHALL 对该组及所有子组的可操作 agent session 执行恢复重启
+- **AND** 系统 SHALL 保留 shell session, 相似前缀的其他组及当前列表位置
+
+#### Scenario: 清空组内会话上下文后重启
+
+- **WHEN** 用户选中组并按 `c`
+- **THEN** 系统 SHALL 对相同范围内的可操作 agent session 执行全新重启
+- **AND** 系统 SHALL 不自动 attach 到任何 session
+
+#### Scenario: 跳过忙碌成员并继续处理失败之后的成员
+
+- **WHEN** 组内存在正在删除或重启的 session, 或某个成员重启失败
+- **THEN** 系统 SHALL 跳过正在删除或重启的成员, 并继续处理其他可操作成员
+- **AND** 重启失败 SHALL 通过相应 session 的错误状态或 `last_error` 呈现
+- **AND** 没有可操作成员时按键 SHALL 不产生重启任务
+
+#### Scenario: 无持久化 pane 的成员在后台启动
+
+- **WHEN** 组内成员的 tmux session 不存在, 且没有持久化 pane 记录
+- **THEN** worker SHALL 使用正常启动流程处理该成员, 包括启动 hooks 和自动确认
+- **AND** `c` SHALL 使用新的会话身份, 启动失败时 SHALL 回滚预分配身份及原恢复 token
+- **AND** TUI SHALL 在启动期间保持响应, 其他成员 SHALL 保持排队状态
+
 ### Requirement: In-flight restart gates conflicting operations
 
 From the moment a StayOnHome restart is enqueued until its result is applied, the instance SHALL be marked in-flight (`restart_in_flight`) with status `Restarting`, and the home view SHALL reject the following operations for that instance: attach (Enter and number jump), delete (`d`), and any further restart keypress (`c`, `r`, `C`, `R`). Rejected keypresses SHALL be no-ops that do not enqueue, attach, or open dialogs.

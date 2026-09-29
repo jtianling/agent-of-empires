@@ -436,6 +436,13 @@ impl App {
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
             }
+            Action::RestartGroup(ids, mode) => {
+                for id in ids {
+                    self.home
+                        .enqueue_restart(&id, mode, super::restart_poller::RestartPath::Group);
+                }
+                self.needs_redraw = true;
+            }
             Action::RespawnAgentPane(id, mode, post) => {
                 if let Some(inst) = self.home.get_instance(&id).cloned() {
                     // Ignore a second R/r while a multi-pane restart is in flight.
@@ -1253,6 +1260,7 @@ pub enum Action {
     AttachSession(String),
     RespawnAgentPane(String, crate::session::RestartMode, PostRestart),
     RecoverInstance(String, crate::session::RestartMode, PostRestart),
+    RestartGroup(Vec<String>, crate::session::RestartMode),
     SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),

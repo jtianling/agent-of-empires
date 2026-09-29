@@ -1,5 +1,6 @@
 //! Home view - main session list and navigation
 
+mod group_restart;
 mod input;
 mod operations;
 mod render;

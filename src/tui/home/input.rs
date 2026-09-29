@@ -986,6 +986,11 @@ impl HomeView {
         mode: crate::session::RestartMode,
         post: PostRestart,
     ) -> Option<Action> {
+        if post == PostRestart::StayOnHome && self.selected_session.is_none() {
+            let group = self.selected_group.as_deref()?;
+            let ids = super::group_restart::restart_targets(&self.instances, group);
+            return (!ids.is_empty()).then_some(Action::RestartGroup(ids, mode));
+        }
         let id = self.selected_session.as_ref()?;
         if let Some(inst) = self.get_instance(id) {
             if inst.status == Status::Deleting || inst.restart_in_flight {

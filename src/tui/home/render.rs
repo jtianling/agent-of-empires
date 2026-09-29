@@ -559,6 +559,17 @@ impl HomeView {
             ]);
         }
 
+        if self.selected_group.is_some() {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" r", key_style),
+                Span::styled(" Resume group ", desc_style),
+                Span::styled("│", sep_style),
+                Span::styled(" c", key_style),
+                Span::styled(" Clean group ", desc_style),
+            ]);
+        }
+
         if !self.flat_items.is_empty() {
             spans.extend([
                 Span::styled("│", sep_style),

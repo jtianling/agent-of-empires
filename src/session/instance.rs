@@ -1871,6 +1871,17 @@ impl Instance {
         self.start_with_size_opts(size, false)
     }
 
+    pub(crate) fn start_for_restart(&mut self, mode: RestartMode) -> Result<()> {
+        let snapshot = self.begin_fresh_identity(mode);
+        let resume_token = self.resume_token.clone();
+        let result = self.start_with_size(None);
+        self.rollback_fresh_identity_on_failure(snapshot, result.is_ok());
+        if result.is_err() {
+            self.resume_token = resume_token;
+        }
+        result
+    }
+
     /// Start the session, optionally skipping on_launch hooks (e.g. when they
     /// already ran in the background creation poller).
     pub fn start_with_size_opts(
