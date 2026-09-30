@@ -428,8 +428,10 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
         "Codex Wait Title",
         "-c",
         "codex",
+        // Codex appends its permission flag even to an override; `sh -s --`
+        // takes it as a positional argument instead of rejecting it.
         "--cmd-override",
-        "sh",
+        "sh -s --",
     ]);
     assert!(
         add_output.status.success(),

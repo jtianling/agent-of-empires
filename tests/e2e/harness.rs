@@ -403,6 +403,7 @@ last_seen_version = "{}"
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("XATS_IDENTITY_KEY")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -556,6 +557,7 @@ last_seen_version = "{}"
             .env("TERM", "xterm-256color")
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("XATS_IDENTITY_KEY")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir);
 
         if let Some(tmux_env) = tmux_env {
@@ -685,6 +687,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("XATS_IDENTITY_KEY")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
@@ -704,6 +707,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("XATS_IDENTITY_KEY")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TMUX", format!("{},1,0", self.socket_path.display()))
             .output()
@@ -720,6 +724,7 @@ last_seen_version = "{}"
             .env("PATH", self.env_path())
             .env("AGENT_OF_EMPIRES_PROFILE", "default")
             .env_remove("CROSS_AGENT_TEAMS_CODEX_WS_URL")
+            .env_remove("XATS_IDENTITY_KEY")
             .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TMUX", tmux_env)
             .output()

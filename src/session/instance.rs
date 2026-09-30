@@ -4998,9 +4998,9 @@ fn missing_slot_failures(
 /// Recreate one pane per slot and pair each slot with its new pane id in slot
 /// order. Slot 0 is the primary pane the start path already created (read back
 /// from `@aoe_agent_pane`); slots 1..N are split as a chain from the pane
-/// created immediately before them. The chain keeps tmux's pane-list order
-/// aligned with durable slot order, which is how `select-layout` assigns panes
-/// to layout leaves. A slot whose split fails (e.g. a recorded cwd that no
+/// created immediately before them. Slot order need not match the saved
+/// layout's leaf order; applying the layout swaps panes into place. A slot
+/// whose split fails (e.g. a recorded cwd that no
 /// longer exists) is paired with `None` so its siblings still recover instead
 /// of the whole rebuild aborting.
 fn rebuild_recovery_panes(

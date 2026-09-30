@@ -401,7 +401,9 @@ fn percent_adds_a_pane_with_the_chosen_agent_and_directory() {
     let session_name = add_and_start(&h, "Percent", &session_dir, "shell");
     wait_for_pane_count(&h, &session_name, "1");
 
-    h.spawn_tui();
+    // tmux refuses an attach from a client whose $TMUX names this server, so
+    // proving the attach needs a TUI without it.
+    h.spawn_tui_without_tmux_env();
     h.wait_for("Percent");
 
     h.send_keys("%");

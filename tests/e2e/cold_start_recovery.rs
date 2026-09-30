@@ -827,13 +827,14 @@ fn recover_one_pane_failure_does_not_abort_sibling() {
 
     cold_start(&h, &session_name);
 
-    // An agent token with a space is rejected by is_safe_command_token, so
-    // build_pane_resume_command returns None and resume_launch_pane yields an
-    // Error outcome for slot 1 -- a genuine per-pane failure, not a degrade.
+    // A safe but unregistered agent name passes the slot read (an unsafe one is
+    // skipped there and never reaches recovery), but no launch plan can be built
+    // for it, so slot 1 yields an Error outcome -- a genuine per-pane failure,
+    // not a degrade.
     sqlite_query(
         &db,
         &format!(
-            "UPDATE agent_slot SET agent='bad agent' WHERE instance_id='{instance_id}' AND slot=1;"
+            "UPDATE agent_slot SET agent='bogusagent' WHERE instance_id='{instance_id}' AND slot=1;"
         ),
     );
 
@@ -1135,13 +1136,14 @@ fn clean_recover_one_pane_failure_does_not_abort_sibling() {
 
     cold_start(&h, &session_name);
 
-    // An agent token with a space is rejected by is_safe_command_token, so the
-    // pane plan cannot be built and slot 1 yields an Error outcome -- a genuine
-    // per-pane failure, not a degrade.
+    // A safe but unregistered agent name passes the slot read (an unsafe one is
+    // skipped there and never reaches recovery), but no launch plan can be built
+    // for it, so slot 1 yields an Error outcome -- a genuine per-pane failure,
+    // not a degrade.
     sqlite_query(
         &db,
         &format!(
-            "UPDATE agent_slot SET agent='bad agent' WHERE instance_id='{instance_id}' AND slot=1;"
+            "UPDATE agent_slot SET agent='bogusagent' WHERE instance_id='{instance_id}' AND slot=1;"
         ),
     );
 
@@ -1448,11 +1450,10 @@ fn recovery_reports_a_slot_whose_pane_disappears() {
     let db = db_path(&h);
     let project = h.project_path().to_str().unwrap().to_string();
 
-    // Slot 1 is a shell pane adopted next to the agent. Its recorded binary
-    // exits at once here, so the pane closes moments after recovery respawns it
-    // -- surviving its own relaunch, then vanishing.
-    h.install_exiting_tool_stub("shell", 0);
-
+    // Slot 1 is a shell pane adopted next to the agent. A shell slot is
+    // relaunched as a real interactive shell, so the test closes it itself
+    // once recovery has rebuilt it: it survives its own relaunch, then vanishes
+    // inside recovery's settle window.
     let old_panes = seed_tracked_panes(
         &mut h,
         &instance_id,
@@ -1476,6 +1477,8 @@ fn recovery_reports_a_slot_whose_pane_disappears() {
 
     let new_slot0 = wait_for_slot0_rebound(&db, &instance_id, &old_panes[0]);
     assert_ne!(new_slot0, old_panes[0], "recovery did not run");
+    let rebuilt = wait_for_all_slots_rebound(&db, &instance_id, &old_panes);
+    assert!(tmux(&h, &["kill-pane", "-t", &rebuilt[1]]).status.success());
 
     wait_for_count(
         &h,
@@ -1693,9 +1696,12 @@ fn at_relaunched_pane_remain_on_exit_matches_its_own_agent() {
 
     for (i, agent) in agents.iter().enumerate() {
         let pane = &new_panes[i];
+        // A shell slot relaunches as the user's real shell in its own
+        // directory (`'<shell>' -lc 'cd <dir> && ...; exec <shell>'`); the
+        // registry's literal `shell` binary names no program.
         let (needle, want) = match agent.as_str() {
             "claude" => ("claude --resume", "on"),
-            _ => ("shell", "off"),
+            _ => ("&& stty susp undef; exec", "off"),
         };
         wait_for_pane_start_command_contains(&h, pane, needle);
         assert_eq!(

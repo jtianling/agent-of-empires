@@ -275,10 +275,10 @@ fn a_capture_without_a_session_id_writes_no_row() {
 }
 
 /// A `$TMUX_PANE` that checkably belongs to someone else is not recorded.
-/// This is the shared-app-server failure measured live: every Codex session's
-/// hooks inherited the daemon's own `$TMUX_PANE`, so each would have claimed
-/// the daemon's pane -- an unrelated live session -- and recovery acts on
-/// those rows.
+/// Ownership is decided from the capture's own ancestry: a capture running
+/// inside one pane that names another pane of the same server is refused.
+/// A capture outside every pane has no evidence against it and is accepted,
+/// which is why this runs inside a real pane.
 #[test]
 #[serial]
 fn a_pane_that_belongs_to_another_process_is_not_claimed() {
@@ -289,38 +289,43 @@ fn a_pane_that_belongs_to_another_process_is_not_claimed() {
     let title = add_and_start(&h, "Capture Foreign Pane");
     let db = db_path(&h);
 
-    // A real pane of the managed session, named from OUTSIDE it: the capture
-    // can reach the harness server, resolve the pane's root process, and see
-    // that this process is no descendant of it.
     let instance_id = instance_id_from_sessions_json(&h);
     let session_name = agent_of_empires::tmux::Session::generate_name(&instance_id, &title);
-    let pane_id = h.tmux_display_message(&session_name, "#{pane_id}");
+    let own_pane = h.tmux_display_message(&session_name, "#{pane_id}");
+    let foreign_pane = h.split_window_get_pane(&session_name);
 
-    let stdin_json = r#"{"session_id":"stolen-sess","cwd":"/work"}"#;
-    let mut cmd = Command::new(h.binary_path());
-    cmd.arg("__record-pane")
-        .env_remove("TMUX")
-        .env("TMUX_TMPDIR", h.tmux_tmpdir())
-        .env("HOME", h.home_path())
-        .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
-        .env("AGENT_OF_EMPIRES_PROFILE", "default")
-        .env("TMUX_PANE", &pane_id)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn record-pane");
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(stdin_json.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "a refused capture still exits 0");
+    let capture = |session_id: &str, pane_env: &str| {
+        format!(
+            "printf '%s' \"{{\\\"session_id\\\":\\\"{session_id}\\\",\\\"cwd\\\":\\\"/work\\\"}}\" | \
+             {pane_env}HOME={home} XDG_CONFIG_HOME={home}/.config \
+             AGENT_OF_EMPIRES_PROFILE=default {bin} __record-pane",
+            home = h.home_path().display(),
+            bin = h.binary_path().display(),
+        )
+    };
+    // Inside the own pane, first naming the foreign pane, then a legitimate
+    // capture that proves the command line really ran.
+    h.send_keys_to_session(
+        &session_name,
+        &format!(
+            "{}; {}",
+            capture("stolen-sess", &format!("TMUX_PANE={foreign_pane} ")),
+            capture("barrier-sess", "")
+        ),
+    );
+    wait_for_count(
+        &h,
+        &db,
+        &format!(
+            "SELECT count(*) FROM pane_live WHERE tmux_pane='{own_pane}' \
+             AND native_session_id='barrier-sess';"
+        ),
+        "1",
+    );
 
     let count = sqlite_query(
         &db,
-        &format!("SELECT count(*) FROM pane_live WHERE tmux_pane='{pane_id}';"),
+        &format!("SELECT count(*) FROM pane_live WHERE tmux_pane='{foreign_pane}';"),
     );
     assert_eq!(
         count, "0",

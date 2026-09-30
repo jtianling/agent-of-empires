@@ -752,7 +752,28 @@ pub fn session_window_layout(session_name: &str) -> Result<String> {
 
 /// Apply a serialized layout to the session's active window. The layout is
 /// passed as one argv value, never through a shell.
+/// Apply a serialized window layout so each pane lands in the leaf that names
+/// it. `select-layout` fills leaves in pane-list order and ignores the ids in
+/// the layout, so the panes are first swapped into leaf order.
 pub fn apply_window_layout(session_name: &str, layout: &str) -> Result<()> {
+    let leaves = super::layout::pane_ids(layout)?;
+    for (index, wanted) in leaves.iter().enumerate() {
+        let panes = crate::db::reconcile::live_session_pane_ids(session_name)?;
+        let Some(current) = panes.get(index).filter(|current| *current != wanted) else {
+            continue;
+        };
+        let output = crate::tmux::tmux_command()
+            .args(["swap-pane", "-d", "-s", wanted, "-t", current])
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "Failed to move pane {} into layout position {}: {}",
+                wanted,
+                index,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
     let output = crate::tmux::tmux_command()
         .args(["select-layout", "-t", session_name, layout])
         .output()?;
