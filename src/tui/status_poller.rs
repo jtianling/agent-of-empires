@@ -338,6 +338,10 @@ struct TrackedPaneObservation<'a> {
     recorded_agent: &'a str,
     /// The pane's live `#{pane_current_command}` from the batch pane query.
     live_command: &'a str,
+    /// The pane's `#{pane_start_command}`: the launch command while the agent
+    /// (or its bootstrap wrapper) owns the pane, a bare shell once the
+    /// pane-died hook has respawned it.
+    start_command: &'a str,
     /// A shell is this pane's correct state (a command override resolving to
     /// a shell); recorded shell agents are exempt via `recorded_agent`.
     shell_expected: bool,
@@ -361,6 +365,7 @@ fn fallen_agent_error(
             !pane.shell_expected
                 && !pane_agent_is_shell(pane.recorded_agent)
                 && crate::tmux::utils::is_shell_command(pane.live_command)
+                && crate::tmux::utils::respawned_into_shell(pane.start_command)
         })
         .map(|pane| pane.pane)
         .collect();
@@ -401,6 +406,7 @@ fn detect_fallen_agent(
                 pane: &info.pane_id,
                 recorded_agent: &inst.tool,
                 live_command: &info.current_command,
+                start_command: &info.start_command,
                 shell_expected: inst.expects_shell(),
             });
         }
@@ -419,6 +425,7 @@ fn detect_fallen_agent(
                 pane: &info.pane_id,
                 recorded_agent: &slot.agent,
                 live_command: &info.current_command,
+                start_command: &info.start_command,
                 shell_expected: slot.slot == 0 && inst.expects_shell(),
             });
         }
@@ -473,8 +480,20 @@ mod tests {
             pane,
             recorded_agent,
             live_command,
+            start_command: "/bin/zsh",
             shell_expected,
         }
+    }
+
+    // A launch wrapper still bootstrapping the agent reports a shell too, but
+    // it has not been respawned by the pane-died hook.
+    #[test]
+    fn a_bootstrapping_launch_wrapper_is_not_fallen() {
+        let bootstrapping = TrackedPaneObservation {
+            start_command: "\"AOE_INSTANCE_ID='x' /bin/zsh -lc 'exec codex'\"",
+            ..obs("%5", "codex", "zsh", false)
+        };
+        assert!(fallen_agent_error(false, &[bootstrapping]).is_none());
     }
 
     // Scenario: fallen codex pane surfaces as an error naming the pane and

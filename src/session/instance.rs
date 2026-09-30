@@ -4277,8 +4277,12 @@ impl Instance {
             // claude must surface as `Idle`, not be rewritten to `Unknown`
             // by the shell-tool heuristic.
             let is_single_pane = session.pane_count() <= 1;
-            let is_shell_stale =
-                || is_single_pane && !self.expects_shell() && session.is_pane_running_shell();
+            let is_shell_stale = || {
+                is_single_pane
+                    && !self.expects_shell()
+                    && session.is_pane_running_shell()
+                    && session.is_pane_respawned_into_shell()
+            };
             detected = match detected {
                 Status::Idle if inner_agent.is_some() => {
                     if session.is_pane_dead() {

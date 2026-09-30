@@ -45,5 +45,6 @@ mod restart_fallen_support;
 mod right_pane_cwd;
 mod sandbox;
 mod session_rename;
+mod slow_bootstrap;
 mod tui_launch;
 mod xats_identity;

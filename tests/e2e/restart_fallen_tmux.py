@@ -19,7 +19,7 @@ if args[:3] == ["list-panes", "-a", "-F"] and "pane_current_command" in args[-1]
     if (root / "arm").exists() and parent.strip() == __BINARY__:
         rows = [line.split("\t") for line in result.stdout.decode().splitlines()]
         wanted = (root / "arm").read_text().splitlines()
-        fallen = {row[2] for row in rows if len(row) == 7 and row[4] in
+        fallen = {row[2] for row in rows if len(row) >= 7 and row[4] in
                   ("sh", "bash", "zsh", "fish", "dash") and row[5] == "0"}
         if set(wanted).issubset(fallen):
             try:

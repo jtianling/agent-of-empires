@@ -208,6 +208,8 @@ pub struct PaneInfo {
     pub current_command: String,
     pub is_dead: bool,
     pub pane_pid: Option<u32>,
+    /// `#{pane_start_command}`: what the pane was (re)spawned with.
+    pub start_command: String,
 }
 
 pub fn refresh_session_cache() {
@@ -236,7 +238,7 @@ pub fn refresh_pane_info_cache() {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_index}\t#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}",
+            "#{session_name}\t#{pane_index}\t#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_start_command}",
         ])
         .output();
 
@@ -500,7 +502,7 @@ fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, Vec<PaneInfo>>
     let mut panes_by_session: HashMap<String, Vec<PaneInfo>> = HashMap::new();
 
     for line in stdout.lines() {
-        let mut parts = line.splitn(7, '\t');
+        let mut parts = line.splitn(8, '\t');
         let Some(session_name) = parts.next() else {
             continue;
         };
@@ -527,6 +529,8 @@ fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, Vec<PaneInfo>>
             continue;
         };
 
+        // Last and unsplit: a start command may itself contain tabs.
+        let start_command = parts.next().unwrap_or_default().to_string();
         let pane_index = pane_index_str.parse().unwrap_or(u32::MAX);
         let info = PaneInfo {
             pane_index,
@@ -535,6 +539,7 @@ fn parse_pane_info_cache_output(output: &[u8]) -> HashMap<String, Vec<PaneInfo>>
             current_command: current_command.to_string(),
             is_dead: is_dead.trim() == "1",
             pane_pid: pane_pid.trim().parse().ok(),
+            start_command,
         };
 
         panes_by_session
@@ -709,8 +714,20 @@ mod tests {
                 current_command: "codex".to_string(),
                 is_dead: false,
                 pane_pid: Some(101),
+                start_command: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn test_parse_pane_info_cache_output_keeps_the_start_command_whole() {
+        let parsed = parse_pane_info_cache_output(
+            b"aoe_alpha\t0\t%1\ttitle\tzsh\t0\t101\t/bin/zsh -lc 'a\tb'\n",
+        );
+
+        let pane = &parsed.get("aoe_alpha").unwrap()[0];
+        assert_eq!(pane.pane_pid, Some(101));
+        assert_eq!(pane.start_command, "/bin/zsh -lc 'a\tb'");
     }
 
     #[test]
@@ -730,6 +747,7 @@ mod tests {
                 current_command: "codex".to_string(),
                 is_dead: false,
                 pane_pid: Some(200),
+                start_command: String::new(),
             }
         );
         assert_eq!(
@@ -741,6 +759,7 @@ mod tests {
                 current_command: "bash".to_string(),
                 is_dead: false,
                 pane_pid: Some(300),
+                start_command: String::new(),
             }
         );
     }

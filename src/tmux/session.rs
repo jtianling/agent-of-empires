@@ -116,6 +116,15 @@ impl Session {
             .unwrap_or_else(|| is_pane_running_shell(&self.name))
     }
 
+    /// Whether the pane was respawned into a bare shell by the pane-died hook,
+    /// as opposed to still running its launch command. Without cached pane
+    /// info this cannot be told apart, so it answers `true`.
+    pub fn is_pane_respawned_into_shell(&self) -> bool {
+        get_cached_pane_info(&self.name).map_or(true, |info| {
+            super::utils::respawned_into_shell(&info.start_command)
+        })
+    }
+
     pub fn kill(&self) -> Result<()> {
         if !self.exists() {
             return Ok(());

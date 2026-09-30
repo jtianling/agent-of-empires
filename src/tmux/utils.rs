@@ -949,6 +949,16 @@ pub(crate) fn is_shell_command(cmd: &str) -> bool {
     KNOWN_SHELLS.contains(&basename)
 }
 
+/// Whether a pane was respawned by the pane-died hook, which relaunches it as
+/// the bare user shell. A launch wrapper (`zsh -lc '...'`) also shows a shell
+/// while it bootstraps the agent, but still carries the launch command, so a
+/// slow bootstrap is not mistaken for an agent that exited. An empty start
+/// command is a pane spawned with tmux's default shell.
+pub(crate) fn respawned_into_shell(start_command: &str) -> bool {
+    let command = start_command.trim().trim_matches('"').trim();
+    command.is_empty() || (!command.contains(char::is_whitespace) && is_shell_command(command))
+}
+
 pub fn is_pane_running_shell(session_name: &str) -> bool {
     pane_current_command(session_name)
         .map(|cmd| is_shell_command(&cmd))
@@ -965,6 +975,15 @@ mod tests {
 
     fn setup_test_home(temp: &TempDir) -> crate::session::TestHomeGuard {
         crate::session::scoped_test_home(temp.path())
+    }
+
+    #[test]
+    fn only_a_bare_shell_start_command_counts_as_respawned() {
+        assert!(respawned_into_shell("/bin/zsh"));
+        assert!(respawned_into_shell("\"/bin/zsh\""));
+        assert!(respawned_into_shell(""));
+        assert!(!respawned_into_shell("/bin/zsh -lc 'exec codex'"));
+        assert!(!respawned_into_shell("codex"));
     }
 
     fn tmux_available() -> bool {
