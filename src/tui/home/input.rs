@@ -309,14 +309,9 @@ impl HomeView {
                 DialogResult::Cancel => {
                     self.switch_agent_dialog = None;
                 }
-                DialogResult::Submit(target) => {
+                DialogResult::Submit(choices) => {
                     self.switch_agent_dialog = None;
-                    if let Err(e) = self.commit_agent_switch(&id, &target) {
-                        tracing::error!("Failed to switch '{}' to {}: {}", id, target, e);
-                        self.set_instance_error(&id, Some(format!("Agent switch failed: {e}")));
-                        return None;
-                    }
-                    return self.restart_action_for(&id, crate::session::RestartMode::Fresh, post);
+                    return self.commit_agent_switches(&id, &choices, post);
                 }
             }
             return None;
@@ -956,7 +951,7 @@ impl HomeView {
         self.restart_action_for(id, mode, post)
     }
 
-    fn restart_action_for(
+    pub(super) fn restart_action_for(
         &self,
         id: &str,
         mode: crate::session::RestartMode,

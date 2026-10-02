@@ -1,5 +1,7 @@
 //! tmux utility functions
 
+use std::collections::HashMap;
+
 use crate::session::{
     config::{load_config, SortOrder},
     expanded_groups, flatten_tree, Group, GroupTree, Instance, Item,
@@ -867,6 +869,39 @@ pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
     }
 }
 
+/// Top-left corner (`pane_left`, `pane_top`) of every pane in a session, keyed
+/// by pane id. Empty when the session cannot be listed.
+pub fn pane_positions(session_name: &str) -> HashMap<String, (u32, u32)> {
+    let output = crate::tmux::tmux_command()
+        .args([
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_id}\t#{pane_left}\t#{pane_top}",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            parse_pane_positions(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => HashMap::new(),
+    }
+}
+
+fn parse_pane_positions(output: &str) -> HashMap<String, (u32, u32)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let pane = parts.next()?;
+            let left = parts.next()?.parse().ok()?;
+            let top = parts.next()?.parse().ok()?;
+            Some((pane.to_string(), (left, top)))
+        })
+        .collect()
+}
+
 /// Pin `@aoe_agent_pane` for a session to an explicit pane id. Used by cold-start
 /// recovery to re-pin the rebuilt slot-0 pane so the reconciler and the `R`
 /// resume-all flow keep operating on the recovered session.
@@ -972,6 +1007,14 @@ mod tests {
     use serial_test::serial;
     use std::cell::{Cell, RefCell};
     use tempfile::TempDir;
+
+    #[test]
+    fn pane_positions_parse_skips_malformed_lines() {
+        let parsed = parse_pane_positions("%1\t0\t0\n%2\t81\t0\nbad\n%3\tx\t0\n");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["%1"], (0, 0));
+        assert_eq!(parsed["%2"], (81, 0));
+    }
 
     fn setup_test_home(temp: &TempDir) -> crate::session::TestHomeGuard {
         crate::session::scoped_test_home(temp.path())

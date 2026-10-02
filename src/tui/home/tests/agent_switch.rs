@@ -151,7 +151,7 @@ fn confirming_commits_the_switch_then_restarts_fresh() {
 
 #[test]
 #[serial]
-fn dialog_lists_the_identity_of_every_switched_pane() {
+fn dialog_lists_each_switchable_pane_with_its_identity() {
     crate::tmux::isolate_tmux_socket();
     let mut env = create_test_env_with_sessions(1);
     let id = env.view.instances[0].id.clone();
@@ -162,10 +162,7 @@ fn dialog_lists_the_identity_of_every_switched_pane() {
     let profile = env.view.storage.profile().to_string();
     let store = crate::db::Store::open_with_schema(&profile).unwrap();
     store
-        .upsert_agent_slot(&id, 0, "codex", "", "/tmp/0", "%1", "e2e-key-0", 1)
-        .unwrap();
-    store
-        .upsert_agent_slot(&id, 1, "codex", "", "/tmp/0", "%2", "", 1)
+        .upsert_agent_slot(&id, 0, "codex", "", "/tmp/0", "%1", "", 1)
         .unwrap();
     store
         .upsert_agent_slot(&id, 2, "shell", "", "/tmp/0", "%3", "", 1)
@@ -174,11 +171,98 @@ fn dialog_lists_the_identity_of_every_switched_pane() {
     env.view.handle_key(key(KeyCode::Char('a')));
 
     let (dialog, _) = env.view.switch_agent_dialog.as_ref().expect("dialog opens");
-    let slots: Vec<i64> = dialog.identities().iter().map(|(slot, _)| *slot).collect();
-    assert_eq!(slots, vec![0, 1], "only switched panes are listed");
+    let slots: Vec<i64> = dialog.panes().iter().map(|pane| pane.slot).collect();
+    assert_eq!(slots, vec![0], "only switchable panes are listed");
     assert_eq!(
-        dialog.identities()[1].1,
-        crate::xats_identity::KeyHolder::NotFound,
+        dialog.panes()[0].identity,
+        Some(crate::xats_identity::KeyHolder::NotFound),
         "a pane without a key has no identity to come back as"
     );
+}
+
+#[test]
+#[serial]
+fn stopped_split_session_refuses_instead_of_restarting_every_pane() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    let profile = env.view.storage.profile().to_string();
+    let store = crate::db::Store::open_with_schema(&profile).unwrap();
+    store
+        .upsert_agent_slot(&id, 0, "claude", "", "/tmp/0", "%1", "", 1)
+        .unwrap();
+    store
+        .upsert_agent_slot(&id, 1, "codex", "", "/tmp/0", "%2", "", 1)
+        .unwrap();
+
+    env.view.handle_key(key(KeyCode::Char('a')));
+
+    assert!(env.view.switch_agent_dialog.is_none());
+    assert!(env.view.info_dialog.is_some());
+}
+
+#[test]
+#[serial]
+fn switching_the_right_pane_leaves_the_left_and_the_session_alone() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    let profile = env.view.storage.profile().to_string();
+    let store = crate::db::Store::open_with_schema(&profile).unwrap();
+    store
+        .upsert_agent_slot(&id, 0, "claude", "sess-0", "/tmp/0", "%1", "key-0", 1)
+        .unwrap();
+    store
+        .upsert_agent_slot(&id, 1, "claude", "sess-1", "/tmp/0", "%2", "key-1", 1)
+        .unwrap();
+    let before = env.view.get_instance(&id).unwrap().clone();
+
+    env.view.commit_agent_switch(&id, 1, "codex").unwrap();
+
+    let inst = env.view.get_instance(&id).unwrap();
+    assert_eq!(inst.tool, before.tool);
+    assert_eq!(inst.command, before.command);
+    assert_eq!(inst.agent_session_id, before.agent_session_id);
+    let slots = store.read_slots_for_instance(&id).unwrap();
+    assert_eq!(slots[0].agent, "claude");
+    assert_eq!(slots[0].native_session_id, "sess-0");
+    assert_eq!(slots[1].agent, "codex");
+    assert_eq!(slots[1].xats_identity_key, "key-1");
+    assert!(slots[1].native_session_id.is_empty());
+}
+
+#[test]
+#[serial]
+fn switching_both_panes_commits_each_to_its_own_target() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    let profile = env.view.storage.profile().to_string();
+    let store = crate::db::Store::open_with_schema(&profile).unwrap();
+    store
+        .upsert_agent_slot(&id, 0, "claude", "sess-0", "/tmp/0", "%1", "key-0", 1)
+        .unwrap();
+    store
+        .upsert_agent_slot(&id, 1, "codex", "sess-1", "/tmp/0", "%2", "key-1", 1)
+        .unwrap();
+    let choices = [
+        crate::tui::dialogs::SwitchChoice {
+            slot: 0,
+            target: "codex".to_string(),
+        },
+        crate::tui::dialogs::SwitchChoice {
+            slot: 1,
+            target: "claude".to_string(),
+        },
+    ];
+
+    env.view
+        .commit_agent_switches(&id, &choices, PostRestart::StayOnHome);
+
+    assert_eq!(env.view.get_instance(&id).unwrap().tool, "codex");
+    let slots = store.read_slots_for_instance(&id).unwrap();
+    assert_eq!(slots[0].agent, "codex");
+    assert_eq!(slots[1].agent, "claude");
+    assert!(slots.iter().all(|slot| slot.native_session_id.is_empty()));
+    assert_eq!(slots[1].xats_identity_key, "key-1");
 }

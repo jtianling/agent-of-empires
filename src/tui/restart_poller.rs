@@ -45,6 +45,37 @@ pub struct RestartRequest {
     pub prev_status: Status,
     /// What a `Start` launches; `None` for every other path.
     pub start: Option<StartRequest>,
+    /// The panes (by slot) a `Respawn` restarts; `None` restarts them all.
+    pub only_slots: Option<Vec<i64>>,
+}
+
+/// Narrow a restart to the panes it targets. A targeted pane that is not
+/// tracked is an error rather than a reason to restart its siblings.
+pub fn narrow_to_slots(
+    slots: Vec<crate::db::AgentSlot>,
+    only_slots: Option<&[i64]>,
+) -> Result<Vec<crate::db::AgentSlot>, String> {
+    let Some(only) = only_slots else {
+        return Ok(slots);
+    };
+    // Untracked panes fall back to the primary-pane restart, which is only
+    // the targeted pane when the primary one is all that is targeted.
+    if slots.is_empty() && only == [0] {
+        return Ok(slots);
+    }
+    if let Some(missing) = only
+        .iter()
+        .find(|&&wanted| !slots.iter().any(|slot| slot.slot == wanted))
+    {
+        return Err(format!(
+            "Pane {} is no longer tracked; nothing restarted",
+            missing + 1
+        ));
+    }
+    Ok(slots
+        .into_iter()
+        .filter(|slot| only.contains(&slot.slot))
+        .collect())
 }
 
 /// Identity fields the restart pipeline mutates on the worker's clone.
@@ -164,6 +195,7 @@ impl RestartPoller {
             mut instance,
             profile,
             mode,
+            only_slots,
             ..
         } = request;
 
@@ -186,6 +218,18 @@ impl RestartPoller {
                         "Could not read tracked panes: {e}; restarted primary pane only"
                     )),
                 )
+            }
+        };
+
+        let slots = match narrow_to_slots(slots, only_slots.as_deref()) {
+            Ok(slots) => slots,
+            Err(e) => {
+                return RestartResult {
+                    session_id,
+                    identity: None,
+                    last_error: Some(Some(e)),
+                    status: instance.status,
+                };
             }
         };
 
@@ -393,7 +437,44 @@ mod tests {
             path: RestartPath::Respawn,
             prev_status: Status::Idle,
             start: None,
+            only_slots: None,
         }
+    }
+
+    fn slot(slot: i64) -> crate::db::AgentSlot {
+        crate::db::AgentSlot {
+            instance_id: "inst".to_string(),
+            slot,
+            agent: "claude".to_string(),
+            native_session_id: String::new(),
+            cwd: "/w".to_string(),
+            tmux_pane: format!("%{slot}"),
+            xats_identity_key: String::new(),
+            xats_runtime_generation: 0,
+            yolo_mode: false,
+            cross_agent_team: false,
+            worktree_info: None,
+            model: String::new(),
+            model_fingerprint: String::new(),
+            last_seen_at: 0,
+        }
+    }
+
+    #[test]
+    fn narrowing_keeps_only_the_targeted_pane() {
+        let slots = |n: &[i64]| n.iter().map(|&n| slot(n)).collect::<Vec<_>>();
+        let kept = |r: Result<Vec<crate::db::AgentSlot>, String>| {
+            r.unwrap().iter().map(|s| s.slot).collect::<Vec<_>>()
+        };
+        assert_eq!(kept(narrow_to_slots(slots(&[0, 1]), None)), vec![0, 1]);
+        assert_eq!(kept(narrow_to_slots(slots(&[0, 1]), Some(&[1]))), vec![1]);
+        assert_eq!(
+            kept(narrow_to_slots(slots(&[0, 1, 2]), Some(&[0, 2]))),
+            vec![0, 2]
+        );
+        assert!(kept(narrow_to_slots(Vec::new(), Some(&[0]))).is_empty());
+        assert!(narrow_to_slots(Vec::new(), Some(&[1])).is_err());
+        assert!(narrow_to_slots(slots(&[0]), Some(&[0, 1])).is_err());
     }
 
     #[test]

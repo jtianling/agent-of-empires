@@ -449,137 +449,11 @@ impl App {
                 self.needs_redraw = true;
             }
             Action::RespawnAgentPane(id, mode, post) => {
-                if let Some(inst) = self.home.get_instance(&id).cloned() {
-                    // Ignore a second R/r while a multi-pane restart is in flight.
-                    if inst.restart_in_flight {
-                        return Ok(());
-                    }
-
-                    let tmux_session = match inst.tmux_session() {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!("Failed to get tmux session: {}", e);
-                            return Ok(());
-                        }
-                    };
-
-                    if !tmux_session.exists() {
-                        return match post {
-                            PostRestart::Attach => self.attach_session(&id, terminal),
-                            // Nothing to respawn: bring the session up the normal
-                            // way, but leave the user on the list.
-                            PostRestart::StayOnHome => self.start_session(&id, post, terminal),
-                        };
-                    }
-
-                    // StayOnHome runs the whole respawn pipeline on the
-                    // background worker; the event loop only parks the
-                    // instance in Restarting. Attach stays synchronous:
-                    // auto-confirm must finish before the attach.
-                    if post == PostRestart::StayOnHome {
-                        self.home.enqueue_restart(
-                            &id,
-                            mode,
-                            super::restart_poller::RestartPath::Respawn,
-                        );
-                        self.needs_redraw = true;
-                        return Ok(());
-                    }
-
-                    let profile = self.home.storage.profile().to_string();
-                    // Distinguish "no tracked panes" from "could not read the
-                    // store". A read failure is not an empty slot set: degrade to
-                    // a primary-pane restart but surface the failure instead of
-                    // silently narrowing the restart scope.
-                    let (slots, slot_read_error) =
-                        match crate::db::Store::open_with_schema(&profile)
-                            .and_then(|store| store.read_slots_for_instance_with_diagnostics(&id))
-                        {
-                            Ok(read) => {
-                                let warning = skipped_slot_warning(read.skipped);
-                                (read.slots, warning)
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to read agent slots for '{}': {}", id, e);
-                                (
-                                    Vec::new(),
-                                    Some(format!(
-                                    "Could not read tracked panes: {e}; restarted primary pane only"
-                                )),
-                                )
-                            }
-                        };
-
-                    if slots.is_empty() {
-                        // No tracked panes (or unreadable store): restart the
-                        // primary @aoe_agent_pane with the single-pane behavior.
-                        let mut respawn_result = Ok(());
-                        self.home.mutate_instance(&id, |inst| {
-                            respawn_result = match mode {
-                                crate::session::RestartMode::Resume => inst.respawn_agent_pane(),
-                                crate::session::RestartMode::Fresh => {
-                                    inst.respawn_agent_pane_fresh()
-                                }
-                            };
-                        });
-
-                        if let Err(e) = respawn_result {
-                            tracing::error!("Failed to respawn agent pane: {}", e);
-                            self.home.set_instance_error(&id, Some(e.to_string()));
-                            self.home
-                                .set_instance_status(&id, crate::session::Status::Error);
-                            return Ok(());
-                        }
-                        self.home.set_instance_error(&id, slot_read_error);
-                    } else {
-                        // Fan out to every tracked pane, each resumed from its
-                        // own persisted native_session_id. Per-pane failures are
-                        // recorded but do not abort sibling restarts.
-                        let mut slots = slots;
-                        let mut identity_origins = std::collections::HashMap::new();
-                        if let (Some(inst), Ok(store)) = (
-                            self.home.get_instance(&id),
-                            crate::db::Store::open_with_schema(&profile),
-                        ) {
-                            identity_origins = inst.ensure_slot_identity_keys(&store, &mut slots);
-                        }
-
-                        let mut outcomes = Vec::new();
-                        self.home.mutate_instance(&id, |inst| {
-                            inst.restart_in_flight = true;
-                            outcomes =
-                                inst.resume_all_tracked_panes(&slots, mode, &identity_origins);
-                            inst.restart_in_flight = false;
-                        });
-
-                        let errors: Vec<String> = outcomes
-                            .iter()
-                            .filter_map(|o| match o {
-                                crate::session::PaneResumeOutcome::Error(e) => Some(e.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        let restart_error = (!errors.is_empty()).then(|| {
-                            format!(
-                                "{} pane(s) failed to restart: {}",
-                                errors.len(),
-                                errors.join("; ")
-                            )
-                        });
-                        self.home.set_instance_error(
-                            &id,
-                            combine_pane_errors(slot_read_error, restart_error),
-                        );
-                    }
-
-                    if let Err(err) = self.home.save() {
-                        tracing::error!("Failed to save after respawning agent pane: {}", err);
-                    }
-                    crate::tmux::refresh_session_cache();
-
-                    // Auto-attach so the user sees the restarted agent immediately
-                    self.attach_session(&id, terminal)?;
-                }
+                self.respawn_agent_pane(id, mode, post, None, terminal)?;
+            }
+            Action::RespawnSlots(id, slots, post) => {
+                let mode = crate::session::RestartMode::Fresh;
+                self.respawn_agent_pane(id, mode, post, Some(slots), terminal)?;
             }
             Action::RecoverInstance(id, mode, post) => match post {
                 PostRestart::Attach => self.recover_instance(&id, mode, terminal)?,
@@ -623,6 +497,148 @@ impl App {
             Action::SetTheme(name) => {
                 self.set_theme(&name);
             }
+        }
+        Ok(())
+    }
+
+    /// Respawn the agent panes of a running session: every tracked pane, or
+    /// only `only_slots` when the restart targets some of them.
+    fn respawn_agent_pane(
+        &mut self,
+        id: String,
+        mode: crate::session::RestartMode,
+        post: PostRestart,
+        only_slots: Option<Vec<i64>>,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        if let Some(inst) = self.home.get_instance(&id).cloned() {
+            // Ignore a second R/r while a multi-pane restart is in flight.
+            if inst.restart_in_flight {
+                return Ok(());
+            }
+
+            let tmux_session = match inst.tmux_session() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to get tmux session: {}", e);
+                    return Ok(());
+                }
+            };
+
+            if !tmux_session.exists() {
+                return match post {
+                    PostRestart::Attach => self.attach_session(&id, terminal),
+                    // Nothing to respawn: bring the session up the normal
+                    // way, but leave the user on the list.
+                    PostRestart::StayOnHome => self.start_session(&id, post, terminal),
+                };
+            }
+
+            // StayOnHome runs the whole respawn pipeline on the
+            // background worker; the event loop only parks the
+            // instance in Restarting. Attach stays synchronous:
+            // auto-confirm must finish before the attach.
+            if post == PostRestart::StayOnHome {
+                self.home.enqueue_respawn(&id, mode, only_slots);
+                self.needs_redraw = true;
+                return Ok(());
+            }
+
+            let profile = self.home.storage.profile().to_string();
+            // Distinguish "no tracked panes" from "could not read the
+            // store". A read failure is not an empty slot set: degrade to
+            // a primary-pane restart but surface the failure instead of
+            // silently narrowing the restart scope.
+            let (slots, slot_read_error) = match crate::db::Store::open_with_schema(&profile)
+                .and_then(|store| store.read_slots_for_instance_with_diagnostics(&id))
+            {
+                Ok(read) => {
+                    let warning = skipped_slot_warning(read.skipped);
+                    (read.slots, warning)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to read agent slots for '{}': {}", id, e);
+                    (
+                        Vec::new(),
+                        Some(format!(
+                            "Could not read tracked panes: {e}; restarted primary pane only"
+                        )),
+                    )
+                }
+            };
+
+            let slots = match super::restart_poller::narrow_to_slots(slots, only_slots.as_deref()) {
+                Ok(slots) => slots,
+                Err(e) => {
+                    self.home.set_instance_error(&id, Some(e));
+                    return Ok(());
+                }
+            };
+
+            if slots.is_empty() {
+                // No tracked panes (or unreadable store): restart the
+                // primary @aoe_agent_pane with the single-pane behavior.
+                let mut respawn_result = Ok(());
+                self.home.mutate_instance(&id, |inst| {
+                    respawn_result = match mode {
+                        crate::session::RestartMode::Resume => inst.respawn_agent_pane(),
+                        crate::session::RestartMode::Fresh => inst.respawn_agent_pane_fresh(),
+                    };
+                });
+
+                if let Err(e) = respawn_result {
+                    tracing::error!("Failed to respawn agent pane: {}", e);
+                    self.home.set_instance_error(&id, Some(e.to_string()));
+                    self.home
+                        .set_instance_status(&id, crate::session::Status::Error);
+                    return Ok(());
+                }
+                self.home.set_instance_error(&id, slot_read_error);
+            } else {
+                // Fan out to every tracked pane, each resumed from its
+                // own persisted native_session_id. Per-pane failures are
+                // recorded but do not abort sibling restarts.
+                let mut slots = slots;
+                let mut identity_origins = std::collections::HashMap::new();
+                if let (Some(inst), Ok(store)) = (
+                    self.home.get_instance(&id),
+                    crate::db::Store::open_with_schema(&profile),
+                ) {
+                    identity_origins = inst.ensure_slot_identity_keys(&store, &mut slots);
+                }
+
+                let mut outcomes = Vec::new();
+                self.home.mutate_instance(&id, |inst| {
+                    inst.restart_in_flight = true;
+                    outcomes = inst.resume_all_tracked_panes(&slots, mode, &identity_origins);
+                    inst.restart_in_flight = false;
+                });
+
+                let errors: Vec<String> = outcomes
+                    .iter()
+                    .filter_map(|o| match o {
+                        crate::session::PaneResumeOutcome::Error(e) => Some(e.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let restart_error = (!errors.is_empty()).then(|| {
+                    format!(
+                        "{} pane(s) failed to restart: {}",
+                        errors.len(),
+                        errors.join("; ")
+                    )
+                });
+                self.home
+                    .set_instance_error(&id, combine_pane_errors(slot_read_error, restart_error));
+            }
+
+            if let Err(err) = self.home.save() {
+                tracing::error!("Failed to save after respawning agent pane: {}", err);
+            }
+            crate::tmux::refresh_session_cache();
+
+            // Auto-attach so the user sees the restarted agent immediately
+            self.attach_session(&id, terminal)?;
         }
         Ok(())
     }
@@ -1182,6 +1198,9 @@ pub enum Action {
     /// Start a session without attaching to it.
     StartSession(String),
     RespawnAgentPane(String, crate::session::RestartMode, PostRestart),
+    /// Restart some panes (by slot) of a running session fresh, leaving the
+    /// others as they are.
+    RespawnSlots(String, Vec<i64>, PostRestart),
     RecoverInstance(String, crate::session::RestartMode, PostRestart),
     RestartGroup(Vec<String>, crate::session::RestartMode),
     SwitchProfile(String),

@@ -35,7 +35,7 @@ pub use new_session::{NewSessionData, NewSessionDialog};
 pub use profile_picker::{ProfileEntry, ProfilePickerAction, ProfilePickerDialog};
 pub use rename::{RenameData, RenameDialog, RenameMode};
 pub use send_message::SendMessageDialog;
-pub use switch_agent::SwitchAgentDialog;
+pub use switch_agent::{SwitchAgentDialog, SwitchChoice, SwitchPane};
 pub use welcome::WelcomeDialog;
 
 pub enum DialogResult<T> {

@@ -553,7 +553,18 @@ impl HomeView {
         mode: crate::session::RestartMode,
         path: RestartPath,
     ) {
-        self.enqueue(id, mode, path, None);
+        self.enqueue(id, mode, path, None, None);
+    }
+
+    /// Respawn a running session on the background worker: every tracked
+    /// pane, or only `only_slots`.
+    pub fn enqueue_respawn(
+        &mut self,
+        id: &str,
+        mode: crate::session::RestartMode,
+        only_slots: Option<Vec<i64>>,
+    ) {
+        self.enqueue(id, mode, RestartPath::Respawn, None, only_slots);
     }
 
     /// Launch a session that has never run on the background worker, so
@@ -570,6 +581,7 @@ impl HomeView {
             crate::session::RestartMode::Fresh,
             RestartPath::Start,
             Some(start),
+            None,
         );
     }
 
@@ -579,6 +591,7 @@ impl HomeView {
         mode: crate::session::RestartMode,
         path: RestartPath,
         start: Option<StartRequest>,
+        only_slots: Option<Vec<i64>>,
     ) {
         use crate::session::Status;
 
@@ -605,6 +618,7 @@ impl HomeView {
             path,
             prev_status,
             start,
+            only_slots,
         });
     }
 
