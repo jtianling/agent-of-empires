@@ -287,7 +287,15 @@ impl GitWorktree {
             .output()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if create_branch {
+                let deleted = repo
+                    .find_branch(branch, git2::BranchType::Local)
+                    .and_then(|mut created| created.delete());
+                if let Err(e) = deleted {
+                    stderr.push_str(&format!("; failed to delete branch {branch}: {e}"));
+                }
+            }
             return Err(GitError::WorktreeCommandFailed(stderr));
         }
 
@@ -1152,6 +1160,22 @@ mod tests {
             .create_worktree("stale-branch", &wt_path, false)
             .unwrap();
         assert!(wt_path.exists());
+    }
+
+    #[test]
+    fn test_create_worktree_failure_deletes_the_branch_it_created() {
+        let (dir, repo) = setup_test_repo();
+        let repo_path = repo.path().parent().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+
+        let git_wt = GitWorktree::new(repo_path.to_path_buf()).unwrap();
+        let result = git_wt.create_worktree("orphan-branch", &blocker.join("wt"), true);
+
+        assert!(result.is_err());
+        assert!(repo
+            .find_branch("orphan-branch", git2::BranchType::Local)
+            .is_err());
     }
 
     #[test]
