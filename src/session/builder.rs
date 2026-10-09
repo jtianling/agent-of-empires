@@ -49,6 +49,20 @@ pub struct BuildResult {
 pub struct CreatedWorktree {
     pub path: PathBuf,
     pub main_repo_path: PathBuf,
+    /// Branch created together with the worktree; rolled back with it so a
+    /// retry with the same name does not hit "reference already exists".
+    pub created_branch: Option<String>,
+}
+
+impl CreatedWorktree {
+    fn remove(&self) -> Result<()> {
+        let git_wt = GitWorktree::new(self.main_repo_path.clone())?;
+        git_wt.remove_worktree(&self.path, false)?;
+        if let Some(branch) = &self.created_branch {
+            git_wt.delete_branch(branch)?;
+        }
+        Ok(())
+    }
 }
 
 /// Result of creating a multi-repo workspace.
@@ -119,13 +133,8 @@ pub fn create_workspace(
     let cleanup = |created: &[CreatedWorktree], ws_path: &std::path::Path| {
         let mut errors = Vec::new();
         for wt in created {
-            match GitWorktree::new(wt.main_repo_path.clone()) {
-                Ok(git_wt) => {
-                    if let Err(error) = git_wt.remove_worktree(&wt.path, false) {
-                        errors.push(format!("{}: {error}", wt.path.display()));
-                    }
-                }
-                Err(error) => errors.push(format!("{}: {error}", wt.path.display())),
+            if let Err(error) = wt.remove() {
+                errors.push(format!("{}: {error:#}", wt.path.display()));
             }
         }
         if let Err(error) = std::fs::remove_dir_all(ws_path) {
@@ -202,6 +211,7 @@ pub fn create_workspace(
         created_worktrees.push(CreatedWorktree {
             path: worktree_subdir.clone(),
             main_repo_path: main_repo_path.clone(),
+            created_branch: create_new_branch.then(|| branch.to_string()),
         });
 
         repos.push(WorkspaceRepo {
@@ -283,6 +293,7 @@ pub fn resolve_pane_config(
                         created_worktree = Some(CreatedWorktree {
                             path,
                             main_repo_path: main_repo_path.clone(),
+                            created_branch: None,
                         });
                         worktree_info = Some(managed_worktree_info(branch, &main_repo_path));
                     }
@@ -302,6 +313,7 @@ pub fn resolve_pane_config(
                     created_worktree = Some(CreatedWorktree {
                         path,
                         main_repo_path: main_repo_path.clone(),
+                        created_branch: Some(branch.to_string()),
                     });
                     worktree_info = Some(managed_worktree_info(branch, &main_repo_path));
                 }
@@ -379,32 +391,16 @@ fn reused_worktree_info(branch: &str, main_repo_path: &std::path::Path) -> Workt
 pub fn cleanup_resolved_pane(result: &PaneBuildResult) -> Result<()> {
     let mut errors = Vec::new();
     if let Some(worktree) = &result.created_worktree {
-        match GitWorktree::new(worktree.main_repo_path.clone()) {
-            Ok(git) => {
-                if let Err(error) = git.remove_worktree(&worktree.path, false) {
-                    errors.push(format!("worktree {}: {error}", worktree.path.display()));
-                }
-            }
-            Err(error) => errors.push(format!(
-                "worktree repository {}: {error}",
-                worktree.main_repo_path.display()
-            )),
+        if let Err(error) = worktree.remove() {
+            errors.push(format!("worktree {}: {error:#}", worktree.path.display()));
         }
     }
     for worktree in &result.created_workspace_worktrees {
-        match GitWorktree::new(worktree.main_repo_path.clone()) {
-            Ok(git) => {
-                if let Err(error) = git.remove_worktree(&worktree.path, false) {
-                    errors.push(format!(
-                        "workspace worktree {}: {error}",
-                        worktree.path.display()
-                    ));
-                }
-            }
-            Err(error) => errors.push(format!(
-                "workspace repository {}: {error}",
-                worktree.main_repo_path.display()
-            )),
+        if let Err(error) = worktree.remove() {
+            errors.push(format!(
+                "workspace worktree {}: {error:#}",
+                worktree.path.display()
+            ));
         }
     }
     if !result.created_workspace_worktrees.is_empty() {
@@ -536,19 +532,14 @@ pub fn cleanup_instance(
     created_workspace_worktrees: &[CreatedWorktree],
 ) {
     if let Some(wt) = created_worktree {
-        if let Ok(git_wt) = GitWorktree::new(wt.main_repo_path.clone()) {
-            if let Err(e) = git_wt.remove_worktree(&wt.path, false) {
-                tracing::warn!("Failed to clean up worktree: {}", e);
-            }
+        if let Err(e) = wt.remove() {
+            tracing::warn!("Failed to clean up worktree: {:#}", e);
         }
     }
 
-    // Workspace worktree cleanup
     for wt in created_workspace_worktrees {
-        if let Ok(git_wt) = GitWorktree::new(wt.main_repo_path.clone()) {
-            if let Err(e) = git_wt.remove_worktree(&wt.path, false) {
-                tracing::warn!("Failed to clean up workspace worktree: {}", e);
-            }
+        if let Err(e) = wt.remove() {
+            tracing::warn!("Failed to clean up workspace worktree: {:#}", e);
         }
     }
     // Clean up workspace directory if workspace was created
@@ -645,9 +636,59 @@ mod tests {
             created_worktree: managed.then(|| CreatedWorktree {
                 path,
                 main_repo_path: repo_path.to_path_buf(),
+                created_branch: None,
             }),
             created_workspace_worktrees: Vec::new(),
         }
+    }
+
+    fn branch_exists(repo_path: &std::path::Path, branch: &str) -> bool {
+        git2::Repository::open(repo_path)
+            .unwrap()
+            .find_branch(branch, git2::BranchType::Local)
+            .is_ok()
+    }
+
+    #[test]
+    fn removing_created_worktree_deletes_the_branch_it_created() {
+        let (_temp, repo_path, git) = repository();
+        let path = repo_path.parent().unwrap().join("hook-failed");
+        git.create_worktree("hook-failed", &path, true).unwrap();
+        std::fs::create_dir_all(path.join("node_modules/pkg")).unwrap();
+        std::fs::write(repo_path.join(".git/info/exclude"), "node_modules\n").unwrap();
+
+        CreatedWorktree {
+            path: path.clone(),
+            main_repo_path: repo_path.clone(),
+            created_branch: Some("hook-failed".to_string()),
+        }
+        .remove()
+        .unwrap();
+
+        assert!(!path.exists());
+        assert!(!branch_exists(&repo_path, "hook-failed"));
+        git.create_worktree("hook-failed", &path, true).unwrap();
+    }
+
+    #[test]
+    fn removing_worktree_on_existing_branch_keeps_the_branch() {
+        let (_temp, repo_path, git) = repository();
+        let repo = git2::Repository::open(&repo_path).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("existing", &head, false).unwrap();
+        let path = repo_path.parent().unwrap().join("existing");
+        git.create_worktree("existing", &path, false).unwrap();
+
+        CreatedWorktree {
+            path: path.clone(),
+            main_repo_path: repo_path.clone(),
+            created_branch: None,
+        }
+        .remove()
+        .unwrap();
+
+        assert!(!path.exists());
+        assert!(branch_exists(&repo_path, "existing"));
     }
 
     #[test]

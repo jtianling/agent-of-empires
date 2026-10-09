@@ -370,7 +370,12 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                 if let Ok(git_wt) =
                     crate::git::GitWorktree::new(std::path::PathBuf::from(&wt_info.main_repo_path))
                 {
-                    let _ = git_wt.remove_worktree(&path, false);
+                    let removed = git_wt.remove_worktree(&path, false).is_ok();
+                    if removed && args.create_branch {
+                        if let Err(err) = git_wt.delete_branch(&wt_info.branch) {
+                            eprintln!("Failed to delete branch {}: {}", wt_info.branch, err);
+                        }
+                    }
                 }
             }
         }
@@ -381,7 +386,12 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                     let wt_path = PathBuf::from(&repo.worktree_path);
                     let main_repo = PathBuf::from(&repo.main_repo_path);
                     if let Ok(git_wt) = crate::git::GitWorktree::new(main_repo) {
-                        let _ = git_wt.remove_worktree(&wt_path, false);
+                        let removed = git_wt.remove_worktree(&wt_path, false).is_ok();
+                        if removed && args.create_branch {
+                            if let Err(err) = git_wt.delete_branch(&repo.branch) {
+                                eprintln!("Failed to delete branch {}: {}", repo.branch, err);
+                            }
+                        }
                     }
                 }
             }

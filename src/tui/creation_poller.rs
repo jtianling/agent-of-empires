@@ -39,6 +39,7 @@ pub enum CreationResult {
 pub struct CreatedWorktreeInfo {
     pub path: String,
     pub main_repo_path: String,
+    pub created_branch: Option<String>,
 }
 
 impl From<&CreatedWorktree> for CreatedWorktreeInfo {
@@ -46,6 +47,7 @@ impl From<&CreatedWorktree> for CreatedWorktreeInfo {
         Self {
             path: wt.path.to_string_lossy().to_string(),
             main_repo_path: wt.main_repo_path.to_string_lossy().to_string(),
+            created_branch: wt.created_branch.clone(),
         }
     }
 }

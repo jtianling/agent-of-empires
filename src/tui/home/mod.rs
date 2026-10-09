@@ -719,12 +719,14 @@ impl HomeView {
                 let worktree = created_worktree.as_ref().map(|wt| CreatedWorktree {
                     path: PathBuf::from(&wt.path),
                     main_repo_path: PathBuf::from(&wt.main_repo_path),
+                    created_branch: wt.created_branch.clone(),
                 });
                 let workspace_worktrees = created_workspace_worktrees
                     .iter()
                     .map(|worktree| CreatedWorktree {
                         path: PathBuf::from(&worktree.path),
                         main_repo_path: PathBuf::from(&worktree.main_repo_path),
+                        created_branch: worktree.created_branch.clone(),
                     })
                     .collect::<Vec<_>>();
                 builder::cleanup_instance(instance, worktree.as_ref(), &workspace_worktrees);
@@ -744,12 +746,14 @@ impl HomeView {
                 let created_worktree = created_worktree.map(|worktree| CreatedWorktree {
                     path: PathBuf::from(worktree.path),
                     main_repo_path: PathBuf::from(worktree.main_repo_path),
+                    created_branch: worktree.created_branch,
                 });
                 let created_workspace_worktrees = created_workspace_worktrees
                     .into_iter()
                     .map(|worktree| CreatedWorktree {
                         path: PathBuf::from(worktree.path),
                         main_repo_path: PathBuf::from(worktree.main_repo_path),
+                        created_branch: worktree.created_branch,
                     })
                     .collect::<Vec<_>>();
 
