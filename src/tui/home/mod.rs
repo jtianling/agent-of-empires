@@ -3,6 +3,7 @@
 mod agent_switch;
 mod group_restart;
 mod input;
+mod on_create;
 mod operations;
 mod render;
 
@@ -181,6 +182,8 @@ pub struct HomeView {
     /// Sessions whose in-flight background job is a first launch rather than a
     /// restart, so the status bar can say so.
     pub(super) background_starts: HashSet<String>,
+    /// Sessions created with `n` whose on_create hooks are still running.
+    on_create_runs: HashMap<String, on_create::OnCreateRun>,
 
     // Performance: preview caching
     pub(super) preview_cache: PreviewCache,
@@ -322,6 +325,7 @@ impl HomeView {
             creation_cancelled: false,
             on_launch_hooks_ran: HashSet::new(),
             background_starts: HashSet::new(),
+            on_create_runs: HashMap::new(),
             preview_cache: PreviewCache::default(),
             sound_config,
             settings_view: None,

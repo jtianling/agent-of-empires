@@ -9,7 +9,7 @@ use super::{
     ICON_RUNNING, ICON_STARTING, ICON_STOPPED, ICON_UNKNOWN, ICON_WAITING,
 };
 use crate::session::config::SortOrder;
-use crate::session::{Item, Status};
+use crate::session::{Instance, Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
 use crate::tui::styles::Theme;
 use crate::update::UpdateInfo;
@@ -455,6 +455,15 @@ impl HomeView {
 
         if let Some(id) = &self.selected_session {
             if let Some(inst) = self.get_instance(id) {
+                // A first launch rides the restart machinery; call it what it
+                // is, as the status bar does.
+                let starting = (inst.status == Status::Restarting
+                    && self.background_starts.contains(id))
+                .then(|| Instance {
+                    status: Status::Starting,
+                    ..inst.clone()
+                });
+                let inst = starting.as_ref().unwrap_or(inst);
                 Preview::render_with_cache(frame, inner, inst, &self.preview_cache.content, theme);
             }
         } else {

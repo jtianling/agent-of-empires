@@ -1156,9 +1156,9 @@ impl HomeView {
         }
     }
 
-    /// Create a session with optional hooks. Delegates to the background
-    /// `CreationPoller` when hooks are present (to avoid freezing the TUI on
-    /// slow commands like `npm install`).
+    /// Create a session with optional hooks without freezing the TUI on slow
+    /// commands like `npm install`: `n` lists the session at once and runs
+    /// on_create on a hook thread, `N` waits on the `CreationPoller` dialog.
     fn create_session_with_hooks(
         &mut self,
         data: NewSessionData,
@@ -1168,21 +1168,32 @@ impl HomeView {
             .as_ref()
             .is_some_and(|h| !h.on_create.is_empty() || !h.on_launch.is_empty());
 
-        if has_hooks {
+        // `n` creates in the background, hooks included. `N` keeps waiting in
+        // the dialog since it attaches right after, and a session for another
+        // profile has no row here to show its progress on.
+        let in_background = self.new_session_post == PostRestart::StayOnHome
+            && data.profile == self.storage.profile();
+        if has_hooks && !in_background {
             let right_pane = data.secondary.clone();
             self.request_creation(data, hooks);
             self.pending_right_pane = right_pane;
             return None;
         }
 
+        let on_create = hooks.map(|h| h.on_create).unwrap_or_default();
         let right_pane = data.secondary.clone();
         match self.create_session(data) {
-            Ok(session_id) => {
+            Ok(created) if !on_create.is_empty() => {
+                self.new_dialog = None;
+                self.run_on_create_in_background(created, on_create, right_pane);
+                None
+            }
+            Ok(created) => {
                 self.new_dialog = None;
                 self.pending_right_pane = right_pane;
                 Some(match self.new_session_post {
-                    PostRestart::Attach => Action::AttachSession(session_id),
-                    PostRestart::StayOnHome => Action::StartSession(session_id),
+                    PostRestart::Attach => Action::AttachSession(created.id),
+                    PostRestart::StayOnHome => Action::StartSession(created.id),
                 })
             }
             Err(e) => {

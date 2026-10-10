@@ -3,9 +3,15 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use unicode_width::UnicodeWidthStr;
 
 use super::DialogResult;
 use crate::tui::styles::Theme;
+
+const WIDTH: u16 = 50;
+const MIN_HEIGHT: u16 = 9;
+/// Borders, the margin around the message, and the button rows.
+const CHROME_ROWS: u16 = 6;
 
 pub struct InfoDialog {
     title: String,
@@ -35,8 +41,23 @@ impl InfoDialog {
         }
     }
 
+    /// Tall enough for the whole message, so a multi-line reason such as a
+    /// hook's stderr is not cut off. One spare row absorbs word-wrap slack.
+    fn height(&self) -> u16 {
+        let text_width = usize::from(WIDTH - 4);
+        let rows: usize = self
+            .message
+            .lines()
+            .map(|line| line.width().div_ceil(text_width).max(1))
+            .sum();
+        u16::try_from(rows + 1)
+            .unwrap_or(u16::MAX)
+            .saturating_add(CHROME_ROWS)
+            .max(MIN_HEIGHT)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let dialog_area = super::centered_rect(area, 50, 9);
+        let dialog_area = super::centered_rect(area, WIDTH, self.height());
 
         frame.render_widget(Clear, dialog_area);
 
@@ -103,6 +124,14 @@ mod tests {
         let mut dialog = InfoDialog::new("Test", "Message");
         let result = dialog.handle_key(key(KeyCode::Char(' ')));
         assert!(matches!(result, DialogResult::Cancel));
+    }
+
+    #[test]
+    fn a_long_message_grows_the_dialog_to_fit() {
+        assert_eq!(InfoDialog::new("Test", "Message").height(), MIN_HEIGHT);
+        let reason = format!("hook failed:\n\n{}\nboom", "x".repeat(100));
+        // 1 + 1 + 3 + 1 message rows, one spare row, then the chrome.
+        assert_eq!(InfoDialog::new("Test", &reason).height(), 7 + CHROME_ROWS);
     }
 
     #[test]

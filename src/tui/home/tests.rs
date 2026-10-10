@@ -3,6 +3,7 @@
 mod agent_switch;
 mod group_restart;
 mod new_session_keys;
+mod on_create;
 mod status_updates;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

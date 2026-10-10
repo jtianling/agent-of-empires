@@ -9,6 +9,14 @@ use crate::tui::dialogs::{DeleteOptions, ForkSessionData, GroupDeleteOptions, Ne
 
 use super::HomeView;
 
+/// A session `create_session` built and persisted, with the worktrees it made
+/// so a later failure can roll them back.
+pub(super) struct CreatedSession {
+    pub id: String,
+    pub worktree: Option<builder::CreatedWorktree>,
+    pub workspace_worktrees: Vec<builder::CreatedWorktree>,
+}
+
 impl HomeView {
     pub(super) fn managed_worktree_branch_for(
         &self,
@@ -40,7 +48,10 @@ impl HomeView {
         })
     }
 
-    pub(super) fn create_session(&mut self, data: NewSessionData) -> anyhow::Result<String> {
+    pub(super) fn create_session(
+        &mut self,
+        data: NewSessionData,
+    ) -> anyhow::Result<CreatedSession> {
         let target_profile = data.profile.clone();
         let is_cross_profile = target_profile != self.storage.profile();
 
@@ -122,7 +133,11 @@ impl HomeView {
         }
 
         self.reload()?;
-        Ok(session_id)
+        Ok(CreatedSession {
+            id: session_id,
+            worktree: created_worktree,
+            workspace_worktrees: created_workspace_worktrees,
+        })
     }
 
     /// Build a forked instance from the currently tracked parent, persist it,

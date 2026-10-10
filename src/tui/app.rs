@@ -244,6 +244,11 @@ impl App {
                 refresh_needed = true;
             }
 
+            if let Some(session_id) = self.home.apply_on_create_results() {
+                self.start_in_background(&session_id);
+                refresh_needed = true;
+            }
+
             // Check for and apply creation results (non-blocking)
             if let Some(session_id) = self.home.apply_creation_results() {
                 match self.home.new_session_post {
