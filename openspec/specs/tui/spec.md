@@ -135,6 +135,17 @@ without retyping the group path.
 - **THEN** the session SHALL be started and the home list SHALL remain visible
 - **AND** the launch (agent startup and right pane) SHALL run on the background restart worker, so the home list keeps accepting input while the status bar shows `Starting...` for the session
 
+#### Scenario: n runs on_create hooks in the background
+- **WHEN** the user presses `n` and creates a session in the current profile with `on_create` hooks configured
+- **THEN** the dialog SHALL close at once and the session SHALL be listed, shown as `Starting...` in both the status bar and the preview
+- **AND** the hooks SHALL run on their own thread, not the restart worker, and the launch SHALL follow on the background restart worker once they succeed
+- **AND** when a hook fails, the session SHALL be removed from the list and storage together with the worktrees and branches created for it, and an info dialog SHALL show the full failure reason
+
+#### Scenario: N waits for hooks
+- **WHEN** the user presses `N` and creates a session with hooks configured
+- **THEN** the dialog SHALL show hook progress until the hooks finish, then attach
+- **AND** when a hook fails, the dialog SHALL show the error and nothing created for the session SHALL remain
+
 #### Scenario: N attaches
 - **WHEN** the user presses `N` and creates a session
 - **THEN** the session SHALL be started and the user SHALL be attached to it
