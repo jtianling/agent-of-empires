@@ -86,6 +86,7 @@ pub struct RestartIdentity {
     pub resume_token: Option<String>,
     pub xats_identity_key: Option<String>,
     pub last_start_time: Option<std::time::Instant>,
+    pub relaunch_notes: Vec<String>,
 }
 
 impl RestartIdentity {
@@ -96,6 +97,7 @@ impl RestartIdentity {
             resume_token: instance.resume_token.clone(),
             xats_identity_key: instance.xats_identity_key.clone(),
             last_start_time: instance.last_start_time,
+            relaunch_notes: instance.relaunch_notes.clone(),
         }
     }
 }
@@ -448,6 +450,7 @@ mod tests {
             agent: "claude".to_string(),
             native_session_id: String::new(),
             cwd: "/w".to_string(),
+            launch_cwd: String::new(),
             tmux_pane: format!("%{slot}"),
             xats_identity_key: String::new(),
             xats_runtime_generation: 0,

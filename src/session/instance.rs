@@ -19,6 +19,7 @@ use super::PaneConfig;
 
 mod agent_switch;
 mod codex_restart;
+mod relaunch_dir;
 
 pub(crate) trait PaneConfigTarget {
     fn resolve_for(self, instance: &Instance) -> PaneConfig;
@@ -1159,6 +1160,10 @@ pub struct Instance {
     /// tracked pane has been respawned. Never persisted.
     #[serde(skip)]
     pub restart_in_flight: bool,
+    /// Runtime-only: tracked panes the last restart had to start somewhere
+    /// other than their recorded directory, and why.
+    #[serde(skip)]
+    pub relaunch_notes: Vec<String>,
     #[serde(skip)]
     pub last_spinner_seen: Option<Instant>,
     #[serde(skip)]
@@ -1209,6 +1214,7 @@ impl Instance {
             agent_session_id: None,
             xats_identity_key: None,
             restart_in_flight: false,
+            relaunch_notes: Vec::new(),
             last_spinner_seen: None,
             spike_start: None,
             pre_spike_status: None,
@@ -1731,6 +1737,7 @@ impl Instance {
              -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\" \
              -c \"shell_environment_policy.set.XATS_CODEX_LAUNCH_ID=\\\"${{xats_agent_id}}\\\"\"{suffix}"
         );
+        // Keep npm project configuration out of pre-registration without changing Codex's cwd.
         let script = format!(
             "if [ -z \"${{TMUX_PANE:-}}\" ]; then \
                  printf '%s\\n' '{missing_pane}' >&2; \
@@ -1772,14 +1779,14 @@ impl Instance {
              fi; \
              pre_register_failed=; \
              if [ -n \"${{{identity_env}:-}}\" ]; then \
-                 npx --yes {package} pre-register-codex-pane \
+                 (cd / && npx --yes {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
-                     --identity-key-env {identity_env} --ttl {ttl} \
+                     --identity-key-env {identity_env} --ttl {ttl}) \
                      || pre_register_failed=1; \
              else \
-                 npx --yes {package} pre-register-codex-pane \
+                 (cd / && npx --yes {package} pre-register-codex-pane \
                      --pane \"$TMUX_PANE\" --agent-id \"$xats_agent_id\" \
-                     --ttl {ttl} \
+                     --ttl {ttl}) \
                      || pre_register_failed=1; \
              fi; \
              if [ -n \"${{pre_register_failed:-}}\" ]; then \
@@ -2695,7 +2702,7 @@ impl Instance {
                             env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                         }
                     }
-                    Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
+                    Some(wrap_host_agent_command(&cmd, &env_vars, Some(a)))
                 })
             } else {
                 let mut cmd =
@@ -3566,6 +3573,7 @@ impl Instance {
     ) -> Vec<PaneResumeOutcome> {
         self.status = Status::Restarting;
         self.last_error = None;
+        self.relaunch_notes.clear();
         self.ensure_xats_identity_key();
 
         // A fresh restart must not reuse the pre-allocated `--session-id` for the
@@ -3583,7 +3591,7 @@ impl Instance {
         let mut primary_respawned = false;
         let mut confirmable_panes: Vec<LaunchedClaudePane> = Vec::new();
         for slot in slots {
-            let pane = slot.pane_config();
+            let pane = self.relaunch_pane_config(slot);
             let mut native_session_id = self.slot_resume_source(slot, mode);
             let mut identity_key = slot.xats_identity_key.clone();
             let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
@@ -3721,6 +3729,7 @@ impl Instance {
         if slots.is_empty() {
             anyhow::bail!("no persisted slots to recover");
         }
+        self.relaunch_notes.clear();
 
         let mut ordered: Vec<crate::db::AgentSlot> = slots.to_vec();
         ordered.sort_by_key(|s| s.slot);
@@ -3784,7 +3793,7 @@ impl Instance {
                 )));
                 continue;
             };
-            let pane = slot.pane_config();
+            let pane = self.relaunch_pane_config(slot);
             let mut native_session_id = slot.native_session_id.clone();
             let mut identity_key = slot.xats_identity_key.clone();
             let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
@@ -4546,8 +4555,24 @@ fn wrap_command_ignore_suspend(cmd: &str) -> String {
 }
 
 fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) -> String {
+    wrap_command_with_setup(cmd, env_vars, "")
+}
+
+fn wrap_host_agent_command(
+    cmd: &str,
+    env_vars: &[(&str, &str)],
+    agent: Option<&crate::agents::AgentDef>,
+) -> String {
+    let setup = agent
+        .map(|agent| crate::agents::executable::fallback_setup(agent.binary))
+        .unwrap_or_default();
+    wrap_command_with_setup(cmd, env_vars, &setup)
+}
+
+fn wrap_command_with_setup(cmd: &str, env_vars: &[(&str, &str)], setup: &str) -> String {
     let shell = crate::session::environment::user_posix_shell();
     let escaped = cmd.replace('\'', "'\\''");
+    let setup = setup.replace('\'', "'\\''");
     // Place env vars before the shell so they're parsed at the outer shell
     // level, avoiding quoting conflicts with the inner single-quoted string.
     let env_prefix = env_vars
@@ -4559,8 +4584,8 @@ fn wrap_command_ignore_suspend_with_env(cmd: &str, env_vars: &[(&str, &str)]) ->
         .collect::<String>();
     // Use login shell (-l) so version-manager PATHs (NVM, etc.) are available.
     format!(
-        "{}{} -lc 'stty susp undef; exec env {}'",
-        env_prefix, shell, escaped
+        "{}{} -lc 'stty susp undef; {}exec env {}'",
+        env_prefix, shell, setup, escaped
     )
 }
 
@@ -5271,10 +5296,9 @@ mod tests {
             "expected hook env prefix, got {cmd}"
         );
         let shell = crate::session::environment::user_posix_shell();
+        assert!(cmd.contains(&format!("{shell} -lc 'stty susp undef; ")));
         assert!(
-            cmd.contains(
-                &format!("{shell} -lc 'stty susp undef; exec env claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11 --model sonnet --dangerously-skip-permissions'")
-            ),
+            cmd.ends_with("exec env claude --resume 4dc7a3c8-934e-40c1-95f8-8b00fe11cf11 --model sonnet --dangerously-skip-permissions'"),
             "unexpected claude resume command: {cmd}"
         );
     }
@@ -5295,13 +5319,14 @@ mod tests {
         // in the pane; see `AgentHookConfig`), so its launch carries no
         // `AOE_INSTANCE_ID` and the resume flag sits directly after the binary.
         let shell = crate::session::environment::user_posix_shell();
+        assert!(cmd.contains(&format!("{shell} -lc 'stty susp undef; ")));
         assert!(
-            cmd.ends_with(&format!(
-                "{shell} -lc 'stty susp undef; exec env codex resume \
+            cmd.ends_with(
+                "exec env codex resume \
                  019d1af9-a899-7df1-8f7d-a244126e5ded \
                  --config check_for_update_on_startup=false --model gpt-5 \
                  --dangerously-bypass-approvals-and-sandbox'"
-            )),
+            ),
             "unexpected codex resume command: {cmd}"
         );
         assert!(
@@ -5674,7 +5699,7 @@ mod tests {
             .unwrap()
             .command;
 
-        assert!(command.contains("stty susp undef; exec env claude"));
+        assert!(command.contains("exec env claude"));
         assert!(!command.contains("cd "));
 
         match original_shell {
@@ -6229,6 +6254,7 @@ mod tests {
             agent: "claude".to_string(),
             native_session_id: "sess".to_string(),
             cwd: "/tmp".to_string(),
+            launch_cwd: String::new(),
             tmux_pane: "%1".to_string(),
             xats_identity_key: key.to_string(),
             xats_runtime_generation: 0,
@@ -6521,6 +6547,7 @@ mod tests {
             agent: agent.to_string(),
             native_session_id: native_session_id.to_string(),
             cwd: "/tmp/project".to_string(),
+            launch_cwd: String::new(),
             tmux_pane: "%1".to_string(),
             xats_identity_key: String::new(),
             xats_runtime_generation: 0,
@@ -7207,6 +7234,43 @@ mod tests {
             parse_fake_calls(&codex_log),
             stderr,
         )
+    }
+
+    #[test]
+    fn test_codex_xats_preregistration_keeps_project_cwd_out_of_npm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        let project = tmp.path().join("secondary project's path");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        let (npx_log, codex_log) = write_codex_bootstrap_fakes(&bin, tmp.path(), FakeNpx::Succeed);
+        let npx_path = bin.join("npx");
+        let fake = std::fs::read_to_string(&npx_path).unwrap();
+        std::fs::write(&npx_path, format!("{fake}\n[ \"$PWD\" = / ] || exit 19\n")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let project = project.to_str().unwrap();
+        let endpoint = parse_codex_app_server_url("ws://localhost:8899").unwrap();
+        let script = codex_xats_instance().codex_xats_bootstrap_command_for(
+            "codex --launch-cwd \"$PWD\"",
+            "codex",
+            project,
+            &endpoint,
+        );
+        let script = format!("cd {} && {script}", shell_escape(project));
+
+        for key in [None, Some("pane-key")] {
+            let out = execute_bootstrap_script(&script, &bin, key, &[]);
+            assert!(out.status.success(), "{:?}", out);
+        }
+        assert_eq!(parse_fake_calls(&npx_log).len(), 2);
+        let calls = parse_fake_calls(&codex_log);
+        assert_eq!(calls.len(), 2);
+        for args in calls {
+            for flag in ["-C", "--launch-cwd"] {
+                let index = args.iter().position(|arg| arg == flag).unwrap();
+                assert_eq!(args[index + 1], project);
+            }
+        }
     }
 
     #[test]
@@ -8293,6 +8357,7 @@ mod tests {
             agent: agent.to_string(),
             native_session_id: String::new(),
             cwd: cwd.to_string(),
+            launch_cwd: String::new(),
             tmux_pane: pane.to_string(),
             xats_identity_key: String::new(),
             xats_runtime_generation: 0,

@@ -50,6 +50,7 @@ fn stale_status_results_cannot_overwrite_completed_restart() {
                     resume_token: Some("current-conversation".to_string()),
                     xats_identity_key: None,
                     last_start_time: Some(now),
+                    relaunch_notes: Vec::new(),
                 }),
                 last_error: Some(None),
                 status: Status::Starting,

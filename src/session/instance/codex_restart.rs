@@ -30,6 +30,10 @@ impl CodexRestart {
             None
         };
         let verified = store.codex_resume_verified(slot)?;
+        if verified && mode == RestartMode::Resume && slot.yolo_mode {
+            let endpoint = super::codex_app_server_endpoint().map_err(anyhow::Error::msg)?;
+            crate::codex_permissions::restore_yolo(endpoint.url, slot.native_session_id.clone())?;
+        }
         store.prepare_codex_restart(slot, mode, target, retiring.as_deref())?;
         Ok(Some(Self {
             store,

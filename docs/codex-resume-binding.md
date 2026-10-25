@@ -26,9 +26,19 @@ slot, pane capture 和绑定证明在一个数据库事务中写入.
 launch ID, 旧 launch 的结果仍被拒绝.  启动失败恢复原有已验证来源,
 但不回退 generation, 防止旧请求重新获得写入资格.
 
-Codex 远程 resume 不接受权限覆盖.  `r` 恢复时不追加 `--approve-for-me`
-或 `--dangerously-bypass-approvals-and-sandbox`, 保留原会话权限.  新建会话和
-`c` 仍按 pane 的 YOLO 设置选择权限, 普通本地 Codex resume 保留原有行为.
+Codex 远程 resume 不接受 CLI 权限覆盖.  `r`/`R` 恢复时不追加
+`--approve-for-me` 或 `--dangerously-bypass-approvals-and-sandbox`.
+对已验证且开启 YOLO 的 slot, AoE 在重启 pane 前通过同一 app-server 的
+`thread/settings/update` 设置 `never` 和 `dangerFullAccess`, 再读取目标
+线程确认权限.  请求失败或校验不通过时拒绝重启, 不静默降级.
+未开启 YOLO 的 slot 保留服务端权限.  新建会话和 `c` 仍按 pane 的 YOLO
+设置选择权限, 普通本地 Codex resume 保留原有行为.
+
+本机 Codex 0.162.1 实测中, 已加载线程的 `thread/resume` 会忽略权限覆盖,
+不能代替 `thread/settings/update`.  后者属于实验接口, 旧服务端不支持时
+恢复会明确失败.  服务端重启可能丢失 sandbox 设置, 所以每次恢复都重新应用,
+不假设配置永久持久化.  更新完成与新 TUI 连接之间发生服务端重启的情况,
+不属于本次权限保证范围.
 
 普通 stop/start 或消失 pane 的重新创建会更换 pane ID.  此时显式重绑 slot,
 递增 generation 并废除旧证明.  冷恢复使用持久化证明, 不查询可能被复用的旧

@@ -173,10 +173,22 @@ fn test_initial_cursor_position() {
 
 #[test]
 #[serial]
-fn test_q_returns_quit_action() {
+fn test_q_requires_explicit_quit_confirmation() {
     let mut env = create_test_env_empty();
-    let action = env.view.handle_key(key(KeyCode::Char('q')));
-    assert_eq!(action, Some(Action::Quit));
+    for cancel in [KeyCode::Enter, KeyCode::Esc, KeyCode::Char('n')] {
+        assert_eq!(env.view.handle_key(key(KeyCode::Char('q'))), None);
+        assert_eq!(env.view.confirm_dialog.as_ref().unwrap().action(), "quit");
+        assert_eq!(env.view.handle_key(key(KeyCode::Char('q'))), None);
+        assert!(env.view.confirm_dialog.is_some());
+        assert_eq!(env.view.handle_key(key(cancel)), None);
+        assert!(env.view.confirm_dialog.is_none());
+    }
+    env.view.handle_key(key(KeyCode::Char('q')));
+    assert_eq!(
+        env.view.handle_key(key(KeyCode::Char('y'))),
+        Some(Action::Quit)
+    );
+    assert!(env.view.confirm_dialog.is_none());
 }
 
 #[test]
@@ -731,6 +743,23 @@ fn test_reload_does_not_snap_cursor_after_enter() {
 
     // Cursor should stay where the user put it, not snap back to best match
     assert_eq!(env.view.cursor, 4);
+}
+
+#[test]
+#[serial]
+fn test_reload_keeps_relaunch_notes() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances[0].id.clone();
+    let note = "pane 1: /gone no longer exists, started in /tmp".to_string();
+    env.view
+        .mutate_instance(&id, |inst| inst.relaunch_notes = vec![note.clone()]);
+
+    env.view.reload().unwrap();
+
+    assert_eq!(
+        env.view.get_instance(&id).unwrap().relaunch_notes,
+        vec![note]
+    );
 }
 
 #[test]
@@ -2765,6 +2794,7 @@ fn test_apply_restart_results_merges_fields_and_clears_in_flight() {
                 resume_token: None,
                 xats_identity_key: Some("minted-key".to_string()),
                 last_start_time: Some(std::time::Instant::now()),
+                relaunch_notes: Vec::new(),
             }),
             last_error: Some(Some("1 pane(s) failed to restart: boom".to_string())),
             status: crate::session::Status::Starting,

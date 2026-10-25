@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod cli;
+mod codex_permissions;
 mod codex_xats;
 pub mod containers;
 pub mod db;

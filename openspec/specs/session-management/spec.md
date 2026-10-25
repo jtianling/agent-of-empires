@@ -118,6 +118,27 @@ For sandboxed sessions, the command is wrapped in the container runtime's `exec`
 
 ## Requirements
 
+### Requirement: 宿主机 agent 启动支持 NVM 后备路径
+
+AoE SHALL 在宿主机 agent 的首次启动, resume 和 restart 中优先使用 login shell 当前 PATH 的可执行文件.  当目标 agent 不在该 PATH 中时, SHALL 使用 AoE 进程 PATH 中的有效入口作为后备; 如果进程 PATH 也找不到, SHALL 在 `NVM_DIR/versions/node` 中按 Node 版本从高到低查找, 未设置 `NVM_DIR` 时使用 `~/.nvm/versions/node`.  安装检测 SHALL 使用相同的后备查找规则.  后备目录 SHALL 追加到 PATH 末尾, 保留当前 Node 版本的优先级.  此机制 SHALL 保留自动生成的 resume 参数和 xats 启动流程, 不应用于容器或完整自定义命令覆盖.
+
+#### Scenario: 切换 Node 版本后恢复 Codex
+
+- **WHEN** 当前 Node 版本的 PATH 中没有 `codex`, 但另一个 NVM 版本中存在可执行的 `codex`
+- **THEN** 安装检测 SHALL 将 Codex 识别为可用
+- **AND** resume 和 restart SHALL 能使用后备入口启动, 并保留原有恢复参数
+- **AND** 当前 PATH 中的 `node` SHALL 继续优先于后备目录中的 `node`
+
+#### Scenario: 当前 PATH 已提供 agent
+
+- **WHEN** login shell 的当前 PATH 中存在目标 agent 的可执行文件
+- **THEN** 启动 SHALL 使用当前 PATH 的入口, 不追加后备目录
+
+#### Scenario: 多个 NVM 版本提供同一 agent
+
+- **WHEN** AoE 进程 PATH 中没有目标 agent, 且多个有效 NVM 版本提供该 agent
+- **THEN** AoE SHALL 选择版本号最高且实际存在可执行入口的 Node 安装目录作为后备
+
 ### Requirement: Session attach configures tmux key bindings
 When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key bindings for navigation: root-table `Ctrl+,` and `Ctrl+.` for session cycling, `Ctrl+b 1-9` for number jump via key tables, `Ctrl+b b` for back toggle, `Ctrl+b h/j/k/l` for pane navigation, and `Ctrl+;` for pane cycling. The `attach()` method accepts a `profile` parameter to scope session cycling and number jump to the current profile.
 

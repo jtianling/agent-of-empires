@@ -415,7 +415,12 @@ impl Store {
             tmux_pane,
             xats_identity_key,
             last_seen_at,
-        )
+        )?;
+        self.conn.execute(
+            "UPDATE agent_slot SET launch_cwd = ?1 WHERE instance_id = ?2 AND slot = ?3",
+            rusqlite::params![pane.working_dir, instance_id, slot],
+        )?;
+        Ok(())
     }
 
     /// Snapshot a pane capture into its slot without disturbing the slot's
@@ -905,7 +910,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT instance_id, slot, agent, native_session_id, cwd, tmux_pane, \
              xats_identity_key, xats_runtime_generation, yolo_mode, cross_agent_team, \
-             worktree_info, model, model_fingerprint, last_seen_at \
+             worktree_info, model, model_fingerprint, last_seen_at, launch_cwd \
              FROM agent_slot WHERE instance_id = ?1 ORDER BY slot",
         )?;
         let rows = stmt.query_map([instance_id], |r| {
@@ -924,6 +929,7 @@ impl Store {
                 r.get::<_, String>(11)?,
                 r.get::<_, String>(12)?,
                 r.get::<_, i64>(13)?,
+                r.get::<_, String>(14)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -956,6 +962,7 @@ impl Store {
                 model,
                 model_fingerprint,
                 last_seen_at,
+                launch_cwd,
             ) = row;
             out.push(RawAgentSlot {
                 instance_id: row_instance_id,
@@ -963,6 +970,7 @@ impl Store {
                 agent,
                 native_session_id,
                 cwd,
+                launch_cwd,
                 tmux_pane,
                 xats_identity_key,
                 xats_runtime_generation,
@@ -1012,6 +1020,7 @@ impl Store {
             agent: row.agent,
             native_session_id: row.native_session_id,
             cwd: row.cwd,
+            launch_cwd: row.launch_cwd,
             tmux_pane: row.tmux_pane,
             xats_identity_key: row.xats_identity_key,
             xats_runtime_generation: row.xats_runtime_generation,
@@ -1185,6 +1194,7 @@ struct RawAgentSlot {
     agent: String,
     native_session_id: String,
     cwd: String,
+    launch_cwd: String,
     tmux_pane: String,
     xats_identity_key: String,
     xats_runtime_generation: i64,
@@ -1214,6 +1224,10 @@ pub struct AgentSlot {
     pub agent: String,
     pub native_session_id: String,
     pub cwd: String,
+    /// Directory the pane was created in, empty when unknown. `cwd` follows
+    /// the agent wherever it goes, so this is what a relaunch falls back to
+    /// once that directory is gone.
+    pub launch_cwd: String,
     pub tmux_pane: String,
     /// Opaque xats identity key for the agent occupying this slot, empty when it
     /// has none. Every managed pane, including primary, owns its key through its
@@ -1344,10 +1358,10 @@ fn insert_new_exact_session_slot(
 ) -> Result<(i64, i64)> {
     transaction.execute(
         "INSERT INTO agent_slot \
-         (instance_id, slot, agent, native_session_id, cwd, tmux_pane, xats_identity_key, \
-          xats_runtime_generation, yolo_mode, cross_agent_team, worktree_info, \
-          pane_config_version, last_seen_at) \
-         VALUES (?1, ?2, ?9, '', ?3, '', ?4, 1, ?5, ?6, ?7, 1, ?8)",
+         (instance_id, slot, agent, native_session_id, cwd, launch_cwd, tmux_pane, \
+          xats_identity_key, xats_runtime_generation, yolo_mode, cross_agent_team, \
+          worktree_info, pane_config_version, last_seen_at) \
+         VALUES (?1, ?2, ?9, '', ?3, ?3, '', ?4, 1, ?5, ?6, ?7, 1, ?8)",
         rusqlite::params![
             instance_id,
             slot,
@@ -1378,7 +1392,7 @@ fn replace_stale_exact_session_slot(
     let next_generation = generation + 1;
     let changed = transaction.execute(
         "UPDATE agent_slot SET agent = ?12, native_session_id = '', cwd = ?1, \
-         tmux_pane = '', xats_identity_key = ?2, xats_runtime_generation = ?3, \
+         launch_cwd = ?1, tmux_pane = '', xats_identity_key = ?2, xats_runtime_generation = ?3, \
          yolo_mode = ?4, cross_agent_team = ?5, worktree_info = ?6, \
          pane_config_version = 1, last_seen_at = ?7 \
          WHERE instance_id = ?8 AND slot = ?9 AND xats_runtime_generation = ?10 \
@@ -1580,6 +1594,7 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
         ("pane_config_version", "INTEGER NOT NULL DEFAULT 0"),
         ("model", "TEXT NOT NULL DEFAULT ''"),
         ("model_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("launch_cwd", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let has_column: bool = conn.query_row(
             "SELECT count(*) FROM pragma_table_info('agent_slot') WHERE name = ?1",
@@ -1591,6 +1606,11 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
                 &format!("ALTER TABLE agent_slot ADD COLUMN {column} {definition}"),
                 [],
             )?;
+            // Where existing panes were created was never recorded; the
+            // directory they are known by today is the closest stand-in.
+            if column == "launch_cwd" {
+                conn.execute("UPDATE agent_slot SET launch_cwd = cwd", [])?;
+            }
         }
     }
     Ok(())
@@ -1867,6 +1887,41 @@ mod tests {
         assert_eq!(slots[0].native_session_id, "sess");
         assert_eq!(slots[0].tmux_pane, "");
         assert_eq!(slots[0].xats_runtime_generation, 0);
+    }
+
+    #[test]
+    fn ensure_schema_backfills_launch_cwd_from_cwd() {
+        let (_tmp, store) = legacy_store_with_seeded_row();
+        ensure_schema(&store.conn).unwrap();
+        let slots = store.read_slots_for_instance("legacy").unwrap();
+        assert_eq!(slots[0].launch_cwd, "/tmp");
+    }
+
+    #[test]
+    fn launch_cwd_is_set_by_a_new_pane_and_kept_through_captures() {
+        let (_tmp, store) = temp_store();
+        let launched = crate::session::PaneConfig::new("claude", "/tmp/created", false, false);
+        store
+            .record_launched_slot_config("inst", 1, &launched, "%2", "", 1)
+            .unwrap();
+        let moved = crate::session::PaneConfig::new("claude", "/tmp/moved", false, false);
+        store
+            .upsert_agent_slot_capture_config("inst", 1, &moved, "sess", "%2", "", 2)
+            .unwrap();
+        store
+            .upsert_agent_slot_config("inst", 1, &moved, "sess", "%2", "", 3)
+            .unwrap();
+
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].cwd, "/tmp/moved");
+        assert_eq!(slots[0].launch_cwd, "/tmp/created");
+
+        let relaunched = crate::session::PaneConfig::new("claude", "/tmp/again", false, false);
+        store
+            .record_launched_slot_config("inst", 1, &relaunched, "%3", "", 4)
+            .unwrap();
+        let slots = store.read_slots_for_instance("inst").unwrap();
+        assert_eq!(slots[0].launch_cwd, "/tmp/again");
     }
 
     #[test]

@@ -353,6 +353,7 @@ impl HomeView {
                 inst.last_error_check = prev.last_error_check;
                 inst.last_start_time = prev.last_start_time;
                 inst.restart_in_flight = prev.restart_in_flight;
+                inst.relaunch_notes = prev.relaunch_notes.clone();
                 inst.last_spinner_seen = prev.last_spinner_seen;
                 inst.spike_start = prev.spike_start;
                 inst.pre_spike_status = prev.pre_spike_status;
@@ -649,6 +650,7 @@ impl HomeView {
                 inst.resume_token = identity.resume_token;
                 inst.xats_identity_key = identity.xats_identity_key;
                 inst.last_start_time = identity.last_start_time;
+                inst.relaunch_notes = identity.relaunch_notes;
             }
             if let Some(error) = last_error {
                 inst.last_error = error;

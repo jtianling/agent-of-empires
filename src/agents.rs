@@ -6,6 +6,8 @@
 use crate::session::Status;
 use crate::tmux::status_detection;
 
+pub(crate) mod executable;
+
 /// How to check whether an agent binary is installed on the host.
 pub enum DetectionMethod {
     /// Run `which <binary>` and check exit code.

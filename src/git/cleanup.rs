@@ -61,6 +61,28 @@ pub fn remove_worktree_dir(
     std::fs::remove_dir_all(worktree_path)
 }
 
+/// Files the OS drops into a directory on its own. A worktree directory
+/// holding nothing else has no user data left in it.
+const OS_METADATA_FILES: &[&str] = &[".DS_Store"];
+
+/// True when the directory exists and holds nothing but OS metadata files.
+///
+/// Finder can write a `.DS_Store` while `git worktree remove` is emptying the
+/// directory. Git then drops the worktree registration but fails the final
+/// `rmdir`, leaving a leftover that a non-forced removal would refuse.
+fn only_os_metadata_left(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.into_iter().all(|entry| {
+        entry.is_ok_and(|entry| {
+            OS_METADATA_FILES
+                .iter()
+                .any(|name| entry.file_name() == *name)
+        })
+    })
+}
+
 /// Check if a git error message indicates a permission problem.
 pub fn is_permission_error(error: &str) -> bool {
     let lower = error.to_lowercase();
@@ -120,6 +142,7 @@ pub fn remove_managed_worktree(
     if !has_dot_git {
         // .git is missing (manual deletion or other issue).
         // Remove the dir ourselves and prune stale references.
+        let force = force || only_os_metadata_left(worktree_path);
         if let Err(e) = remove_worktree_dir(worktree_path, main_repo, force) {
             tracing::debug!(error = %e, kind = ?e.kind(), "remove_worktree_dir failed (no .git)");
             if !(is_permission_error(&e.to_string())
@@ -141,11 +164,16 @@ pub fn remove_managed_worktree(
                     is_perm = is_permission_error(&err_str),
                     "git worktree remove failed"
                 );
-                // Container cleanup deletes everything including .git, so
-                // git worktree remove won't work afterward. Fall back to
-                // removing the directory and pruning stale references.
-                if is_permission_error(&err_str)
-                    && try_sandbox_dir_cleanup(worktree_path, main_repo, instance)
+                // Git empties the worktree and drops its registration before
+                // the final rmdir, so a failure there can leave only OS
+                // metadata behind. Container cleanup likewise deletes
+                // everything including .git. Either way git worktree remove
+                // won't work afterward: remove the directory and prune.
+                let leftover_removed = only_os_metadata_left(worktree_path)
+                    && remove_worktree_dir(worktree_path, main_repo, true).is_ok();
+                if leftover_removed
+                    || (is_permission_error(&err_str)
+                        && try_sandbox_dir_cleanup(worktree_path, main_repo, instance))
                 {
                     if let Err(e2) = git_wt.prune_worktrees() {
                         errors.push(format!("Worktree: {}", e2));
@@ -222,6 +250,55 @@ mod tests {
         let result = remove_worktree_dir(&wt, &main, false);
         assert!(result.is_ok());
         assert!(!wt.exists());
+    }
+
+    #[test]
+    fn test_only_os_metadata_left() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wt = dir.path().join("worktree");
+        assert!(!only_os_metadata_left(&wt));
+
+        std::fs::create_dir(&wt).unwrap();
+        std::fs::write(wt.join(".DS_Store"), b"").unwrap();
+        assert!(only_os_metadata_left(&wt));
+
+        std::fs::write(wt.join("notes.txt"), b"keep").unwrap();
+        assert!(!only_os_metadata_left(&wt));
+    }
+
+    #[test]
+    fn test_remove_managed_worktree_clears_os_metadata_leftover() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let main = dir.path().join("main");
+        git2::Repository::init(&main).unwrap();
+        let wt = main.join(".worktrees").join("leftover");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".DS_Store"), b"").unwrap();
+
+        let git_wt = GitWorktree::new(main.clone()).unwrap();
+        let instance = Instance::new("leftover", wt.to_str().unwrap());
+        let result = remove_managed_worktree(&git_wt, &wt, &main, &instance, false);
+
+        assert_eq!(result, Ok(()));
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn test_remove_managed_worktree_keeps_user_files_without_force() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let main = dir.path().join("main");
+        git2::Repository::init(&main).unwrap();
+        let wt = main.join(".worktrees").join("leftover");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".DS_Store"), b"").unwrap();
+        std::fs::write(wt.join("notes.txt"), b"keep").unwrap();
+
+        let git_wt = GitWorktree::new(main.clone()).unwrap();
+        let instance = Instance::new("leftover", wt.to_str().unwrap());
+        let result = remove_managed_worktree(&git_wt, &wt, &main, &instance, false);
+
+        assert!(result.is_err());
+        assert!(wt.join("notes.txt").exists());
     }
 
     #[test]

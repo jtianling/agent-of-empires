@@ -330,7 +330,9 @@ impl HomeView {
                 }
                 DialogResult::Submit(_) => {
                     self.confirm_dialog = None;
-                    if action == "delete_group" {
+                    if action == "quit" {
+                        return Some(Action::Quit);
+                    } else if action == "delete_group" {
                         if let Err(e) = self.delete_selected_group() {
                             tracing::error!("Failed to delete group: {}", e);
                         }
@@ -573,7 +575,13 @@ impl HomeView {
                 self.search_match_index = 0;
                 self.search_query = Input::default();
             }
-            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => return Some(Action::Quit),
+            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+                self.confirm_dialog = Some(ConfirmDialog::new(
+                    "Quit Agent of Empires",
+                    "Quit Agent of Empires?",
+                    "quit",
+                ));
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }

@@ -455,12 +455,10 @@ pub fn is_tmux_available() -> bool {
 fn is_agent_available(agent: &crate::agents::AgentDef) -> bool {
     use crate::agents::DetectionMethod;
     match &agent.detection {
-        DetectionMethod::Which(binary) => Command::new("which")
-            .arg(binary)
-            .output()
-            .map(|o| o.status.success())
+        DetectionMethod::Which(binary) => crate::agents::executable::resolve(binary).is_some(),
+        DetectionMethod::RunWithArg(binary, arg) => crate::agents::executable::resolve(binary)
+            .map(|path| Command::new(path).arg(arg).output().is_ok())
             .unwrap_or(false),
-        DetectionMethod::RunWithArg(binary, arg) => Command::new(binary).arg(arg).output().is_ok(),
     }
 }
 

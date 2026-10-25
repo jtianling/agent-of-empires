@@ -223,8 +223,33 @@ impl Preview {
             .title(" Output ")
             .title_style(Style::default().fg(theme.dimmed));
 
-        let inner = block.inner(area);
+        let mut inner = block.inner(area);
         frame.render_widget(block, area);
+
+        // Kept apart from `last_error`, which the status poller rewrites as
+        // soon as the relaunched pane looks healthy.
+        if !instance.relaunch_notes.is_empty() && inner.height > 1 {
+            let notes: Vec<Line> = instance
+                .relaunch_notes
+                .iter()
+                .map(|note| {
+                    Line::from(Span::styled(
+                        format!("Note: {note}"),
+                        Style::default().fg(theme.waiting),
+                    ))
+                })
+                .collect();
+            let width = inner.width.max(1) as usize;
+            let rows: usize = notes
+                .iter()
+                .map(|line| line.width().div_ceil(width).max(1))
+                .sum();
+            let rows = (rows as u16).min(inner.height - 1);
+            let [notes_area, rest] =
+                Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(inner);
+            frame.render_widget(Paragraph::new(notes).wrap(Wrap { trim: false }), notes_area);
+            inner = rest;
+        }
 
         if let Some(error) = &instance.last_error {
             let error_lines: Vec<Line> = vec![
@@ -303,6 +328,35 @@ fn shorten_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relaunch_notes_show_above_output_and_survive_a_cleared_error() {
+        use ratatui::backend::TestBackend;
+
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.relaunch_notes = vec!["pane 1: /gone no longer exists, started in /tmp/test".into()];
+        inst.last_error = None;
+        let theme = crate::tui::styles::load_theme("default");
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                Preview::render_output_cached(frame, frame.area(), &inst, "agent output", &theme)
+            })
+            .unwrap();
+
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            screen.contains("Note: pane 1: /gone no longer exists"),
+            "{screen}"
+        );
+        assert!(screen.contains("agent output"), "{screen}");
+    }
 
     #[test]
     fn test_shorten_path_with_home() {
