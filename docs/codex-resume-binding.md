@@ -26,6 +26,17 @@ slot, pane capture 和绑定证明在一个数据库事务中写入.
 launch ID, 旧 launch 的结果仍被拒绝.  启动失败恢复原有已验证来源,
 但不回退 generation, 防止旧请求重新获得写入资格.
 
+Codex 宿主机 resume 始终使用当前工作目录下生效的 provider, 不沿用历史线程
+保存的旧 provider.  远程恢复先通过同一 app-server 的 `config/read` 解析配置,
+再向 `thread/resume` 显式传入 `modelProvider`, 并校验返回的 provider 与原 UUID.
+本地恢复通过短生命周期的 stdio app-server 解析配置, 向原 Codex resume 命令
+追加 `--config model_provider=...`.  未指定 provider 时使用 Codex 默认的 `openai`.
+此行为不改写配置文件, 不清空历史, 不应用于容器和完整自定义命令覆盖.
+
+Codex 0.164.0 对已加载线程会忽略 provider 切换参数.  返回的 provider 与当前
+配置不一致时, AoE 明确拒绝远程恢复并保留原 pane, 不假报成功, 不通过归档线程
+或重启共享服务绕过限制.  provider 解析和 RPC 失败均保留具体错误原因.
+
 Codex 远程 resume 不接受 CLI 权限覆盖.  `r`/`R` 恢复时不追加
 `--approve-for-me` 或 `--dangerously-bypass-approvals-and-sandbox`.
 对已验证且开启 YOLO 的 slot, AoE 在重启 pane 前通过同一 app-server 的

@@ -139,6 +139,34 @@ AoE SHALL 在宿主机 agent 的首次启动, resume 和 restart 中优先使用
 - **WHEN** AoE 进程 PATH 中没有目标 agent, 且多个有效 NVM 版本提供该 agent
 - **THEN** AoE SHALL 选择版本号最高且实际存在可执行入口的 Node 安装目录作为后备
 
+### Requirement: Codex 宿主机恢复采用当前 provider
+
+AoE SHALL 在宿主机 Codex 恢复时使用目标 pane 工作目录下当前生效的 provider,
+而非历史线程保存的 provider.  远程恢复 SHALL 通过同一 app-server 的
+`config/read` 解析 provider, 显式传入 `thread/resume` 并验证返回的 provider 和
+线程 UUID.  本地恢复 SHALL 通过临时 stdio app-server 解析配置并向原 Codex
+命令追加 provider 覆盖参数.  未显式配置 provider 时 SHALL 使用 Codex 默认
+`openai`.  此规则 SHALL 同时覆盖 YOLO 和非 YOLO 恢复, 不改变非 YOLO 权限,
+不应用于容器或完整自定义命令覆盖.
+
+#### Scenario: 历史 provider 已被移除
+
+- **WHEN** 历史线程保存的 provider 已从配置移除, 当前配置提供另一个有效 provider
+- **THEN** 恢复 SHALL 使用当前 provider, 保留原线程 UUID 和历史
+- **AND** 项目目录的配置覆盖 SHALL 按 Codex 自身的解析规则生效
+
+#### Scenario: 已加载的远程线程拒绝切换 provider
+
+- **WHEN** Codex 返回的 provider 与当前生效的 provider 不同
+- **THEN** AoE SHALL 明确报错并保留原 pane, 不使用旧 provider 假报恢复成功
+- **AND** AoE SHALL 不通过归档线程或重启共享服务绕过限制
+
+#### Scenario: 配置解析或恢复请求失败
+
+- **WHEN** 配置解析或恢复 RPC 返回错误
+- **THEN** AoE SHALL 保留具体错误原因
+- **AND** 临时本地配置服务 SHALL 在成功, 失败和超时后退出
+
 ### Requirement: Session attach configures tmux key bindings
 When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key bindings for navigation: root-table `Ctrl+,` and `Ctrl+.` for session cycling, `Ctrl+b 1-9` for number jump via key tables, `Ctrl+b b` for back toggle, `Ctrl+b h/j/k/l` for pane navigation, and `Ctrl+;` for pane cycling. The `attach()` method accepts a `profile` parameter to scope session cycling and number jump to the current profile.
 

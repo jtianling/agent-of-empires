@@ -107,6 +107,9 @@ pub enum Commands {
     #[command(name = "__record-pane", hide = true)]
     RecordPane(RecordPaneArgs),
 
+    #[command(name = "__codex-provider", hide = true)]
+    CodexProvider(super::codex_provider::CodexProviderArgs),
+
     /// Internal: own one exact OpenCode server/session runtime (hidden).
     #[command(name = "__opencode-runtime", hide = true)]
     OpenCodeRuntime(OpenCodeRuntimeArgs),

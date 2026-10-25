@@ -2677,6 +2677,18 @@ impl Instance {
                     {
                         cmd = format!("{} {}", cmd, flag);
                     }
+                    if a.name == "codex" && resume_token.is_some() && !pane.cross_agent_team {
+                        cmd = match crate::codex_permissions::local_resume_command(
+                            &cmd,
+                            &pane.working_dir,
+                        ) {
+                            Ok(command) => command,
+                            Err(error) => {
+                                tracing::error!("Cannot prepare local Codex resume: {error:#}");
+                                return None;
+                            }
+                        };
+                    }
                     if pane.cross_agent_team {
                         match pane.tool.as_str() {
                             "claude" => {
@@ -4903,6 +4915,7 @@ impl Instance {
             tmux_pane,
             live_source,
             &tmux::Session::generate_name(&self.id, &self.title),
+            &pane.working_dir,
         ) {
             Ok(restart) => restart,
             Err(error) => return PaneResumeOutcome::Error(format!("{error:#}")),
@@ -5321,14 +5334,16 @@ mod tests {
         let shell = crate::session::environment::user_posix_shell();
         assert!(cmd.contains(&format!("{shell} -lc 'stty susp undef; ")));
         assert!(
-            cmd.ends_with(
-                "exec env codex resume \
+            cmd.contains(
+                "exec codex resume \
                  019d1af9-a899-7df1-8f7d-a244126e5ded \
                  --config check_for_update_on_startup=false --model gpt-5 \
-                 --dangerously-bypass-approvals-and-sandbox'"
+                 --dangerously-bypass-approvals-and-sandbox"
             ),
             "unexpected codex resume command: {cmd}"
         );
+        assert!(cmd.contains("__codex-provider"));
+        assert!(cmd.contains("model_provider=$provider"));
         assert!(
             !cmd.contains("AOE_INSTANCE_ID"),
             "a hookless agent's launch must not carry AOE_INSTANCE_ID: {cmd}"

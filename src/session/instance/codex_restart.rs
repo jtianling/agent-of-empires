@@ -16,6 +16,7 @@ impl CodexRestart {
         target: &str,
         live_source: bool,
         session_name: &str,
+        working_dir: &str,
     ) -> Result<Option<Self>> {
         if slot.agent != "codex" || !slot.cross_agent_team {
             return Ok(None);
@@ -30,9 +31,14 @@ impl CodexRestart {
             None
         };
         let verified = store.codex_resume_verified(slot)?;
-        if verified && mode == RestartMode::Resume && slot.yolo_mode {
+        if verified && mode == RestartMode::Resume {
             let endpoint = super::codex_app_server_endpoint().map_err(anyhow::Error::msg)?;
-            crate::codex_permissions::restore_yolo(endpoint.url, slot.native_session_id.clone())?;
+            crate::codex_permissions::prepare_resume(
+                endpoint.url,
+                slot.native_session_id.clone(),
+                working_dir.to_string(),
+                slot.yolo_mode,
+            )?;
         }
         store.prepare_codex_restart(slot, mode, target, retiring.as_deref())?;
         Ok(Some(Self {
