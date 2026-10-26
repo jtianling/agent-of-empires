@@ -81,6 +81,7 @@ pub fn narrow_to_slots(
 /// Identity fields the restart pipeline mutates on the worker's clone.
 #[derive(Debug, Clone)]
 pub struct RestartIdentity {
+    pub managed: bool,
     pub agent_session_id: Option<String>,
     pub fork_pending: Option<String>,
     pub resume_token: Option<String>,
@@ -92,6 +93,7 @@ pub struct RestartIdentity {
 impl RestartIdentity {
     fn from_instance(instance: &Instance) -> Self {
         Self {
+            managed: instance.managed_xats.is_some(),
             agent_session_id: instance.agent_session_id.clone(),
             fork_pending: instance.fork_pending.clone(),
             resume_token: instance.resume_token.clone(),

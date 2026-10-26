@@ -7,10 +7,12 @@ mod container_config;
 pub(crate) mod environment;
 mod groups;
 mod instance;
+mod operation_lock;
 mod pane;
 pub mod profile_config;
 pub mod repo_config;
 mod storage;
+mod storage_merge;
 
 pub use crate::sound::{SoundConfig, SoundConfigOverride};
 pub use config::{
@@ -23,7 +25,9 @@ pub use groups::{
     expanded_groups, flatten_tree, flatten_tree_all_profiles, validate_group_path, Group,
     GroupTree, Item,
 };
-pub(crate) use instance::{extract_resume_token, is_valid_resume_token, pane_agent_is_shell};
+pub(crate) use instance::{
+    extract_resume_token, is_valid_resume_token, managed_codex_endpoint, pane_agent_is_shell,
+};
 pub use instance::{
     IdentityKeyOrigin, Instance, PaneResumeOutcome, RestartMode, SandboxInfo, Status,
     StatusUpdateOptions, TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,

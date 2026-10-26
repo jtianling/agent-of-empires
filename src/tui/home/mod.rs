@@ -642,6 +642,7 @@ impl HomeView {
         } = result;
 
         let has_identity = identity.is_some();
+        let managed = identity.as_ref().is_some_and(|identity| identity.managed);
         self.background_starts.remove(&session_id);
         self.mutate_instance(&session_id, |inst| {
             if let Some(identity) = identity {
@@ -662,7 +663,8 @@ impl HomeView {
         // A result without identity fields ran no pipeline, so there is
         // nothing to persist or reclassify.
         if has_identity {
-            if let Err(err) = self.save() {
+            let saved = if managed { self.reload() } else { self.save() };
+            if let Err(err) = saved {
                 tracing::error!("Failed to save after background restart: {}", err);
             }
             self.refresh_recoverable_cache();

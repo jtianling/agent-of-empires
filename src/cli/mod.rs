@@ -6,6 +6,7 @@ pub mod definition;
 pub mod group;
 pub mod init;
 pub mod list;
+pub mod managed;
 pub mod profile;
 pub mod record_pane;
 pub mod remove;

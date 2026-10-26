@@ -5,6 +5,18 @@ This document contains the help content for the `aoe` command-line program.
 **Command Overview:**
 
 * [`aoe`↴](#aoe)
+* [`aoe managed`↴](#aoe-managed)
+* [`aoe managed init`↴](#aoe-managed-init)
+* [`aoe managed create`↴](#aoe-managed-create)
+* [`aoe managed list`↴](#aoe-managed-list)
+* [`aoe managed show`↴](#aoe-managed-show)
+* [`aoe managed start`↴](#aoe-managed-start)
+* [`aoe managed stop`↴](#aoe-managed-stop)
+* [`aoe managed restart`↴](#aoe-managed-restart)
+* [`aoe managed rename`↴](#aoe-managed-rename)
+* [`aoe managed send`↴](#aoe-managed-send)
+* [`aoe managed capture`↴](#aoe-managed-capture)
+* [`aoe managed remove`↴](#aoe-managed-remove)
 * [`aoe add`↴](#aoe-add)
 * [`aoe init`↴](#aoe-init)
 * [`aoe list`↴](#aoe-list)
@@ -12,6 +24,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe send`↴](#aoe-send)
 * [`aoe status`↴](#aoe-status)
 * [`aoe session`↴](#aoe-session)
+* [`aoe session set-owner`↴](#aoe-session-set-owner)
 * [`aoe session start`↴](#aoe-session-start)
 * [`aoe session stop`↴](#aoe-session-stop)
 * [`aoe session restart`↴](#aoe-session-restart)
@@ -55,6 +68,7 @@ Run without arguments to launch the TUI dashboard.
 
 ###### **Subcommands:**
 
+* `managed` — Manage agent-owned sessions through an ownership-checked JSON interface
 * `add` — Add a new session
 * `init` — Initialize .aoe/config.toml in a repository
 * `list` — List all sessions
@@ -73,6 +87,178 @@ Run without arguments to launch the TUI dashboard.
 ###### **Options:**
 
 * `-p`, `--profile <PROFILE>` — Profile to use (separate workspace with its own sessions)
+
+
+
+## `aoe managed`
+
+Manage agent-owned sessions through an ownership-checked JSON interface
+
+**Usage:** `aoe managed [OPTIONS] <COMMAND>`
+
+###### **Subcommands:**
+
+* `init` — Create a new manager context at --context (never overwrites)
+* `create` — Create an owned session, optionally launch it
+* `list` — List session metadata without terminal content
+* `show` — Show exact session metadata and xats readiness
+* `start` — Start an owned session
+* `stop` — Stop an owned session
+* `restart` — Restart an owned session
+* `rename` — Rename an owned session
+* `send` — Send literal input to an owned session
+* `capture` — Read terminal output from an owned session
+* `remove` — Remove an owned session, preserving code and shared resources
+
+###### **Options:**
+
+* `--context <CONTEXT>` — Persistent manager context file
+
+
+
+## `aoe managed init`
+
+Create a new manager context at --context (never overwrites)
+
+**Usage:** `aoe managed init`
+
+
+
+## `aoe managed create`
+
+Create an owned session, optionally launch it
+
+**Usage:** `aoe managed create [OPTIONS] --tool <TOOL> --title <TITLE> <PATH>`
+
+###### **Arguments:**
+
+* `<PATH>` — Existing project directory
+
+###### **Options:**
+
+* `--tool <TOOL>` — Agent tool from the AoE registry
+* `--title <TITLE>`
+* `--group <GROUP>`
+
+  Default value: ``
+* `--launch`
+* `--xats-name <XATS_NAME>` — xats collaborator name (requires --xats-team)
+* `--xats-team <XATS_TEAM>` — xats team (requires --xats-name)
+
+
+
+## `aoe managed list`
+
+List session metadata without terminal content
+
+**Usage:** `aoe managed list`
+
+
+
+## `aoe managed show`
+
+Show exact session metadata and xats readiness
+
+**Usage:** `aoe managed show <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Complete session ID (no titles or prefixes)
+
+
+
+## `aoe managed start`
+
+Start an owned session
+
+**Usage:** `aoe managed start <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Complete session ID (no titles or prefixes)
+
+
+
+## `aoe managed stop`
+
+Stop an owned session
+
+**Usage:** `aoe managed stop <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Complete session ID (no titles or prefixes)
+
+
+
+## `aoe managed restart`
+
+Restart an owned session
+
+**Usage:** `aoe managed restart <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Complete session ID (no titles or prefixes)
+
+
+
+## `aoe managed rename`
+
+Rename an owned session
+
+**Usage:** `aoe managed rename --title <TITLE> <ID>`
+
+###### **Arguments:**
+
+* `<ID>`
+
+###### **Options:**
+
+* `--title <TITLE>`
+
+
+
+## `aoe managed send`
+
+Send literal input to an owned session
+
+**Usage:** `aoe managed send <ID> <MESSAGE>`
+
+###### **Arguments:**
+
+* `<ID>`
+* `<MESSAGE>`
+
+
+
+## `aoe managed capture`
+
+Read terminal output from an owned session
+
+**Usage:** `aoe managed capture [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>`
+
+###### **Options:**
+
+* `-n`, `--lines <LINES>`
+
+  Default value: `50`
+
+
+
+## `aoe managed remove`
+
+Remove an owned session, preserving code and shared resources
+
+**Usage:** `aoe managed remove <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Complete session ID (no titles or prefixes)
 
 
 
@@ -189,6 +375,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 
 ###### **Subcommands:**
 
+* `set-owner` — Human administration: take ownership, or transfer to a manager context
 * `start` — Start a session's tmux process
 * `stop` — Stop session process
 * `restart` — Restart session
@@ -199,6 +386,22 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `current` — Auto-detect current session
 * `fork` — Fork a session using the agent's native fork-session command. Managed host OpenCode is rejected until exact-session runtime fork is available
 * `add-agent-pane` — Add an agent pane to a running session
+
+
+
+## `aoe session set-owner`
+
+Human administration: take ownership, or transfer to a manager context
+
+**Usage:** `aoe session set-owner [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Complete session ID
+
+###### **Options:**
+
+* `--context <CONTEXT>` — Transfer to this registered manager context; omit to take human ownership
 
 
 

@@ -10,6 +10,7 @@ use crate::git::cleanup::remove_managed_worktree;
 use crate::git::GitWorktree;
 use crate::session::{Instance, PaneConfig, PaneWorktreeInfo};
 
+#[derive(Clone)]
 pub struct DeletionRequest {
     pub session_id: String,
     pub instance: Instance,
@@ -62,6 +63,56 @@ impl DeletionPoller {
     }
 
     fn perform_deletion(request: &DeletionRequest) -> DeletionResult {
+        if request.instance.managed_xats.is_some() {
+            return Self::perform_managed_deletion(request);
+        }
+        Self::perform_resources_deletion(request)
+    }
+
+    fn perform_managed_deletion(request: &DeletionRequest) -> DeletionResult {
+        let result = Self::delete_managed(request);
+        DeletionResult {
+            session_id: request.session_id.clone(),
+            success: result.is_ok(),
+            error: result.err().map(|error| format!("{error:#}")),
+        }
+    }
+
+    fn delete_managed(request: &DeletionRequest) -> anyhow::Result<()> {
+        use crate::session::{GroupTree, Storage};
+        use anyhow::{ensure, Context};
+
+        let storage = Storage::new(&request.profile)?;
+        let _operation = storage.operation_lock()?;
+        let (mut instances, groups) = storage.load_with_groups()?;
+        let index = instances
+            .iter()
+            .position(|item| item.id == request.session_id)
+            .context("Managed session disappeared before deletion")?;
+        let current = &instances[index];
+        ensure!(
+            same_managed_launch(current, &request.instance),
+            "Managed session changed before deletion; reload and retry"
+        );
+        crate::managed_xats::prepare_release(&mut instances[index])?;
+        storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))?;
+        let mut instance = instances[index].clone();
+        instance.source_profile = request.profile.clone();
+        instance.stop()?;
+        crate::managed_xats::release(&instance)?;
+        crate::managed_codex::cleanup(&instance)?;
+        crate::managed_runtimes::cleanup(&instance)?;
+        let exact = DeletionRequest {
+            instance,
+            ..request.clone()
+        };
+        let result = Self::perform_resources_deletion(&exact);
+        ensure!(result.success, "{}", result.error.unwrap_or_default());
+        instances.remove(index);
+        storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))
+    }
+
+    fn perform_resources_deletion(request: &DeletionRequest) -> DeletionResult {
         let mut errors = Vec::new();
         if request.delete_worktree || request.delete_branch {
             let pane_configs = Self::pane_configs_for_deletion(request, &mut errors);
@@ -246,6 +297,19 @@ impl DeletionPoller {
     }
 }
 
+fn same_managed_launch(current: &Instance, requested: &Instance) -> bool {
+    let fence = |instance: &Instance| {
+        instance
+            .managed_xats
+            .as_ref()
+            .and_then(|identity| identity.claim.as_ref())
+            .map(|claim| claim.fence.clone())
+    };
+    current.managed_xats.is_some()
+        && current.xats_identity_key == requested.xats_identity_key
+        && fence(current) == fence(requested)
+}
+
 impl Default for DeletionPoller {
     fn default() -> Self {
         Self::new()
@@ -259,6 +323,37 @@ mod tests {
 
     fn create_test_instance() -> Instance {
         Instance::new("Test Session", "/tmp/test-project")
+    }
+
+    #[test]
+    fn managed_deletion_rejects_replaced_launch() {
+        let mut old = create_test_instance();
+        old.xats_identity_key = Some("key".to_string());
+        old.managed_xats = Some(
+            serde_json::from_value(serde_json::json!({
+                "name": "worker", "team": "test",
+                "launch_instance_id": "00000000-0000-4000-8000-000000000001",
+                "claim": {"fence": {
+                    "claim_id": "00000000-0000-4000-8000-000000000002",
+                    "instance_id": "00000000-0000-4000-8000-000000000001",
+                    "generation": 1
+                }, "mcp_token": "private", "runtime": null}
+            }))
+            .unwrap(),
+        );
+        let mut current = old.clone();
+        assert!(same_managed_launch(&current, &old));
+        current
+            .managed_xats
+            .as_mut()
+            .unwrap()
+            .claim
+            .as_mut()
+            .unwrap()
+            .fence
+            .generation = 2;
+        assert!(!same_managed_launch(&current, &old));
+        assert!(!same_managed_launch(&create_test_instance(), &old));
     }
 
     #[test]

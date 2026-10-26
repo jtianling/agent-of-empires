@@ -1,31 +1,48 @@
-//! Session storage - JSON file persistence
+//! Session storage with optimistic concurrency and atomic replacement.
 
-use anyhow::Result;
-use std::fs;
+use anyhow::{Context, Result};
+use fs2::FileExt;
+use serde_json::Value;
+use std::cell::{Cell, RefCell};
+use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 use tracing::warn;
 
+use super::storage_merge::{atomic_write, merge};
 use super::{get_profile_dir, Group, GroupTree, Instance, DEFAULT_PROFILE};
 
 pub struct Storage {
     profile: String,
     sessions_path: PathBuf,
+    baseline: RefCell<Vec<Value>>,
+    group_baseline: RefCell<Vec<Value>>,
+    locked: Cell<bool>,
+}
+
+pub struct StorageGuard<'a> {
+    storage: &'a Storage,
+    _file: File,
+}
+
+impl Drop for StorageGuard<'_> {
+    fn drop(&mut self) {
+        self.storage.locked.set(false);
+    }
 }
 
 impl Storage {
     pub fn new(profile: &str) -> Result<Self> {
-        let profile_name = if profile.is_empty() {
-            DEFAULT_PROFILE.to_string()
+        let profile = if profile.is_empty() {
+            DEFAULT_PROFILE
         } else {
-            profile.to_string()
+            profile
         };
-
-        let profile_dir = get_profile_dir(&profile_name)?;
-        let sessions_path = profile_dir.join("sessions.json");
-
         Ok(Self {
-            profile: profile_name,
-            sessions_path,
+            profile: profile.to_string(),
+            sessions_path: get_profile_dir(profile)?.join("sessions.json"),
+            baseline: RefCell::new(Vec::new()),
+            group_baseline: RefCell::new(Vec::new()),
+            locked: Cell::new(false),
         })
     }
 
@@ -33,74 +50,135 @@ impl Storage {
         &self.profile
     }
 
-    pub fn load(&self) -> Result<Vec<Instance>> {
-        if !self.sessions_path.exists() {
-            return Ok(Vec::new());
-        }
+    pub fn lock(&self) -> Result<StorageGuard<'_>> {
+        anyhow::ensure!(!self.locked.get(), "Storage is already locked");
+        let parent = self
+            .sessions_path
+            .parent()
+            .context("Missing storage directory")?;
+        fs::create_dir_all(parent)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join("sessions.lock"))?;
+        file.lock_exclusive().context("Locking session storage")?;
+        self.locked.set(true);
+        Ok(StorageGuard {
+            storage: self,
+            _file: file,
+        })
+    }
 
-        let content = fs::read_to_string(&self.sessions_path)?;
-        if content.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+    pub fn operation_lock(&self) -> Result<super::operation_lock::OperationGuard> {
+        super::operation_lock::acquire(&self.sessions_path.with_file_name("managed-operation.lock"))
+    }
 
-        let mut instances: Vec<Instance> = serde_json::from_str(&content)?;
+    fn read_instances(&self) -> Result<Vec<Instance>> {
+        let mut instances: Vec<Instance> = self.read_json(&self.sessions_path)?;
         for instance in &mut instances {
             instance.hydrate_legacy_primary_pane();
         }
         Ok(instances)
     }
 
-    pub fn load_with_groups(&self) -> Result<(Vec<Instance>, Vec<Group>)> {
-        let instances = self.load()?;
-
-        // Load groups from separate file
-        let groups_path = self.sessions_path.with_file_name("groups.json");
-        let groups = if groups_path.exists() {
-            let content = fs::read_to_string(&groups_path)?;
-            if content.trim().is_empty() {
-                Vec::new()
-            } else {
-                serde_json::from_str(&content)?
-            }
-        } else {
-            Vec::new()
+    fn read_json<T: serde::de::DeserializeOwned>(&self, path: &std::path::Path) -> Result<Vec<T>> {
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
         };
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str(&content).with_context(|| format!("Reading {}", path.display()))
+    }
 
+    pub fn load(&self) -> Result<Vec<Instance>> {
+        let _guard = if self.locked.get() {
+            None
+        } else {
+            Some(self.lock()?)
+        };
+        let instances = self.read_instances()?;
+        *self.baseline.borrow_mut() = values(&instances)?;
+        Ok(instances)
+    }
+
+    pub fn load_with_groups(&self) -> Result<(Vec<Instance>, Vec<Group>)> {
+        let _guard = if self.locked.get() {
+            None
+        } else {
+            Some(self.lock()?)
+        };
+        let instances = self.load()?;
+        let groups = self.read_json(&self.sessions_path.with_file_name("groups.json"))?;
+        *self.group_baseline.borrow_mut() = values(&groups)?;
         Ok((instances, groups))
     }
 
     pub fn save(&self, instances: &[Instance]) -> Result<()> {
-        // Ensure profile directory exists before writing
-        if let Some(parent) = self.sessions_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)?;
-            }
-        }
+        self.save_inner(instances, None)
+    }
 
-        // Create backup
+    pub fn save_with_groups(&self, instances: &[Instance], tree: &GroupTree) -> Result<()> {
+        self.save_inner(instances, Some(tree.get_all_groups()))
+    }
+
+    fn save_inner(&self, instances: &[Instance], groups: Option<Vec<Group>>) -> Result<()> {
+        let _guard = if self.locked.get() {
+            None
+        } else {
+            Some(self.lock()?)
+        };
+        let next = values(instances)?;
+        let current = values(&self.read_instances()?)?;
+        let merged = merge(&self.baseline.borrow(), &current, &next, "id")?;
+        let group_path = self.sessions_path.with_file_name("groups.json");
+        let group_update = groups
+            .map(|groups| -> Result<_> {
+                let next = values(&groups)?;
+                let current: Vec<Value> = self.read_json(&group_path)?;
+                let merged = merge(&self.group_baseline.borrow(), &current, &next, "path")?;
+                Ok((next, merged))
+            })
+            .transpose()?;
+        self.backup()?;
+        atomic_write(&self.sessions_path, &serde_json::to_vec_pretty(&merged)?)?;
+        if let Some((next_groups, merged_groups)) = group_update {
+            let write = atomic_write(&group_path, &serde_json::to_vec_pretty(&merged_groups)?);
+            if let Err(error) = write {
+                atomic_write(&self.sessions_path, &serde_json::to_vec_pretty(&current)?)
+                    .with_context(|| {
+                        format!("Group save failed: {error:#}; session rollback failed")
+                    })?;
+                return Err(error.context("Group save failed; session changes rolled back"));
+            }
+            *self.group_baseline.borrow_mut() = next_groups;
+        }
+        *self.baseline.borrow_mut() = next;
+        Ok(())
+    }
+
+    fn backup(&self) -> Result<()> {
         if self.sessions_path.exists() {
-            let backup_path = self.sessions_path.with_extension("json.bak");
-            if let Err(e) = fs::copy(&self.sessions_path, &backup_path) {
-                warn!("Failed to create backup: {}", e);
+            if let Err(error) = fs::copy(
+                &self.sessions_path,
+                self.sessions_path.with_extension("json.bak"),
+            ) {
+                warn!("Failed to create backup: {error}");
             }
         }
-
-        let content = serde_json::to_string_pretty(instances)?;
-        fs::write(&self.sessions_path, content)?;
         Ok(())
     }
+}
 
-    pub fn save_with_groups(&self, instances: &[Instance], group_tree: &GroupTree) -> Result<()> {
-        self.save(instances)?;
-
-        // Save groups
-        let groups_path = self.sessions_path.with_file_name("groups.json");
-        let groups = group_tree.get_all_groups();
-        let content = serde_json::to_string_pretty(&groups)?;
-        fs::write(&groups_path, content)?;
-
-        Ok(())
-    }
+fn values<T: serde::Serialize>(items: &[T]) -> Result<Vec<Value>> {
+    items
+        .iter()
+        .map(|item| serde_json::to_value(item).map_err(Into::into))
+        .collect()
 }
 
 #[cfg(test)]
@@ -111,6 +189,33 @@ mod tests {
 
     fn setup_test_home(temp: &std::path::Path) -> crate::session::TestHomeGuard {
         crate::session::scoped_test_home(temp)
+    }
+
+    #[test]
+    #[serial]
+    fn concurrent_writers_preserve_creation_and_deletion() -> Result<()> {
+        let temp = tempdir()?;
+        let _home = crate::session::scoped_test_home(temp.path());
+        let first = Storage::new("concurrent")?;
+        let second = Storage::new("concurrent")?;
+        let original = Instance::new("original", "/tmp");
+        first.save(std::slice::from_ref(&original))?;
+        let mut local = first.load()?;
+        let mut remote = second.load()?;
+        let added = Instance::new("added", "/tmp");
+        remote.push(added.clone());
+        second.save(&remote)?;
+        local[0].title = "changed".into();
+        first.save(&local)?;
+        let reader = Storage::new("concurrent")?;
+        let merged = reader.load()?;
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|instance| instance.id == added.id));
+        second.load()?;
+        second.save(&[])?;
+        first.save(&local)?;
+        assert!(reader.load()?.is_empty());
+        Ok(())
     }
 
     #[test]

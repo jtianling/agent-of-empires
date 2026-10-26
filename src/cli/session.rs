@@ -9,6 +9,9 @@ use crate::session::{GroupTree, Storage};
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
+    /// Human administration: take ownership, or transfer to a manager context
+    SetOwner(super::managed::args::SetOwnerArgs),
+
     /// Start a session's tmux process
     Start(SessionIdArgs),
 
@@ -170,6 +173,7 @@ struct SessionDetails {
 
 pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
     match command {
+        SessionCommands::SetOwner(args) => super::managed::set_owner(profile, args),
         SessionCommands::Start(args) => start_session(profile, args).await,
         SessionCommands::Stop(args) => stop_session(profile, args).await,
         SessionCommands::Restart(args) => restart_session(profile, args).await,

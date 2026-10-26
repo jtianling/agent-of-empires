@@ -42,7 +42,43 @@ async fn main() -> Result<()> {
         }
     }
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.use_stderr() && is_managed_request() {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": {
+                        "code": "invalid_input", "message": error.to_string(),
+                        "session_id": null
+                    }})
+                );
+            }
+            error.exit();
+        }
+    };
+
+    if let Some(Commands::Managed(args)) = cli.command {
+        let profile = session::resolve_profile(cli.profile);
+        std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);
+        agent_of_empires::tmux::init_tmux_socket_name(Some(
+            agent_of_empires::tmux::socket_name_for_profile(&profile),
+        ));
+        return cli::managed::run(&profile, args);
+    }
+
+    if let Some(Commands::Session {
+        command: cli::session::SessionCommands::SetOwner(args),
+    }) = cli.command
+    {
+        let profile = session::resolve_profile(cli.profile);
+        return cli::managed::set_owner(&profile, args);
+    }
+
+    if let Some(Commands::ManagedLaunch(args)) = cli.command {
+        let profile = session::resolve_profile(cli.profile);
+        return agent_of_empires::managed_runtimes::run_launch(&profile, args);
+    }
 
     // Handle commands that don't need app data or migrations.
     // These work in read-only/sandboxed environments (e.g. Nix builds).
@@ -142,4 +178,19 @@ async fn main() -> Result<()> {
         }
         _ => unreachable!(),
     }
+}
+
+fn is_managed_request() -> bool {
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "-p" || argument == "--profile" {
+            arguments.next();
+            continue;
+        }
+        if argument.to_string_lossy().starts_with('-') {
+            continue;
+        }
+        return argument == "managed";
+    }
+    false
 }

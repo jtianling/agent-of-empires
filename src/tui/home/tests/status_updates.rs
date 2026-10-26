@@ -45,6 +45,7 @@ fn stale_status_results_cannot_overwrite_completed_restart() {
             env.view.restart_poller.inject_result(RestartResult {
                 session_id: id.clone(),
                 identity: Some(RestartIdentity {
+                    managed: false,
                     agent_session_id: None,
                     fork_pending: None,
                     resume_token: Some("current-conversation".to_string()),

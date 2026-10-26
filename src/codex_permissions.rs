@@ -28,7 +28,7 @@ pub(crate) fn local_resume_command(cmd: &str, cwd: &str) -> Result<String> {
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_MODEL_PROVIDER: &str = "openai";
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Deserialize)]
 struct ResumeResponse {
@@ -189,7 +189,12 @@ fn validate_resume(
     Ok(())
 }
 
-async fn request(socket: &mut Socket, id: u64, method: &str, params: Value) -> Result<Value> {
+pub(crate) async fn request(
+    socket: &mut Socket,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
     socket
         .send(Message::Text(
             json!({"id": id, "method": method, "params": params})

@@ -19,6 +19,7 @@ use super::PaneConfig;
 
 mod agent_switch;
 mod codex_restart;
+mod managed;
 mod relaunch_dir;
 
 pub(crate) trait PaneConfigTarget {
@@ -878,6 +879,12 @@ fn parse_codex_app_server_url(raw: &str) -> Option<CodexAppServerEndpoint> {
 /// xats side, as a Codex that connected but cannot be resumed, and nobody
 /// debugging that goes looking through AoE's warnings. A pane that refuses to
 /// start is loud; two systems quietly talking to different servers is not.
+pub(crate) fn managed_codex_endpoint() -> anyhow::Result<String> {
+    codex_app_server_endpoint()
+        .map(|endpoint| endpoint.url)
+        .map_err(anyhow::Error::msg)
+}
+
 fn codex_app_server_endpoint() -> Result<CodexAppServerEndpoint, String> {
     resolve_codex_app_server_endpoint(
         std::env::var(CODEX_XATS_APP_SERVER_URL_ENV).ok(),
@@ -1076,6 +1083,10 @@ pub struct SandboxInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instance {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_xats: Option<crate::managed_xats::ManagedXats>,
     pub title: String,
     pub project_path: String,
     #[serde(default)]
@@ -1187,6 +1198,8 @@ impl Instance {
     pub fn new(title: &str, project_path: &str) -> Self {
         Self {
             id: generate_id(),
+            managed_owner: None,
+            managed_xats: None,
             title: title.to_string(),
             project_path: project_path.to_string(),
             group_path: String::new(),
@@ -1476,9 +1489,11 @@ impl Instance {
         pane_id: String,
         config: &PaneConfig,
         origin: IdentityKeyOrigin,
+        is_primary: bool,
     ) -> LaunchedClaudePane {
         LaunchedClaudePane {
-            reclaims_identity: self.reclaims_xats_identity(config, origin),
+            reclaims_identity: !(is_primary && self.managed_xats.is_some())
+                && self.reclaims_xats_identity(config, origin),
             pane: pane_id,
         }
     }
@@ -1492,7 +1507,7 @@ impl Instance {
         let Some(agent_pane) = tmux::get_agent_pane_id(&session_name) else {
             return;
         };
-        self.auto_confirm_panes(&[self.launched_claude_pane(agent_pane, &pane, origin)]);
+        self.auto_confirm_panes(&[self.launched_claude_pane(agent_pane, &pane, origin, true)]);
     }
 
     pub fn auto_confirm_launched_pane(&self, pane_id: &str, pane: &PaneConfig) {
@@ -1507,6 +1522,7 @@ impl Instance {
             pane_id.to_string(),
             pane,
             IdentityKeyOrigin::Minted,
+            false,
         )]);
     }
 
@@ -1695,7 +1711,22 @@ impl Instance {
         }
     }
 
-    fn codex_xats_bootstrap_command(&self, cmd: &str, base: &str, working_dir: &str) -> String {
+    fn codex_xats_bootstrap_command(
+        &self,
+        cmd: &str,
+        base: &str,
+        working_dir: &str,
+        is_primary: bool,
+    ) -> String {
+        if is_primary && self.managed_xats.is_some() && self.tool == "codex" {
+            return match crate::managed_codex::command(self, base, working_dir) {
+                Ok(command) => command,
+                Err(error) => {
+                    tracing::error!("Managed Codex command refused: {error:#}");
+                    codex_xats_aborted_command("[xats] Managed Codex is not prepared.")
+                }
+            };
+        }
         match codex_app_server_endpoint() {
             Ok(endpoint) => {
                 self.codex_xats_bootstrap_command_for(cmd, base, working_dir, &endpoint)
@@ -1882,6 +1913,9 @@ impl Instance {
     }
 
     pub(crate) fn start_for_restart(&mut self, mode: RestartMode) -> Result<()> {
+        if self.managed_xats.is_some() {
+            return self.managed_lifecycle(Some(mode), None, false);
+        }
         let snapshot = self.begin_fresh_identity(mode);
         let resume_token = self.resume_token.clone();
         let result = self.start_with_size(None);
@@ -1899,7 +1933,15 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
     ) -> Result<()> {
-        self.start_with_size_inner(size, skip_on_launch, SessionLaunch::Agent)
+        if self.managed_xats.is_some() {
+            return self.managed_lifecycle(None, size, skip_on_launch);
+        }
+        self.start_with_size_inner(
+            size,
+            skip_on_launch,
+            SessionLaunch::Agent,
+            RestartMode::Fresh,
+        )
     }
 
     /// Create the session without launching the agent, leaving its first pane on
@@ -1910,7 +1952,7 @@ impl Instance {
     /// the pane, and with it the single-pane session, down before the real launch
     /// runs.
     pub fn start_placeholder_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
-        self.start_with_size_inner(size, false, SessionLaunch::Placeholder)
+        self.start_with_size_inner(size, false, SessionLaunch::Placeholder, RestartMode::Fresh)
     }
 
     fn start_with_size_inner(
@@ -1918,6 +1960,7 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
         launch: SessionLaunch,
+        mode: RestartMode,
     ) -> Result<()> {
         self.clear_resume_token();
         let identity_origin = self.ensure_xats_identity_key();
@@ -1925,6 +1968,11 @@ impl Instance {
 
         if session.exists() {
             return Ok(());
+        }
+
+        if self.managed_xats.is_some() {
+            crate::managed_codex::prepare(self)?;
+            crate::managed_runtimes::prepare(self)?;
         }
 
         // Resolve on_launch hooks from the full config chain (global > profile > repo).
@@ -1992,7 +2040,7 @@ impl Instance {
                     &self.primary_pane,
                     "",
                     self.xats_identity_key.as_deref().unwrap_or(""),
-                    RestartMode::Fresh,
+                    mode,
                 )?)
             }
             None => None,
@@ -2004,7 +2052,14 @@ impl Instance {
         let cmd = match launch {
             SessionLaunch::Agent => self.build_pane_command_with_runtime(
                 &self.primary_pane,
-                None,
+                if self.managed_xats.is_some()
+                    && self.tool == "claude"
+                    && mode == RestartMode::Resume
+                {
+                    self.agent_session_id.as_deref()
+                } else {
+                    None
+                },
                 true,
                 exact_runtime
                     .as_ref()
@@ -2364,7 +2419,7 @@ impl Instance {
                 || crate::opencode_runtime::validate_session_id(&prepared.native_session_id)
                     .is_ok()
         );
-        if pane.cross_agent_team {
+        if pane.cross_agent_team && !(slot == 0 && self.managed_xats.is_some()) {
             if prepared.xats_identity_key.is_empty() {
                 anyhow::bail!("OpenCode Cross Agent Team slot {slot} has no identity key");
             }
@@ -2702,6 +2757,7 @@ impl Instance {
                                     &cmd,
                                     &base,
                                     &pane.working_dir,
+                                    is_primary,
                                 );
                             }
                             _ => {}
@@ -2713,6 +2769,15 @@ impl Instance {
                         {
                             env_vars.push((XATS_IDENTITY_KEY_ENV, key));
                         }
+                    }
+                    if is_primary && self.managed_xats.is_some() && pane.tool == "claude" {
+                        cmd = match crate::managed_runtimes::command(self, &cmd) {
+                            Ok(command) => command,
+                            Err(error) => {
+                                tracing::error!("Managed launch command refused: {error:#}");
+                                return None;
+                            }
+                        };
                     }
                     Some(wrap_host_agent_command(&cmd, &env_vars, Some(a)))
                 })
@@ -2748,7 +2813,12 @@ impl Instance {
                         }
                         "codex" => {
                             let base = self.pane_base_command(&pane.tool, is_primary);
-                            cmd = self.codex_xats_bootstrap_command(&cmd, &base, &pane.working_dir);
+                            cmd = self.codex_xats_bootstrap_command(
+                                &cmd,
+                                &base,
+                                &pane.working_dir,
+                                is_primary,
+                            );
                         }
                         _ => {}
                     }
@@ -2766,6 +2836,15 @@ impl Instance {
                     let inner = format!("cd {escaped_dir} && stty susp undef; exec {cmd}");
                     let escaped_inner = inner.replace('\'', "'\\''");
                     return Some(format!("{shell} -lc '{escaped_inner}'"));
+                }
+                if is_primary && self.managed_xats.is_some() && pane.tool == "claude" {
+                    cmd = match crate::managed_runtimes::command(self, &cmd) {
+                        Ok(command) => command,
+                        Err(error) => {
+                            tracing::error!("Managed launch command refused: {error:#}");
+                            return None;
+                        }
+                    };
                 }
                 Some(wrap_command_ignore_suspend_with_env(&cmd, &env_vars))
             }
@@ -3020,6 +3099,13 @@ impl Instance {
         if pane.cross_agent_team {
             parts.push("--cross-agent-team".to_string());
         }
+        if is_primary {
+            if let Some(identity) = &self.managed_xats {
+                let claim = identity.claim.as_ref()?;
+                parts.push("--managed-launch-id".to_string());
+                parts.push(shell_escape(&claim.fence.instance_id));
+            }
+        }
         if is_primary && !self.extra_args.is_empty() {
             let extra = crate::opencode_runtime::parse_and_validate_extra_args(&self.extra_args)
                 .map_err(|error| {
@@ -3155,6 +3241,8 @@ impl Instance {
         // cannot tell that apart from the parent legitimately restarting: the
         // later caller silently takes the identity and the earlier one goes quiet.
         fork.xats_identity_key = None;
+        fork.managed_owner = None;
+        fork.managed_xats = None;
         // Pre-allocate a new session UUID for the fork if the tool supports it.
         // This is passed via `--session-id <uuid>` alongside the fork template.
         fork.agent_session_id = crate::agents::get_agent(&self.tool)
@@ -3444,6 +3532,9 @@ impl Instance {
     }
 
     fn respawn_single_pane(&mut self, mode: RestartMode) -> Result<()> {
+        if self.managed_xats.is_some() {
+            return self.managed_lifecycle(Some(mode), None, false);
+        }
         if self.tool == "codex" && self.primary_pane.cross_agent_team {
             return self.respawn_single_codex(mode);
         }
@@ -3593,7 +3684,11 @@ impl Instance {
         // re-fork a persisted parent. Prepare a new identity, but commit it only if
         // slot 0 actually respawns (roll back otherwise, so a phantom id/fork is not
         // persisted by the subsequent save).
-        let snapshot = self.begin_fresh_identity(mode);
+        let snapshot = if self.managed_xats.is_none() {
+            self.begin_fresh_identity(mode)
+        } else {
+            None
+        };
 
         if let Some(ref hook_cmds) = self.resolve_on_launch_hooks() {
             self.execute_on_launch_hooks(hook_cmds);
@@ -3603,6 +3698,20 @@ impl Instance {
         let mut primary_respawned = false;
         let mut confirmable_panes: Vec<LaunchedClaudePane> = Vec::new();
         for slot in slots {
+            if slot.slot == 0 && self.managed_xats.is_some() {
+                match self.managed_lifecycle(Some(mode), None, false) {
+                    Ok(()) => {
+                        primary_respawned = true;
+                        outcomes.push(if mode == RestartMode::Resume {
+                            PaneResumeOutcome::Resumed
+                        } else {
+                            PaneResumeOutcome::DegradedToFresh
+                        });
+                    }
+                    Err(error) => outcomes.push(PaneResumeOutcome::Error(format!("{error:#}"))),
+                }
+                continue;
+            }
             let pane = self.relaunch_pane_config(slot);
             let mut native_session_id = self.slot_resume_source(slot, mode);
             let mut identity_key = slot.xats_identity_key.clone();
@@ -3664,6 +3773,7 @@ impl Instance {
                     slot.tmux_pane.clone(),
                     &pane,
                     slot_identity_origin(identity_origins, slot.slot),
+                    slot.slot == 0,
                 ));
             }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
@@ -3872,6 +3982,7 @@ impl Instance {
                     new_pane.clone(),
                     &pane,
                     slot_identity_origin(identity_origins, slot.slot),
+                    slot.slot == 0,
                 ));
             }
             if slot.slot == 0 && !matches!(outcome, PaneResumeOutcome::Error(_)) {
@@ -4102,6 +4213,9 @@ impl Instance {
     }
 
     pub fn restart_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
+        if self.managed_xats.is_some() {
+            return self.managed_lifecycle(Some(RestartMode::Resume), size, false);
+        }
         let session = self.tmux_session()?;
 
         if session.exists() {
@@ -6780,6 +6894,23 @@ mod tests {
         assert!(inst.reclaims_xats_identity(&pane, IdentityKeyOrigin::Existing));
     }
 
+    #[test]
+    fn managed_primary_never_submits_a_reconnect_turn() {
+        let mut inst = xats_pane_instance("claude");
+        inst.managed_xats =
+            Some(crate::managed_xats::ManagedXats::new("worker".into(), "team".into()).unwrap());
+        let pane = PaneConfig::new("claude", "/tmp", false, true);
+        assert!(
+            !inst
+                .launched_claude_pane("%1".into(), &pane, IdentityKeyOrigin::Existing, true,)
+                .reclaims_identity
+        );
+        assert!(
+            inst.launched_claude_pane("%2".into(), &pane, IdentityKeyOrigin::Existing, false,)
+                .reclaims_identity
+        );
+    }
+
     /// Codex binds through pane pre-registration before its process starts, so it
     /// never needs asking, and text typed at it lands in its conversation.
     #[test]
@@ -7236,7 +7367,8 @@ mod tests {
         } else {
             format!("{base} {extra_args}")
         };
-        let script = inst.codex_xats_bootstrap_command(&cmd_with_args, base, &inst.project_path);
+        let script =
+            inst.codex_xats_bootstrap_command(&cmd_with_args, base, &inst.project_path, true);
 
         let out = execute_bootstrap_script(&script, &bin, identity_key, env);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();

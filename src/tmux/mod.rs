@@ -1,6 +1,7 @@
 //! tmux integration module
 
 pub mod layout;
+pub(crate) mod managed;
 pub(crate) mod notification_monitor;
 mod session;
 pub mod status_bar;

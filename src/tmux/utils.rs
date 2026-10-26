@@ -850,7 +850,13 @@ pub fn install_pane_died_hook(session_name: &str) {
 
 pub fn get_agent_pane_id(session_name: &str) -> Option<String> {
     let output = crate::tmux::tmux_command()
-        .args(["show-option", "-t", session_name, "-v", "@aoe_agent_pane"])
+        .args([
+            "show-option",
+            "-t",
+            &format!("={session_name}:"),
+            "-v",
+            "@aoe_agent_pane",
+        ])
         .output()
         .ok()?;
 

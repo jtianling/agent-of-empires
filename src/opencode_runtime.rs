@@ -37,7 +37,10 @@ pub struct OpenCodeRuntimeArgs {
     #[arg(long)]
     pub cross_agent_team: bool,
 
-    #[arg(last = true, trailing_var_arg = true)]
+    #[arg(long)]
+    pub managed_launch_id: Option<String>,
+
+    #[arg(last = true)]
     pub extra_args: Vec<String>,
 }
 
@@ -54,10 +57,16 @@ struct HealthResponse {
 
 pub async fn run(profile: &str, args: OpenCodeRuntimeArgs) -> Result<()> {
     let args = validate_args(profile, args)?;
+    let managed = crate::managed_runtimes::opencode::load(
+        profile,
+        &args.instance_id,
+        args.slot,
+        args.managed_launch_id.as_deref(),
+    )?;
     let identity_key = load_runtime_identity_key(profile, &args)?;
     let (mut server, base_url) =
         start_server(&args.working_directory, identity_key.as_deref()).await?;
-    let result = run_with_server(profile, &args, &base_url, identity_key.as_deref()).await;
+    let result = run_with_server(profile, &args, &base_url, identity_key.as_deref(), managed).await;
     let cleanup = terminate_owned_server(&mut server).await;
     merge_runtime_and_cleanup(result, cleanup)
 }
@@ -67,6 +76,7 @@ async fn run_with_server(
     args: &OpenCodeRuntimeArgs,
     base_url: &str,
     identity_key: Option<&str>,
+    managed: Option<crate::session::Instance>,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -81,7 +91,16 @@ async fn run_with_server(
     };
 
     record_exact_session(profile, args, &session_id).await?;
-    if args.cross_agent_team {
+    if let Some(mut managed) = managed {
+        crate::managed_runtimes::opencode::bind(
+            &mut managed,
+            &client,
+            base_url,
+            &session_id,
+            &args.working_directory,
+        )
+        .await?;
+    } else if args.cross_agent_team {
         let identity_key = identity_key.context("OpenCode runtime identity key is missing")?;
         crate::opencode_xats::commit(identity_key, args.generation, base_url, &session_id).await?;
     }
@@ -447,6 +466,32 @@ fn merge_runtime_and_cleanup(runtime: Result<()>, cleanup: Result<()>) -> Result
 mod tests {
     use super::*;
 
+    #[test]
+    fn helper_clap_accepts_attach_arguments_after_separator() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "aoe",
+            "__opencode-runtime",
+            "--instance-id",
+            "0123456789abcdef",
+            "--slot",
+            "0",
+            "--generation",
+            "1",
+            "--working-directory",
+            "/tmp",
+            "--",
+            "--mini",
+            "--log-level",
+            "DEBUG",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::OpenCodeRuntime(args)) = cli.command else {
+            panic!("Expected the OpenCode runtime helper");
+        };
+        assert_eq!(args.extra_args, ["--mini", "--log-level", "DEBUG"]);
+    }
+
     async fn serve_once(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener as TokioTcpListener;
@@ -529,6 +574,7 @@ mod tests {
             working_directory: std::env::temp_dir(),
             resume_session: Some("not-a-session".to_string()),
             cross_agent_team: false,
+            managed_launch_id: None,
             extra_args: Vec::new(),
         };
         assert!(validate_args("default", args).is_err());
@@ -544,6 +590,7 @@ mod tests {
                 working_directory: std::env::temp_dir(),
                 resume_session: None,
                 cross_agent_team: false,
+                managed_launch_id: None,
                 extra_args: Vec::new(),
             };
             assert!(validate_args(profile, args).is_err());
@@ -574,6 +621,7 @@ mod tests {
             working_directory: directory.path().to_path_buf(),
             resume_session: None,
             cross_agent_team: true,
+            managed_launch_id: None,
             extra_args: Vec::new(),
         };
 

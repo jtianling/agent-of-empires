@@ -2789,6 +2789,7 @@ fn test_apply_restart_results_merges_fields_and_clears_in_flight() {
         .inject_result(crate::tui::restart_poller::RestartResult {
             session_id: id.clone(),
             identity: Some(crate::tui::restart_poller::RestartIdentity {
+                managed: false,
                 agent_session_id: Some("new-agent-session-id".to_string()),
                 fork_pending: None,
                 resume_token: None,

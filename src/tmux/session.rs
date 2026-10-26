@@ -54,7 +54,7 @@ impl Session {
         }
 
         crate::tmux::tmux_command()
-            .args(["has-session", "-t", &self.name])
+            .args(["has-session", "-t", &format!("={}", self.name)])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -139,7 +139,7 @@ impl Session {
         }
 
         let output = crate::tmux::tmux_command()
-            .args(["kill-session", "-t", &self.name])
+            .args(["kill-session", "-t", &format!("={}", self.name)])
             .output()?;
 
         if !output.status.success() {
@@ -147,8 +147,15 @@ impl Session {
             // Session vanished between the exists() check and kill-session
             // (e.g. process tree kill caused tmux to tear it down). That's
             // fine -- the goal was to remove the session and it's gone.
-            if !stderr.contains("can't find session") {
-                bail!("Failed to kill tmux session: {}", stderr);
+            if !missing_session_error(&stderr) {
+                let verification = crate::tmux::tmux_command()
+                    .args(["has-session", "-t", &format!("={}", self.name)])
+                    .output()
+                    .with_context(|| format!("Failed to kill tmux session: {stderr}"))?;
+                let detail = String::from_utf8_lossy(&verification.stderr);
+                if verification.status.success() || !missing_session_error(&detail) {
+                    bail!("Failed to kill tmux session: {stderr}; verification: {detail}");
+                }
             }
         }
 
@@ -163,7 +170,7 @@ impl Session {
         }
 
         let output = crate::tmux::tmux_command()
-            .args(["rename-session", "-t", &self.name, new_name])
+            .args(["rename-session", "-t", &format!("={}", self.name), new_name])
             .output()?;
 
         if !output.status.success() {
@@ -241,7 +248,13 @@ impl Session {
 
     fn all_pane_pids(&self) -> Vec<u32> {
         crate::tmux::tmux_command()
-            .args(["list-panes", "-t", &self.name, "-F", "#{pane_pid}"])
+            .args([
+                "list-panes",
+                "-t",
+                &format!("={}", self.name),
+                "-F",
+                "#{pane_pid}",
+            ])
             .output()
             .ok()
             .map(|o| {
@@ -283,7 +296,7 @@ impl Session {
             bail!("Session does not exist: {}", self.name);
         }
 
-        let target = format!("{}:^.0", self.name);
+        let target = format!("={}:^.0", self.name);
 
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
@@ -387,6 +400,13 @@ impl Session {
             Ok(String::new())
         }
     }
+}
+
+fn missing_session_error(stderr: &str) -> bool {
+    stderr.contains("can't find session")
+        || stderr.contains("no such session")
+        || stderr.contains("no server running on")
+        || (stderr.contains("error connecting to") && stderr.contains("No such file or directory"))
 }
 
 fn get_cached_capture(session_name: &str, lines: usize, now: Instant) -> Option<String> {
@@ -833,6 +853,21 @@ fn build_create_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_session_errors_do_not_hide_other_tmux_failures() {
+        for message in [
+            "can't find session: =gone",
+            "no such session: gone",
+            "no server running on /tmp/private/socket",
+            "error connecting to /tmp/private/socket (No such file or directory)",
+        ] {
+            assert!(missing_session_error(message));
+        }
+        for message in ["permission denied", "server exited unexpectedly", ""] {
+            assert!(!missing_session_error(message));
+        }
+    }
 
     /// Kills one session by its exact name when dropped.
     ///

@@ -162,20 +162,41 @@ fn cleanup_pane_worktrees(profile: &str, inst: &Instance, args: &RemoveArgs, con
 
 pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (instances, groups) = storage.load_with_groups()?;
+    let _operation = storage.operation_lock()?;
+    let (mut instances, groups) = storage.load_with_groups()?;
     let config = crate::session::resolve_config(profile).unwrap_or_default();
+
+    for index in 0..instances.len() {
+        let instance = &instances[index];
+        let selected = instance.id == args.identifier
+            || instance.id.starts_with(&args.identifier)
+            || instance.title == args.identifier;
+        if selected && instance.managed_xats.is_some() {
+            crate::managed_xats::prepare_release(&mut instances[index])?;
+            let tree = GroupTree::new_with_groups(&instances, &groups);
+            storage.save_with_groups(&instances, &tree)?;
+        }
+    }
 
     let mut found = false;
     let mut removed_title = String::new();
     let mut new_instances = Vec::with_capacity(instances.len());
 
-    for inst in instances {
+    for mut inst in instances {
         if inst.id == args.identifier
             || inst.id.starts_with(&args.identifier)
             || inst.title == args.identifier
         {
             found = true;
             removed_title = inst.title.clone();
+
+            if inst.managed_xats.is_some() {
+                inst.source_profile = profile.to_string();
+                inst.stop()?;
+                crate::managed_xats::release(&inst)?;
+                crate::managed_codex::cleanup(&inst)?;
+                crate::managed_runtimes::cleanup(&inst)?;
+            }
 
             cleanup_pane_worktrees(profile, &inst, &args, &config);
 

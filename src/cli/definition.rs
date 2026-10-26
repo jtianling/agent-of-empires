@@ -44,6 +44,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(name = "__managed-launch", hide = true)]
+    ManagedLaunch(crate::managed_runtimes::ManagedLaunchArgs),
+
+    /// Manage agent-owned sessions through an ownership-checked JSON interface
+    Managed(super::managed::args::ManagedArgs),
+
     /// Add a new session
     Add(AddArgs),
 
