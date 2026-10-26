@@ -59,7 +59,10 @@ mod tests {
     fn store() -> Store {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         super::super::ensure_schema(&conn).unwrap();
-        Store { conn }
+        Store {
+            conn,
+            _inventory_snapshot: None,
+        }
     }
 
     #[test]

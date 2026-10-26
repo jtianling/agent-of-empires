@@ -331,7 +331,10 @@ mod tests {
     fn store() -> Store {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         super::super::ensure_schema(&conn).unwrap();
-        let store = Store { conn };
+        let store = Store {
+            conn,
+            _inventory_snapshot: None,
+        };
         for (index, pane) in [(0, "%18"), (1, "%19")] {
             store
                 .record_launched_slot("instance", index, "codex", "/same/cwd", pane, pane, 1)

@@ -164,6 +164,35 @@ pub fn get_process_comm(pid: u32) -> Option<String> {
     comm.rsplit('/').next().map(|s| s.to_string())
 }
 
+pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
+    use anyhow::{ensure, Context};
+    use nix::libc;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as i32,
+        )
+    };
+    if read == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
+        return Err(error).context("Reading process start identity");
+    }
+    ensure!(read as usize == size, "Incomplete process start identity");
+    let info = unsafe { info.assume_init() };
+    Ok(Some(format!(
+        "macos:{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

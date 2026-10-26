@@ -17,6 +17,7 @@ pub mod claude_transcript;
 mod codex_binding;
 pub(crate) mod codex_capture;
 pub mod codex_rollout;
+mod inventory;
 mod managed_pane;
 pub mod reconcile;
 
@@ -75,6 +76,7 @@ pub fn db_path(profile: &str) -> Result<PathBuf> {
 /// A handle to the per-profile SQLite store.
 pub struct Store {
     conn: Connection,
+    _inventory_snapshot: Option<tempfile::TempDir>,
 }
 
 impl Store {
@@ -151,7 +153,10 @@ impl Store {
         let conn = Connection::open(path)
             .with_context(|| format!("opening sqlite store at {}", path.display()))?;
         apply_pragmas(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            _inventory_snapshot: None,
+        })
     }
 
     /// Upsert the latest capture for a tmux pane.

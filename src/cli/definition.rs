@@ -50,6 +50,9 @@ pub enum Commands {
     /// Manage agent-owned sessions through an ownership-checked JSON interface
     Managed(super::managed::args::ManagedArgs),
 
+    /// Inspect session and pane metadata without reading terminal contents (JSON)
+    Overview(super::overview::OverviewArgs),
+
     /// Add a new session
     Add(AddArgs),
 

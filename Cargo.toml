@@ -100,8 +100,9 @@ ansi-to-tui = "8.0"
 # Embedded SQLite store (bundled so no system libsqlite is required)
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-[dev-dependencies]
 tempfile = "3.14"
+
+[dev-dependencies]
 serial_test = "3.2"
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }
 

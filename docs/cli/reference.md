@@ -23,6 +23,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe managed send`↴](#aoe-managed-send)
 * [`aoe managed capture`↴](#aoe-managed-capture)
 * [`aoe managed remove`↴](#aoe-managed-remove)
+* [`aoe overview`↴](#aoe-overview)
 * [`aoe add`↴](#aoe-add)
 * [`aoe init`↴](#aoe-init)
 * [`aoe list`↴](#aoe-list)
@@ -47,6 +48,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe group delete`↴](#aoe-group-delete)
 * [`aoe group move`↴](#aoe-group-move)
 * [`aoe profile`↴](#aoe-profile)
+* [`aoe profile instances`↴](#aoe-profile-instances)
 * [`aoe profile list`↴](#aoe-profile-list)
 * [`aoe profile create`↴](#aoe-profile-create)
 * [`aoe profile delete`↴](#aoe-profile-delete)
@@ -75,6 +77,7 @@ Run without arguments to launch the TUI dashboard.
 ###### **Subcommands:**
 
 * `managed` — Manage agent-owned sessions through an ownership-checked JSON interface
+* `overview` — Inspect session and pane metadata without reading terminal contents (JSON)
 * `add` — Add a new session
 * `init` — Initialize .aoe/config.toml in a repository
 * `list` — List all sessions
@@ -359,6 +362,18 @@ Remove an owned session, preserving code and shared resources
 ###### **Arguments:**
 
 * `<ID>` — Complete session ID (no titles or prefixes)
+
+
+
+## `aoe overview`
+
+Inspect session and pane metadata without reading terminal contents (JSON)
+
+**Usage:** `aoe overview [OPTIONS]`
+
+###### **Options:**
+
+* `--all-profiles` — Inspect every existing profile instead of the selected profile
 
 
 
@@ -738,10 +753,19 @@ Manage profiles (separate workspaces)
 
 ###### **Subcommands:**
 
+* `instances` — Inspect TUI registrations across all profiles without changing them (JSON)
 * `list` — List all profiles
 * `create` — Create a new profile
 * `delete` — Delete a profile
 * `rename` — Rename a profile
+
+
+
+## `aoe profile instances`
+
+Inspect TUI registrations across all profiles without changing them (JSON)
+
+**Usage:** `aoe profile instances`
 
 
 

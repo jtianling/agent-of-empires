@@ -118,7 +118,7 @@ pub fn get_app_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn get_app_dir_path() -> Result<PathBuf> {
+pub(crate) fn get_app_dir_path() -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     let dir = dirs::config_dir()
         .ok_or_else(|| anyhow::anyhow!("Cannot find config directory"))?
@@ -292,14 +292,12 @@ fn short_hash(input: &str) -> String {
     format!("{:02x}{:02x}", result[0], result[1])
 }
 
+pub mod tui_instances;
+
 pub fn register_instance(profile: &str) {
-    let Ok(profile_dir) = ensure_profile_dir(profile) else {
-        return;
-    };
-    let instances_dir = profile_dir.join(".instances");
-    let _ = fs::create_dir_all(&instances_dir);
-    let pid = std::process::id();
-    let _ = fs::write(instances_dir.join(pid.to_string()), "");
+    if let Err(error) = tui_instances::register(profile) {
+        tracing::warn!("Cannot register TUI instance: {error:#}");
+    }
 }
 
 pub fn unregister_instance(profile: &str) {

@@ -10,6 +10,35 @@ use clap_complete::generate;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.use_stderr() && is_json_request() {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": {
+                        "code": "invalid_input", "message": error.to_string(),
+                        "session_id": null
+                    }})
+                );
+            }
+            error.exit();
+        }
+    };
+
+    if let Some(Commands::Overview(args)) = cli.command {
+        return cli::overview::run(session::resolve_profile(cli.profile), args).await;
+    }
+
+    if matches!(
+        cli.command,
+        Some(Commands::Profile {
+            command: Some(cli::profile::ProfileCommands::Instances),
+        })
+    ) {
+        return cli::overview::report(session::tui_instances::query());
+    }
+
     let mut debug_log_warning: Option<String> = None;
     if std::env::var("AGENT_OF_EMPIRES_DEBUG").is_ok() {
         // Log to file to avoid corrupting the TUI on stderr.
@@ -41,22 +70,6 @@ async fn main() -> Result<()> {
             );
         }
     }
-
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(error) => {
-            if error.use_stderr() && is_managed_request() {
-                println!(
-                    "{}",
-                    serde_json::json!({"ok": false, "error": {
-                        "code": "invalid_input", "message": error.to_string(),
-                        "session_id": null
-                    }})
-                );
-            }
-            error.exit();
-        }
-    };
 
     if let Some(Commands::Managed(args)) = cli.command {
         let profile = session::resolve_profile(cli.profile);
@@ -170,9 +183,7 @@ async fn main() -> Result<()> {
         Some(Commands::Worktree { command }) => cli::worktree::run(&profile, command).await,
         None => {
             session::cleanup_stale_instances(&profile);
-            session::register_instance(&profile);
             let result = tui::run(&profile, debug_log_warning).await;
-            session::unregister_instance(&profile);
             session::cleanup_empty_profile(&profile);
             result
         }
@@ -180,7 +191,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn is_managed_request() -> bool {
+fn is_json_request() -> bool {
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "-p" || argument == "--profile" {
@@ -190,7 +201,22 @@ fn is_managed_request() -> bool {
         if argument.to_string_lossy().starts_with('-') {
             continue;
         }
-        return argument == "managed";
+        if argument == "managed" || argument == "overview" {
+            return true;
+        }
+        if argument == "profile" {
+            while let Some(next) = arguments.next() {
+                if next == "-p" || next == "--profile" {
+                    arguments.next();
+                    continue;
+                }
+                if next.to_string_lossy().starts_with('-') {
+                    continue;
+                }
+                return next == "instances";
+            }
+        }
+        return false;
     }
     false
 }

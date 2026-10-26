@@ -156,6 +156,23 @@ pub fn get_process_comm(pid: u32) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
+    use anyhow::Context;
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("Reading process start identity"),
+    };
+    let fields = stat.rsplit_once(')').context("Invalid process stat")?.1;
+    let ticks = fields
+        .split_whitespace()
+        .nth(19)
+        .context("Missing process start time")?
+        .parse::<u64>()?;
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    Ok(Some(format!("linux:{}:{ticks}", boot.trim())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

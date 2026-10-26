@@ -71,6 +71,7 @@ pub(super) fn combine_pane_errors(first: Option<String>, second: Option<String>)
 
 pub struct App {
     home: HomeView,
+    registration: crate::session::tui_instances::TuiRegistration,
     should_quit: bool,
     theme: Theme,
     needs_redraw: bool,
@@ -136,6 +137,7 @@ impl App {
         }
 
         Ok(Self {
+            registration: crate::session::tui_instances::TuiRegistration::new(profile)?,
             home,
             should_quit: false,
             theme,
@@ -438,7 +440,12 @@ impl App {
             Action::SwitchProfile(profile) => {
                 let storage = Storage::new(&profile)?;
                 let tools = self.home.available_tools();
-                self.home = HomeView::new(storage, tools, self.launch_dir.clone())?;
+                let home = HomeView::new(storage, tools, self.launch_dir.clone())?;
+                self.registration.switch_to(&profile).map_err(|error| {
+                    tracing::error!(profile, "Cannot switch TUI registration: {error:#}");
+                    error
+                })?;
+                self.home = home;
             }
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;

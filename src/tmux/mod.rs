@@ -1,5 +1,6 @@
 //! tmux integration module
 
+pub(crate) mod inventory;
 pub mod layout;
 pub(crate) mod managed;
 pub(crate) mod managed_pane;
@@ -116,6 +117,12 @@ fn resolved_socket_name() -> Option<String> {
 /// which is exactly why env-based (`TMUX_TMPDIR`) isolation was unsafe.
 pub(crate) fn tmux_command() -> Command {
     build_tmux_command(resolved_socket_name().as_deref())
+}
+
+pub(crate) fn profile_command(profile: &str) -> Command {
+    let mut command = build_tmux_command(Some(&socket_name_for_profile(profile)));
+    command.env_remove("TMUX").env_remove("TMUX_PANE");
+    command
 }
 
 /// Pure builder: `tmux` with `-L <name>` prepended when `socket_name` is `Some`.

@@ -46,6 +46,43 @@ impl Storage {
         })
     }
 
+    pub(crate) fn read_only(profile: &str) -> Result<Self> {
+        Ok(Self {
+            profile: profile.to_string(),
+            sessions_path: super::get_app_dir_path()?
+                .join("profiles")
+                .join(profile)
+                .join("sessions.json"),
+            baseline: RefCell::new(Vec::new()),
+            group_baseline: RefCell::new(Vec::new()),
+            locked: Cell::new(false),
+        })
+    }
+
+    pub(crate) fn read_only_instances(&self) -> Result<Vec<Instance>> {
+        let mut instances: Vec<Instance> = self.read_strict_json(&self.sessions_path)?;
+        for instance in &mut instances {
+            instance.hydrate_legacy_primary_pane();
+        }
+        Ok(instances)
+    }
+
+    pub(crate) fn read_only_groups(&self) -> Result<Vec<Group>> {
+        self.read_strict_json(&self.sessions_path.with_file_name("groups.json"))
+    }
+
+    fn read_strict_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<T>> {
+        let content = match fs::read(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_slice(&content).with_context(|| format!("Reading {}", path.display()))
+    }
+
     pub fn profile(&self) -> &str {
         &self.profile
     }

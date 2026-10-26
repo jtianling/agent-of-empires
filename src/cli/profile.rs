@@ -8,6 +8,9 @@ use crate::session;
 
 #[derive(Subcommand)]
 pub enum ProfileCommands {
+    /// Inspect TUI registrations across all profiles without changing them (JSON)
+    Instances,
+
     /// List all profiles
     #[command(alias = "ls")]
     List,
@@ -38,6 +41,9 @@ pub enum ProfileCommands {
 
 pub async fn run(command: Option<ProfileCommands>) -> Result<()> {
     match command {
+        Some(ProfileCommands::Instances) => {
+            super::overview::report(session::tui_instances::query())
+        }
         Some(ProfileCommands::List) | None => list_profiles().await,
         Some(ProfileCommands::Create { name }) => create_profile(&name).await,
         Some(ProfileCommands::Delete { name }) => delete_profile(&name).await,

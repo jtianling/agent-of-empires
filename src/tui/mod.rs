@@ -115,6 +115,8 @@ pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
         original_hook(info);
     }));
 
+    let mut app = App::new(profile, available_tools, launch_dir)?;
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -122,8 +124,6 @@ pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app and run
-    let mut app = App::new(profile, available_tools, launch_dir)?;
     if let Some(warning) = startup_warning {
         app.show_startup_warning(&warning);
     }

@@ -94,3 +94,25 @@ aoe session set-owner <完整-session-id> --context /absolute/path/other-manager
 此前 session 级功能由独立 tester 在断网、无宿主挂载的一次性 Linux 容器中验证了实际 shell 生命周期、TUI 并发保存、人工重启删除、三种 agent 的自动绑定与重启身份保持、旧 fence 拒绝、Claude 首次失败恢复及资源回收.  最终用例没有模型请求.  版本为 tmux 3.4、Codex 0.164.0、Claude Code 2.1.299、OpenCode 1.19.4.  该结果不替代本轮新增 pane 的验收, 未运行宿主真实 tmux 测试或全量测试套件.
 
 新增 pane 功能的独立验收在 Linux arm64 隔离容器完成, Codex/OpenCode 与通用范围 13 组通过, 0 失败、0 阻塞; Claude 另列 user-deferred.  覆盖真实双 pane 收发、主 pane 接任、原始与接任后主 session 恢复、人工/其他 owner保护、旧 ID/helper拒绝、跨 session 移动零副作用以及数据库/JSON/资源清理失败恢复.  运行源码 hash 已与交付工作区核对, 测试容器已清理.  macOS 宿主只执行编译及无真实 tmux 的回归, 不将隔离 Linux 结果声称为宿主实时终端验收.
+
+## 只读总览与 TUI 实例
+
+无需 manager context 即可盘点人工 session 和其它 owner 的 session.  总览不读取终端内容, 不赋予控制权限, 不修改 owner 或补写 pane ID.
+
+```sh
+aoe -p default overview
+aoe overview --all-profiles
+aoe profile instances
+```
+
+`overview` 固定输出 JSON envelope.  `data.profiles` 包含每个 profile 的 `groups` 和 `sessions`, session 下的 `panes` 包含完整持久 ID、主从关系、tool、布局坐标和 live 观测.  人工 pane 无持久 ID 时返回 `pane_id: null`.  空 group 和停止 session 仍保留.
+
+`status_source: stored` 表示保存的 session 状态, `status_observed_at` 是本次读取时间, 不是状态更新或进展时间.  `live: true` 仅证明观察时 pane 存在, 不证明 agent 在推进任务; `live: null` 表示观测失败, 不能当作停止.
+
+每个已观测 pane 的 `xats` 独立提供身份和 runtime 状态.  仅精确绑定验证成功才返回 `identity.status: verified` 和 name/team.  xats 旧版缺少接口、离线或响应无效时返回 `unavailable`, 历史绑定证据不足时保持 `unverifiable` 等状态, 不按 title/cwd 推断.  `runtime.status: ready` 与 pane 存活、身份已验证分别表示不同证据.  输出不包含 token、identity key、fence、环境、完整命令或聊天内容.
+
+`profile instances` 列出各 profile 的 TUI 登记.  `verified` 表示 PID 与登记的进程启动时间匹配, `stale` 表示进程退出或 PID 被复用, 旧版空登记为 `unverified`, 损坏登记为 `invalid`.  多个 TUI 分别展示, 不推测唯一当前窗口.  重开旧 TUI 后才会写入新版启动证据; 查询本身不清理登记.  TUI 内成功切换 profile 会迁移本实例登记, 正常退出清理当前登记, 不影响其它 TUI 的记录.
+
+正常与局部失败的查询均 exit 0, 局部失败由 `data.partial: true`、具体来源和错误标识.  致命错误 exit 1 并返回 `ok: false`, 参数错误 exit 2.  结果是带观测时间的多源盘点, 不是跨文件、tmux 和 xats 的原子快照.  活动 SQLite 数据库与 WAL 复制到私有临时目录后读取, 原目录不会生成查询锁、schema 或 SQLite sidecar; 复制期间检测到写入则显式降级, 可重新查询.
+
+只读总览的独立 Linux 容器验收共 12 组通过.  真实身份验证使用原生 OpenCode 前台进程、真实 tmux/xats 和预置登记夹具, 不代表注册流程回归; ready 分支仅有接口模拟证据.  Claude 按用户要求暂缓, 真实 Codex launch 行及 remote 403 未实测.  精确身份查询需要 xats 提供 `/api/runtime/pane/lookup` v1, 未升级的 daemon 将明确返回 unavailable, 本功能不会自行部署或重启 xats.

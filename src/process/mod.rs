@@ -6,6 +6,22 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+pub(crate) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
+    anyhow::ensure!(pid > 0 && pid <= i32::MAX as u32, "Invalid process ID");
+    #[cfg(target_os = "linux")]
+    {
+        linux::start_identity(pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::start_identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        anyhow::bail!("Process start identity is unsupported on this platform")
+    }
+}
+
 /// Get the PID of the shell process running in a tmux pane.
 /// `target` can be a session name, a pane ID (e.g. `%42`), or any valid tmux target.
 pub fn get_pane_pid(target: &str) -> Option<u32> {
