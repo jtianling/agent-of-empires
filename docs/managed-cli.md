@@ -115,4 +115,6 @@ aoe profile instances
 
 正常与局部失败的查询均 exit 0, 局部失败由 `data.partial: true`、具体来源和错误标识.  致命错误 exit 1 并返回 `ok: false`, 参数错误 exit 2.  结果是带观测时间的多源盘点, 不是跨文件、tmux 和 xats 的原子快照.  活动 SQLite 数据库与 WAL 复制到私有临时目录后读取, 原目录不会生成查询锁、schema 或 SQLite sidecar; 复制期间检测到写入则显式降级, 可重新查询.
 
+每个 profile 的 `errors` 按相同 `source` 和完整 `message` 聚合, `affected_count` 表示受该原因影响的观测条数, `observed_at` 保留首次观测时间.  不同 profile、来源或原因分别计数, 每个 pane 仍保留自己的原因.  lookup 场景的计数是受影响 pane 数, 不等于 profile 的 pane 总数.  xats lookup 返回 HTTP 404 时会明确提示端点不受支持, 不受旧服务的 HTML、纯文本或 JSON 响应体影响, 不自动升级服务或重试.
+
 只读总览的独立 Linux 容器验收共 12 组通过.  真实身份验证使用原生 OpenCode 前台进程、真实 tmux/xats 和预置登记夹具, 不代表注册流程回归; ready 分支仅有接口模拟证据.  Claude 按用户要求暂缓, 真实 Codex launch 行及 remote 403 未实测.  精确身份查询需要 xats 提供 `/api/runtime/pane/lookup` v1, 未升级的 daemon 将明确返回 unavailable, 本功能不会自行部署或重启 xats.

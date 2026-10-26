@@ -119,6 +119,11 @@ async fn invoke(control: &ControlPlane, target: &PaneTarget) -> Result<Value> {
         .await
         .context("Requesting xats pane lookup")?;
     let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!(
+            "Xats pane lookup endpoint is unsupported (HTTP 404): /api/runtime/pane/lookup"
+        );
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.context("Reading xats pane lookup")? {
         ensure!(

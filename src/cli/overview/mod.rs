@@ -128,6 +128,13 @@ fn read<T>(result: Result<T>, source: &str, errors: &mut Vec<Value>) -> Option<T
 fn record_error(errors: &mut Vec<Value>, source: &str, error: &anyhow::Error) {
     let message = format!("{error:#}");
     tracing::warn!(source, "Read-only inventory observation failed: {message}");
+    if let Some(existing) = errors
+        .iter_mut()
+        .find(|entry| entry["source"] == source && entry["message"] == message)
+    {
+        existing["affected_count"] = json!(existing["affected_count"].as_u64().unwrap_or(1) + 1);
+        return;
+    }
     errors.push(json!({"source":source,"message":message,
-        "observed_at":chrono::Utc::now().to_rfc3339()}));
+        "affected_count":1,"observed_at":chrono::Utc::now().to_rfc3339()}));
 }
