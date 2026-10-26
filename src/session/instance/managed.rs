@@ -27,6 +27,10 @@ impl Instance {
             "Managed identity was removed"
         );
         *self = instances[index].clone();
+        ensure!(
+            self.managed_primary_replacement.is_none(),
+            "Managed primary replacement must finish before launch"
+        );
         self.source_profile = profile;
         let running = self.tmux_session()?.exists();
         if restart.is_none() && running {
@@ -46,7 +50,11 @@ impl Instance {
             self.last_error = Some(format!("{error:#}"));
         }
         persist(&storage, &mut instances, &groups, self)?;
-        outcome
+        outcome?;
+        if !running {
+            self.restore_managed_extras(restart.unwrap_or(RestartMode::Resume))?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -82,6 +90,7 @@ impl Instance {
             crate::managed_codex::prepare(self)?;
             crate::managed_runtimes::prepare(self)?;
             persist(storage, instances, groups, self)?;
+            self.mark_managed_primary()?;
             if self.tool == "claude" && mode == RestartMode::Resume {
                 self.resume_token = self.agent_session_id.clone();
             }
@@ -94,18 +103,23 @@ impl Instance {
     fn stop_managed_primary(&self) -> Result<()> {
         let session = crate::tmux::Session::generate_name(&self.id, &self.title);
         let pane = crate::tmux::managed::primary_pane(&session)?;
-        crate::tmux::set_pane_remain_on_exit(&pane, true)?;
-        crate::tmux::managed::verify_owner(&session, &pane)?;
-        let original_pid = crate::process::get_pane_pid(&pane);
-        crate::tmux::kill_pane_process_tree_target(&pane);
+        self.stop_managed_pane(&pane)
+    }
+
+    pub(super) fn stop_managed_pane(&self, pane: &str) -> Result<()> {
+        let session = crate::tmux::Session::generate_name(&self.id, &self.title);
+        crate::tmux::set_pane_remain_on_exit(pane, true)?;
+        crate::tmux::managed::verify_owner(&session, pane)?;
+        let original_pid = crate::process::get_pane_pid(pane);
+        crate::tmux::kill_pane_process_tree_target(pane);
         for _ in 0..PANE_EXIT_ATTEMPTS {
-            let current_pid = crate::process::get_pane_pid(&pane);
+            let current_pid = crate::process::get_pane_pid(pane);
             if primary_process_exited(
                 original_pid,
                 current_pid,
-                crate::tmux::utils::is_pane_dead(&pane),
+                crate::tmux::utils::is_pane_dead(pane),
             ) {
-                crate::tmux::managed::verify_owner(&session, &pane)?;
+                crate::tmux::managed::verify_owner(&session, pane)?;
                 return Ok(());
             }
             std::thread::sleep(PANE_EXIT_POLL);

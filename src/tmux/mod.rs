@@ -2,6 +2,7 @@
 
 pub mod layout;
 pub(crate) mod managed;
+pub(crate) mod managed_pane;
 pub(crate) mod notification_monitor;
 mod session;
 pub mod status_bar;

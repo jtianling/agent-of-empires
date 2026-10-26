@@ -913,7 +913,13 @@ fn parse_pane_positions(output: &str) -> HashMap<String, (u32, u32)> {
 /// resume-all flow keep operating on the recovered session.
 pub fn set_agent_pane_id(session_name: &str, pane_id: &str) -> anyhow::Result<()> {
     let output = crate::tmux::tmux_command()
-        .args(["set-option", "-t", session_name, "@aoe_agent_pane", pane_id])
+        .args([
+            "set-option",
+            "-t",
+            &format!("={session_name}:"),
+            "@aoe_agent_pane",
+            pane_id,
+        ])
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

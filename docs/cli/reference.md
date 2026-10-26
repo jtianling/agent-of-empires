@@ -6,6 +6,12 @@ This document contains the help content for the `aoe` command-line program.
 
 * [`aoe`↴](#aoe)
 * [`aoe managed`↴](#aoe-managed)
+* [`aoe managed pane`↴](#aoe-managed-pane)
+* [`aoe managed pane list`↴](#aoe-managed-pane-list)
+* [`aoe managed pane create`↴](#aoe-managed-pane-create)
+* [`aoe managed pane remove`↴](#aoe-managed-pane-remove)
+* [`aoe managed pane send`↴](#aoe-managed-pane-send)
+* [`aoe managed pane capture`↴](#aoe-managed-pane-capture)
 * [`aoe managed init`↴](#aoe-managed-init)
 * [`aoe managed create`↴](#aoe-managed-create)
 * [`aoe managed list`↴](#aoe-managed-list)
@@ -98,6 +104,7 @@ Manage agent-owned sessions through an ownership-checked JSON interface
 
 ###### **Subcommands:**
 
+* `pane` — Manage individual panes without bypassing session ownership
 * `init` — Create a new manager context at --context (never overwrites)
 * `create` — Create an owned session, optionally launch it
 * `list` — List session metadata without terminal content
@@ -113,6 +120,99 @@ Manage agent-owned sessions through an ownership-checked JSON interface
 ###### **Options:**
 
 * `--context <CONTEXT>` — Persistent manager context file
+
+
+
+## `aoe managed pane`
+
+Manage individual panes without bypassing session ownership
+
+**Usage:** `aoe managed pane <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` — List pane identities, ownership, positions and xats readiness
+* `create` — Create an owned agent pane in a running owned session
+* `remove` — Close an owned pane, promoting an eligible sibling when necessary
+* `send` — Send literal input to one exact owned pane
+* `capture` — Capture output from one exact owned pane
+
+
+
+## `aoe managed pane list`
+
+List pane identities, ownership, positions and xats readiness
+
+**Usage:** `aoe managed pane list <SESSION_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>`
+
+
+
+## `aoe managed pane create`
+
+Create an owned agent pane in a running owned session
+
+**Usage:** `aoe managed pane create [OPTIONS] --tool <TOOL> <SESSION_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>`
+
+###### **Options:**
+
+* `--tool <TOOL>`
+* `--path <PATH>`
+* `--xats-name <XATS_NAME>`
+* `--xats-team <XATS_TEAM>`
+
+
+
+## `aoe managed pane remove`
+
+Close an owned pane, promoting an eligible sibling when necessary
+
+**Usage:** `aoe managed pane remove <SESSION_ID> <PANE_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>`
+* `<PANE_ID>`
+
+
+
+## `aoe managed pane send`
+
+Send literal input to one exact owned pane
+
+**Usage:** `aoe managed pane send <SESSION_ID> <PANE_ID> <MESSAGE>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>`
+* `<PANE_ID>`
+* `<MESSAGE>`
+
+
+
+## `aoe managed pane capture`
+
+Capture output from one exact owned pane
+
+**Usage:** `aoe managed pane capture [OPTIONS] <SESSION_ID> <PANE_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>`
+* `<PANE_ID>`
+
+###### **Options:**
+
+* `-n`, `--lines <LINES>`
+
+  Default value: `50`
 
 
 

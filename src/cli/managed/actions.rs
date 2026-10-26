@@ -127,6 +127,54 @@ pub(super) fn mutate(
     command: ManagedCommand,
 ) -> Result<Value> {
     ensure_unique_name(instances, &instances[index])?;
+    ensure!(
+        instances[index].managed_primary_replacement.is_none(),
+        "Finish the pending primary pane removal first"
+    );
+    if matches!(
+        command,
+        ManagedCommand::Start(_)
+            | ManagedCommand::Stop(_)
+            | ManagedCommand::Restart(_)
+            | ManagedCommand::Remove(_)
+    ) {
+        crate::session::managed_pane::require_owned_panes(
+            storage.profile(),
+            &instances[index],
+            instances[index]
+                .managed_owner
+                .as_deref()
+                .context("Missing owner")?,
+        )?;
+        for child in 0..instances[index].managed_panes.len() {
+            if crate::session::managed_pane::recover_pending_slot(
+                storage.profile(),
+                &mut instances[index],
+                child,
+            )? {
+                save(storage, instances, groups)?;
+            }
+        }
+    }
+    if matches!(
+        command,
+        ManagedCommand::Send(_) | ManagedCommand::Capture(_)
+    ) {
+        if let ManagedCommand::Send(args) = &command {
+            ensure!(
+                !args.message.trim().is_empty()
+                    && args.message.len() <= 65536
+                    && !args.message.contains('\0'),
+                "Invalid message"
+            );
+        }
+        let target = super::panes::primary_target(storage, instances, groups, index)?;
+        return match command {
+            ManagedCommand::Send(args) => send(&instances[index], &args.message, &target),
+            ManagedCommand::Capture(args) => capture(&instances[index], args.lines, &target),
+            _ => unreachable!(),
+        };
+    }
     let instance = &mut instances[index];
     let outcome = match command {
         ManagedCommand::Start(_) => instance.start_with_size(crate::terminal::get_size()),
@@ -137,8 +185,6 @@ pub(super) fn mutate(
             Ok(())
         }
         ManagedCommand::Rename(args) => rename(instance, &args.title),
-        ManagedCommand::Send(args) => return send(instance, &args.message),
-        ManagedCommand::Capture(args) => return capture(instance, args.lines),
         ManagedCommand::Remove(_) => return remove(storage, instances, groups, index),
         _ => unreachable!(),
     };
@@ -146,7 +192,7 @@ pub(super) fn mutate(
     save(storage, instances, groups)?;
     outcome?;
     Ok(json!({"id": id, "status": instances[index].status,
-        "xats": crate::managed_xats::status(&instances[index])?}))
+        "xats": crate::managed_xats::status_report(&instances[index])}))
 }
 
 fn validate_title(title: &str) -> Result<()> {
@@ -176,23 +222,23 @@ fn running_session(instance: &Instance) -> Result<crate::tmux::Session> {
     Ok(session)
 }
 
-fn send(instance: &Instance, message: &str) -> Result<Value> {
+fn send(instance: &Instance, message: &str, target: &str) -> Result<Value> {
     ensure!(
         !message.trim().is_empty() && message.len() <= 65536 && !message.contains('\0'),
         "Invalid message"
     );
-    running_session(instance)?.send_keys(message)?;
+    running_session(instance)?;
+    crate::tmux::submit_text_to_pane_target(target, message)?;
     Ok(json!({"id": instance.id, "sent": true}))
 }
 
-fn capture(instance: &Instance, lines: u32) -> Result<Value> {
+fn capture(instance: &Instance, lines: u32, target: &str) -> Result<Value> {
     running_session(instance)?;
-    let name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
     let output = crate::tmux::tmux_command()
         .args([
             "capture-pane",
             "-t",
-            &format!("={name}:^.0"),
+            target,
             "-p",
             "-e",
             "-S",
@@ -209,12 +255,14 @@ fn capture(instance: &Instance, lines: u32) -> Result<Value> {
     Ok(json!({"id": instance.id, "content": content}))
 }
 
-fn remove(
+pub(super) fn remove(
     storage: &Storage,
     instances: &mut Vec<Instance>,
     groups: &[Group],
     index: usize,
 ) -> Result<Value> {
+    crate::session::managed_pane::prepare_children_release(&mut instances[index])?;
+    save(storage, instances, groups)?;
     persist_release_preparation(storage, instances, groups, index)?;
     let instance = &instances[index];
     let id = instance.id.clone();
@@ -224,6 +272,7 @@ fn remove(
         crate::managed_codex::cleanup(instance)?;
     }
     crate::managed_runtimes::cleanup(instance)?;
+    crate::session::managed_pane::release_children(instance)?;
     let store = crate::db::Store::open_with_schema(storage.profile())?;
     store.delete_slots_for_instance(&id)?;
     instances.remove(index);

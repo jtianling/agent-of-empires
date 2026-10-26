@@ -237,6 +237,17 @@ pub fn status(instance: &Instance) -> Result<Value> {
     )
 }
 
+pub fn status_report(instance: &Instance) -> Value {
+    match status(instance) {
+        Ok(status) => status,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            tracing::warn!("Managed xats status unavailable: {detail}");
+            json!({"state": "unavailable", "runtime_ready": false, "error": detail})
+        }
+    }
+}
+
 pub fn prepare_release(instance: &mut Instance) -> Result<()> {
     let Some(identity) = &instance.managed_xats else {
         return Ok(());

@@ -528,14 +528,21 @@ impl HomeView {
 
         if let Some(result) = self.deletion_poller.try_recv_result() {
             if result.success {
+                let managed = self
+                    .get_instance(&result.session_id)
+                    .is_some_and(crate::session::managed_pane::has_managed_state);
                 self.instances.retain(|i| i.id != result.session_id);
                 self.instance_map.remove(&result.session_id);
                 self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
 
-                if let Err(e) = self.save() {
-                    tracing::error!("Failed to save after deletion: {}", e);
+                if !managed {
+                    if let Err(e) = self.save() {
+                        tracing::error!("Failed to save after deletion: {}", e);
+                    }
                 }
-                let _ = self.reload();
+                if let Err(error) = self.reload() {
+                    tracing::error!("Failed to reload after deletion: {error}");
+                }
             } else {
                 let error = result.error;
                 self.mutate_instance(&result.session_id, |inst| {

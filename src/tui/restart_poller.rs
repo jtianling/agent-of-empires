@@ -93,7 +93,7 @@ pub struct RestartIdentity {
 impl RestartIdentity {
     fn from_instance(instance: &Instance) -> Self {
         Self {
-            managed: instance.managed_xats.is_some(),
+            managed: crate::session::managed_pane::has_managed_state(instance),
             agent_session_id: instance.agent_session_id.clone(),
             fork_pending: instance.fork_pending.clone(),
             resume_token: instance.resume_token.clone(),

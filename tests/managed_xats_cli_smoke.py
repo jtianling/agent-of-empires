@@ -15,6 +15,7 @@ def main():
     binary = Path(sys.argv[1]).resolve()
     claims = {}
     released = set()
+    mode = {"offline": False}
     calls = []
     token = "private-test-mcp-token"
 
@@ -57,6 +58,9 @@ def main():
         fence = claims[request["identity_key"]]
         assert request["fence"] == fence
         if path.endswith("/status"):
+            if mode["offline"]:
+                return 502, {"ok": False, "error": "runtime_probe_failed",
+                             "detail": "opencode_unreachable: local runtime stopped"}
             return 200, envelope(fence, "prepared")
         if path.endswith("/release"):
             released.add(request["identity_key"])
@@ -117,6 +121,15 @@ def main():
             call("create", str(root), "--tool", "kimi", "--title", "unsupported",
                  "--xats-name", "kimi", "--xats-team", "test", success=False)
             assert len(calls) == before
+            mode["offline"] = True
+            stopped = call("stop", session_id)["data"]
+            assert stopped["xats"]["state"] == "unavailable"
+            assert stopped["xats"]["runtime_ready"] is False
+            assert "opencode_unreachable" in stopped["xats"]["error"]
+            observed = call("show", session_id)["data"]
+            assert observed["status"] == "stopped"
+            assert "runtime_probe_failed" in observed["xats"]["error"]
+            mode["offline"] = False
             sessions_path = next(root.rglob("sessions.json"))
             records = json.loads(sessions_path.read_text())
             record = next(item for item in records if item["id"] == session_id)
@@ -141,7 +154,8 @@ def main():
             print(json.dumps({"status": "PASS", "checks": [
                 "prepare_fence", "not_ready", "status", "specific_conflict",
                 "recoverable_session_id", "token_redaction", "unsupported_before_effects",
-                "exact_release", "durable_release_retry", "no_real_tmux",
+                "exact_release", "durable_release_retry", "offline_status_after_stop",
+                "no_real_tmux",
             ]}))
     finally:
         server.shutdown()

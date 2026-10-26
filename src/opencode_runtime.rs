@@ -40,6 +40,9 @@ pub struct OpenCodeRuntimeArgs {
     #[arg(long)]
     pub managed_launch_id: Option<String>,
 
+    #[arg(long)]
+    pub managed_pane_id: Option<String>,
+
     #[arg(last = true)]
     pub extra_args: Vec<String>,
 }
@@ -61,7 +64,9 @@ pub async fn run(profile: &str, args: OpenCodeRuntimeArgs) -> Result<()> {
         profile,
         &args.instance_id,
         args.slot,
+        args.generation,
         args.managed_launch_id.as_deref(),
+        args.managed_pane_id.as_deref(),
     )?;
     let identity_key = load_runtime_identity_key(profile, &args)?;
     let (mut server, base_url) =
@@ -92,14 +97,17 @@ async fn run_with_server(
 
     record_exact_session(profile, args, &session_id).await?;
     if let Some(mut managed) = managed {
-        crate::managed_runtimes::opencode::bind(
-            &mut managed,
-            &client,
-            base_url,
-            &session_id,
-            &args.working_directory,
-        )
-        .await?;
+        if managed.managed_xats.is_some() {
+            crate::managed_runtimes::opencode::bind(
+                &mut managed,
+                &client,
+                base_url,
+                &session_id,
+                &args.working_directory,
+            )
+            .await?;
+        }
+        crate::managed_runtimes::target::mark_ready(profile, &managed)?;
     } else if args.cross_agent_team {
         let identity_key = identity_key.context("OpenCode runtime identity key is missing")?;
         crate::opencode_xats::commit(identity_key, args.generation, base_url, &session_id).await?;
@@ -575,6 +583,7 @@ mod tests {
             resume_session: Some("not-a-session".to_string()),
             cross_agent_team: false,
             managed_launch_id: None,
+            managed_pane_id: None,
             extra_args: Vec::new(),
         };
         assert!(validate_args("default", args).is_err());
@@ -591,6 +600,7 @@ mod tests {
                 resume_session: None,
                 cross_agent_team: false,
                 managed_launch_id: None,
+                managed_pane_id: None,
                 extra_args: Vec::new(),
             };
             assert!(validate_args(profile, args).is_err());
@@ -622,6 +632,7 @@ mod tests {
             resume_session: None,
             cross_agent_team: true,
             managed_launch_id: None,
+            managed_pane_id: None,
             extra_args: Vec::new(),
         };
 

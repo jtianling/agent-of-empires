@@ -20,6 +20,8 @@ use super::PaneConfig;
 mod agent_switch;
 mod codex_restart;
 mod managed;
+mod managed_pane_lifecycle;
+mod managed_panes;
 mod relaunch_dir;
 
 pub(crate) trait PaneConfigTarget {
@@ -1087,6 +1089,16 @@ pub struct Instance {
     pub managed_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_xats: Option<crate::managed_xats::ManagedXats>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_panes: Vec<super::ManagedPane>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_primary_id: Option<String>,
+    #[serde(default)]
+    pub managed_primary_marked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_primary_replacement: Option<super::managed_pane::ManagedPaneReplacement>,
+    #[serde(skip)]
+    pub managed_pane_target: Option<super::ManagedPaneTarget>,
     pub title: String,
     pub project_path: String,
     #[serde(default)]
@@ -1200,6 +1212,11 @@ impl Instance {
             id: generate_id(),
             managed_owner: None,
             managed_xats: None,
+            managed_panes: Vec::new(),
+            managed_primary_id: None,
+            managed_primary_marked: false,
+            managed_primary_replacement: None,
+            managed_pane_target: None,
             title: title.to_string(),
             project_path: project_path.to_string(),
             group_path: String::new(),
@@ -1913,8 +1930,15 @@ impl Instance {
     }
 
     pub(crate) fn start_for_restart(&mut self, mode: RestartMode) -> Result<()> {
+        anyhow::ensure!(
+            self.managed_primary_replacement.is_none(),
+            "Managed primary replacement must finish before restart"
+        );
         if self.managed_xats.is_some() {
             return self.managed_lifecycle(Some(mode), None, false);
+        }
+        if super::managed_pane::has_managed_state(self) {
+            return self.restart_managed_container(None, mode);
         }
         let snapshot = self.begin_fresh_identity(mode);
         let resume_token = self.resume_token.clone();
@@ -1933,8 +1957,15 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.managed_primary_replacement.is_none(),
+            "Managed primary replacement must finish before start"
+        );
         if self.managed_xats.is_some() {
             return self.managed_lifecycle(None, size, skip_on_launch);
+        }
+        if super::managed_pane::has_managed_state(self) {
+            return self.start_managed_container(size, skip_on_launch, RestartMode::Resume);
         }
         self.start_with_size_inner(
             size,
@@ -2078,17 +2109,27 @@ impl Instance {
                 |v| crate::tmux::redact_identity_key(v)
             )
         );
+        let managed_launch = launch == SessionLaunch::Agent
+            && (self.managed_owner.is_some() || self.managed_primary_marked);
         session.create_with_size(
             &self.project_path,
-            cmd.as_deref(),
+            if managed_launch { None } else { cmd.as_deref() },
             size,
             !self.expects_shell(),
         )?;
 
         if launch == SessionLaunch::Agent {
-            if let Err(error) = self.record_primary_launch_slot(exact_runtime.as_ref()) {
+            if let Err(error) = self.record_primary_launch_slot(exact_runtime.as_ref(), mode) {
                 let _ = session.kill();
                 return Err(error);
+            }
+            if managed_launch {
+                self.mark_managed_primary()?;
+                session.respawn_agent_pane(
+                    cmd.as_deref().context("Missing managed command")?,
+                    &self.project_path,
+                    !self.expects_shell(),
+                )?;
             }
             // The pane was just created running this instance's tool, so there
             // is nothing to read back off it.
@@ -2116,6 +2157,7 @@ impl Instance {
     fn record_primary_launch_slot(
         &self,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
+        mode: RestartMode,
     ) -> Result<()> {
         let profile = Self::current_profile();
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
@@ -2124,6 +2166,26 @@ impl Instance {
         let store = crate::db::Store::open_with_schema(&profile)?;
         if let Some(runtime) = exact_runtime {
             runtime.bind_launched_pane(&store, &self.id, &self.primary_pane, &pane_id)
+        } else if self.managed_owner.is_some() || self.managed_primary_marked {
+            let native = if mode == RestartMode::Resume {
+                store
+                    .read_slots_for_instance(&self.id)?
+                    .into_iter()
+                    .find(|slot| slot.slot == 0)
+                    .map(|slot| slot.native_session_id)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            store.upsert_agent_slot_config(
+                &self.id,
+                0,
+                &self.primary_pane,
+                &native,
+                &pane_id,
+                self.xats_identity_key.as_deref().unwrap_or_default(),
+                crate::db::now_unix(),
+            )
         } else {
             store.record_launched_slot_config_if_absent(
                 &self.id,
@@ -3071,18 +3133,32 @@ impl Instance {
             .ok()
             .and_then(|path| path.to_str().map(ToOwned::to_owned))
             .unwrap_or_else(|| "aoe".to_string());
-        let mut parts = vec![
-            shell_escape(&executable),
+        let mut parts = vec![shell_escape(&executable)];
+        if !self.source_profile.is_empty() {
+            parts.extend(["-p".to_string(), shell_escape(&self.source_profile)]);
+        }
+        parts.extend([
             "__opencode-runtime".to_string(),
             "--instance-id".to_string(),
-            shell_escape(&self.id),
+            shell_escape(
+                self.managed_pane_target
+                    .as_ref()
+                    .map_or(self.id.as_str(), |target| target.session_id.as_str()),
+            ),
             "--slot".to_string(),
             runtime.slot.to_string(),
             "--generation".to_string(),
             runtime.generation.to_string(),
             "--working-directory".to_string(),
             shell_escape(&pane.working_dir),
-        ];
+        ]);
+        if let Some(target) = &self.managed_pane_target {
+            parts.push("--managed-pane-id".to_string());
+            parts.push(shell_escape(&target.pane_id));
+        } else if is_primary && super::managed_pane::has_managed_state(self) {
+            parts.push("--managed-pane-id".to_string());
+            parts.push(shell_escape(self.primary_pane_id()));
+        }
         let exact_session = resume_session
             .filter(|value| !value.is_empty())
             .or_else(|| {
@@ -3243,6 +3319,11 @@ impl Instance {
         fork.xats_identity_key = None;
         fork.managed_owner = None;
         fork.managed_xats = None;
+        fork.managed_panes.clear();
+        fork.managed_primary_id = None;
+        fork.managed_primary_marked = false;
+        fork.managed_primary_replacement = None;
+        fork.managed_pane_target = None;
         // Pre-allocate a new session UUID for the fork if the tool supports it.
         // This is passed via `--session-id <uuid>` alongside the fork template.
         fork.agent_session_id = crate::agents::get_agent(&self.tool)
@@ -3535,6 +3616,9 @@ impl Instance {
         if self.managed_xats.is_some() {
             return self.managed_lifecycle(Some(mode), None, false);
         }
+        if super::managed_pane::has_managed_state(self) {
+            return self.restart_managed_container(None, mode);
+        }
         if self.tool == "codex" && self.primary_pane.cross_agent_team {
             return self.respawn_single_codex(mode);
         }
@@ -3674,6 +3758,45 @@ impl Instance {
         mode: RestartMode,
         identity_origins: &HashMap<i64, IdentityKeyOrigin>,
     ) -> Vec<PaneResumeOutcome> {
+        let mut operation = None;
+        let current_slots;
+        let slots = if super::managed_pane::has_managed_state(self) {
+            let result = (|| {
+                let profile = if self.source_profile.is_empty() {
+                    Self::current_profile()
+                } else {
+                    self.source_profile.clone()
+                };
+                let storage = super::Storage::new(&profile)?;
+                let guard = storage.operation_lock()?;
+                let mut parent = storage
+                    .load()?
+                    .into_iter()
+                    .find(|parent| parent.id == self.id)
+                    .context("Managed session disappeared")?;
+                parent.source_profile = profile.clone();
+                let slots = crate::db::Store::open_with_schema(&profile)?
+                    .read_slots_for_instance(&self.id)?;
+                Ok::<_, anyhow::Error>((parent, slots, guard))
+            })();
+            match result {
+                Ok((parent, fresh_slots, guard)) => {
+                    *self = parent;
+                    operation = Some(guard);
+                    current_slots = fresh_slots;
+                    current_slots.as_slice()
+                }
+                Err(error) => {
+                    return slots
+                        .iter()
+                        .map(|_| PaneResumeOutcome::Error(format!("{error:#}")))
+                        .collect()
+                }
+            }
+        } else {
+            slots
+        };
+        let _operation = operation;
         self.status = Status::Restarting;
         self.last_error = None;
         self.relaunch_notes.clear();
@@ -3684,7 +3807,7 @@ impl Instance {
         // re-fork a persisted parent. Prepare a new identity, but commit it only if
         // slot 0 actually respawns (roll back otherwise, so a phantom id/fork is not
         // persisted by the subsequent save).
-        let snapshot = if self.managed_xats.is_none() {
+        let snapshot = if !super::managed_pane::has_managed_state(self) {
             self.begin_fresh_identity(mode)
         } else {
             None
@@ -3698,8 +3821,32 @@ impl Instance {
         let mut primary_respawned = false;
         let mut confirmable_panes: Vec<LaunchedClaudePane> = Vec::new();
         for slot in slots {
-            if slot.slot == 0 && self.managed_xats.is_some() {
-                match self.managed_lifecycle(Some(mode), None, false) {
+            if let Some(id) = self
+                .managed_panes
+                .iter()
+                .find(|pane| pane.slot == Some(slot.slot))
+                .map(|pane| pane.id.clone())
+            {
+                let outcome = self
+                    .relaunch_managed_extra(&id, mode, None)
+                    .map(|_| {
+                        if mode == RestartMode::Resume {
+                            PaneResumeOutcome::Resumed
+                        } else {
+                            PaneResumeOutcome::DegradedToFresh
+                        }
+                    })
+                    .unwrap_or_else(|error| PaneResumeOutcome::Error(format!("{error:#}")));
+                outcomes.push(outcome);
+                continue;
+            }
+            if slot.slot == 0 && super::managed_pane::has_managed_state(self) {
+                let result = if self.managed_xats.is_some() {
+                    self.managed_lifecycle(Some(mode), None, false)
+                } else {
+                    self.restart_managed_container(None, mode)
+                };
+                match result {
                     Ok(()) => {
                         primary_respawned = true;
                         outcomes.push(if mode == RestartMode::Resume {
@@ -3848,12 +3995,36 @@ impl Instance {
         mode: RestartMode,
         identity_origins: &HashMap<i64, IdentityKeyOrigin>,
     ) -> Result<Vec<PaneResumeOutcome>> {
+        let managed = super::managed_pane::has_managed_state(self);
+        let profile = if self.source_profile.is_empty() {
+            Self::current_profile()
+        } else {
+            self.source_profile.clone()
+        };
+        let storage = super::Storage::new(&profile)?;
+        let _operation = managed.then(|| storage.operation_lock()).transpose()?;
+        if managed {
+            *self = storage
+                .load()?
+                .into_iter()
+                .find(|instance| instance.id == self.id)
+                .context("Managed session disappeared before recovery")?;
+            self.source_profile = profile;
+            anyhow::ensure!(
+                self.managed_primary_replacement.is_none(),
+                "Managed primary replacement is incomplete"
+            );
+        }
         if slots.is_empty() {
             anyhow::bail!("no persisted slots to recover");
         }
         self.relaunch_notes.clear();
 
-        let mut ordered: Vec<crate::db::AgentSlot> = slots.to_vec();
+        let mut ordered: Vec<crate::db::AgentSlot> = if managed {
+            store.read_slots_for_instance(&self.id)?
+        } else {
+            slots.to_vec()
+        };
         ordered.sort_by_key(|s| s.slot);
 
         // Recreate the session shell via the normal start path (restores
@@ -3867,7 +4038,11 @@ impl Instance {
 
         // Safe to prepare the fresh identity here: the rebuild above launched no
         // agent, so nothing has claimed the new `--session-id` yet.
-        let identity = self.begin_fresh_identity(mode);
+        let identity = if managed {
+            None
+        } else {
+            self.begin_fresh_identity(mode)
+        };
 
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
 
@@ -3915,6 +4090,45 @@ impl Instance {
                 )));
                 continue;
             };
+            if managed && slot.slot == 0 {
+                store.upsert_agent_slot_config(
+                    &self.id,
+                    0,
+                    &self.primary_pane,
+                    &slot.native_session_id,
+                    new_pane,
+                    self.xats_identity_key.as_deref().unwrap_or_default(),
+                    now,
+                )?;
+                tmux::set_agent_pane_id(&session_name, new_pane)?;
+                self.mark_managed_primary()?;
+                self.persist_managed_snapshot()?;
+                let result = if self.managed_xats.is_some() {
+                    self.managed_lifecycle(Some(mode), None, false)
+                } else {
+                    self.restart_managed_container(None, mode)
+                };
+                primary_launched = result.is_ok();
+                outcomes.push(
+                    result
+                        .map(|_| PaneResumeOutcome::Resumed)
+                        .unwrap_or_else(|error| PaneResumeOutcome::Error(format!("{error:#}"))),
+                );
+                continue;
+            }
+            if let Some(id) = self
+                .managed_panes
+                .iter()
+                .find(|pane| pane.slot == Some(slot.slot))
+                .map(|pane| pane.id.clone())
+            {
+                outcomes.push(
+                    self.relaunch_managed_extra(&id, mode, Some(new_pane))
+                        .map(|_| PaneResumeOutcome::Resumed)
+                        .unwrap_or_else(|error| PaneResumeOutcome::Error(format!("{error:#}"))),
+                );
+                continue;
+            }
             let pane = self.relaunch_pane_config(slot);
             let mut native_session_id = slot.native_session_id.clone();
             let mut identity_key = slot.xats_identity_key.clone();
@@ -4215,6 +4429,9 @@ impl Instance {
     pub fn restart_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
         if self.managed_xats.is_some() {
             return self.managed_lifecycle(Some(RestartMode::Resume), size, false);
+        }
+        if super::managed_pane::has_managed_state(self) {
+            return self.restart_managed_container(size, RestartMode::Resume);
         }
         let session = self.tmux_session()?;
 
@@ -4834,10 +5051,9 @@ fn validate_exact_runtime_extra_args(
 impl ExactSessionRuntimeContext {
     /// Attach the tmux pane AoE just created to this prepared slot.
     ///
-    /// An [`ExactSessionRuntime::OwnedServer`] slot is still conversationless at
-    /// this point -- its runtime wrapper records the session once the server it
-    /// owns has minted one -- so the binding is guarded by the generation that
-    /// prepared it. A [`ExactSessionRuntime::SharedServer`] slot already carries
+    /// A fresh owned-server slot is conversationless, while resume retains its
+    /// exact native session. Both must match the reservation being bound.
+    /// A [`ExactSessionRuntime::SharedServer`] slot already carries
     /// the session AoE minted before launch, so the same guard would never
     /// match and the pane id is written alongside it instead.
     fn bind_launched_pane(
@@ -4854,7 +5070,7 @@ impl ExactSessionRuntimeContext {
                 self.slot,
                 self.generation,
                 &self.identity_key,
-                "",
+                &self.native_session_id,
                 pane_id,
                 crate::db::now_unix(),
             ),
@@ -6804,6 +7020,32 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _) = crate::db::Store::open_with_schema_at(&tmp.path().join("aoe.db")).unwrap();
         (tmp, store)
+    }
+
+    #[test]
+    fn owned_server_resume_binds_the_prepared_native_session() {
+        let (_directory, store) = temp_store();
+        let pane = PaneConfig::new("opencode", "/tmp", false, true);
+        store
+            .upsert_agent_slot_config("parent", 0, &pane, "ses_existing", "", "key", 1)
+            .unwrap();
+        let prepared = store
+            .prepare_opencode_runtime("parent", 0, crate::db::RuntimePreparationMode::Resume)
+            .unwrap();
+        let runtime = ExactSessionRuntimeContext {
+            shape: crate::agents::ExactSessionRuntime::OwnedServer,
+            server_base_url: String::new(),
+            slot: 0,
+            generation: prepared.generation,
+            native_session_id: prepared.native_session_id,
+            identity_key: prepared.xats_identity_key,
+        };
+        runtime
+            .bind_launched_pane(&store, "parent", &pane, "%7")
+            .unwrap();
+        let slots = store.read_slots_for_instance("parent").unwrap();
+        assert_eq!(slots[0].native_session_id, "ses_existing");
+        assert_eq!(slots[0].tmux_pane, "%7");
     }
 
     /// The distinction the reconnect decision rests on. It exists only at launch

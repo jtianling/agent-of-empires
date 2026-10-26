@@ -344,12 +344,14 @@ impl HomeView {
     ) -> anyhow::Result<()> {
         if let Some(id) = &self.selected_session {
             let id = id.clone();
+            let _operation = self.storage.operation_lock()?;
+            self.reload()?;
 
             // Get current values for comparison
             let (current_title, current_group) = self
                 .get_instance(&id)
                 .map(|i| (i.title.clone(), i.group_path.clone()))
-                .unwrap_or_default();
+                .ok_or_else(|| anyhow::anyhow!("Session changed before edit; reload and retry"))?;
 
             // Determine effective title (keep current if empty)
             let effective_title = if new_title.is_empty() {
@@ -391,7 +393,7 @@ impl HomeView {
                     instance.title = effective_title.clone();
                     instance.group_path = effective_group.clone();
 
-                    rename_tmux_session(&id, &effective_title, old_tmux_session);
+                    rename_tmux_session(&id, &effective_title, old_tmux_session)?;
 
                     // Remove from current profile
                     self.instances.retain(|i| i.id != id);
@@ -426,19 +428,34 @@ impl HomeView {
                 None
             };
 
+            rename_tmux_session(&id, &effective_title, old_tmux_session)?;
+
             self.mutate_instance(&id, |inst| {
                 inst.title = effective_title.clone();
                 inst.group_path = effective_group.clone();
             });
-
-            rename_tmux_session(&id, &effective_title, old_tmux_session);
 
             // Rebuild group tree and create group if needed
             self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
             if !effective_group.is_empty() {
                 self.group_tree.create_group(&effective_group);
             }
-            self.save()?;
+            if let Err(error) = self.save() {
+                let rollback = rename_tmux_session(
+                    &id,
+                    &current_title,
+                    Some(crate::tmux::Session::new(&id, &effective_title)?),
+                );
+                let reload = self.reload();
+                let mut detail = format!("Saving edited session failed: {error:#}");
+                if let Err(error) = rollback {
+                    detail.push_str(&format!("; rename rollback failed: {error:#}"));
+                }
+                if let Err(error) = reload {
+                    detail.push_str(&format!("; reload failed: {error:#}"));
+                }
+                anyhow::bail!(detail);
+            }
 
             self.reload()?;
             self.invalidate_stale_poll(&id);
@@ -485,19 +502,14 @@ fn rename_tmux_session(
     id: &str,
     effective_title: &str,
     old_tmux_session: Option<crate::tmux::Session>,
-) {
+) -> anyhow::Result<()> {
     let Some(tmux_session) = old_tmux_session else {
-        return;
+        return Ok(());
     };
-
-    if tmux_session.exists() {
-        let new_tmux_name = crate::tmux::Session::generate_name(id, effective_title);
-        if let Err(e) = tmux_session.rename(&new_tmux_name) {
-            tracing::warn!("Failed to rename tmux session: {}", e);
-        } else {
-            crate::tmux::refresh_session_cache();
-        }
-    }
+    let new_tmux_name = crate::tmux::Session::generate_name(id, effective_title);
+    tmux_session.rename(&new_tmux_name)?;
+    crate::tmux::refresh_session_cache();
+    Ok(())
 }
 
 fn remap_group_path(path: &str, old_path: &str, new_path: &str) -> Option<String> {

@@ -1,6 +1,8 @@
 mod actions;
 pub mod args;
 mod context;
+pub mod pane_args;
+mod panes;
 
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
@@ -13,12 +15,27 @@ use args::{ManagedArgs, ManagedCommand, SetOwnerArgs};
 struct Failure {
     code: &'static str,
     session_id: Option<String>,
+    pane_id: Option<String>,
 }
 
 fn coded(error: anyhow::Error, code: &'static str, id: Option<&str>) -> anyhow::Error {
     error.context(Failure {
         code,
         session_id: id.map(str::to_owned),
+        pane_id: None,
+    })
+}
+
+fn coded_pane(
+    error: anyhow::Error,
+    code: &'static str,
+    session: &str,
+    pane: &str,
+) -> anyhow::Error {
+    error.context(Failure {
+        code,
+        session_id: Some(session.into()),
+        pane_id: Some(pane.into()),
     })
 }
 
@@ -36,13 +53,14 @@ fn report(result: Result<Value>) -> Result<()> {
             let failure = error.downcast_ref::<Failure>();
             let code = failure.map_or("operation_failed", |failure| failure.code);
             let id = failure.and_then(|failure| failure.session_id.as_deref());
+            let pane_id = failure.and_then(|failure| failure.pane_id.as_deref());
             let message = format!("{error:#}");
             tracing::error!(code, session_id = id, "Managed CLI failed: {message}");
             eprintln!("{message}");
             println!(
                 "{}",
                 json!({"ok": false, "error": {
-                    "code": code, "message": message, "session_id": id
+                    "code": code, "message": message, "session_id": id, "pane_id": pane_id
                 }})
             );
             bail!("Managed operation failed ({code})")
@@ -65,9 +83,15 @@ fn execute(profile: &str, args: ManagedArgs) -> Result<Value> {
     let storage = Storage::new(profile)?;
     let _guard = storage.operation_lock()?;
     let (mut instances, groups) = storage.load_with_groups()?;
+    for instance in &mut instances {
+        instance.source_profile = profile.to_string();
+    }
     match args.command {
         ManagedCommand::Init => unreachable!(),
         ManagedCommand::Create(args) => actions::create(&storage, instances, groups, &owner, args),
+        ManagedCommand::Pane { command } => {
+            panes::run(&storage, &mut instances, &groups, &owner, command)
+        }
         ManagedCommand::List => Ok(json!(instances
             .iter()
             .map(|instance| metadata(instance, &owner))
@@ -76,7 +100,7 @@ fn execute(profile: &str, args: ManagedArgs) -> Result<Value> {
             let index = exact_index(&instances, &args.id)?;
             let mut output = metadata(&instances[index], &owner);
             if instances[index].managed_owner.as_deref() == Some(&owner) {
-                output["xats"] = crate::managed_xats::status(&instances[index])?;
+                output["xats"] = crate::managed_xats::status_report(&instances[index]);
             }
             Ok(output)
         }
@@ -101,6 +125,12 @@ pub fn set_owner(profile: &str, args: SetOwnerArgs) -> Result<()> {
         let _guard = storage.operation_lock()?;
         let (mut instances, groups) = storage.load_with_groups()?;
         let index = exact_index(&instances, &args.id)?;
+        let previous = instances[index].managed_owner.clone();
+        for pane in &mut instances[index].managed_panes {
+            if pane.owner == previous && previous.is_some() {
+                pane.owner = owner.clone();
+            }
+        }
         instances[index].managed_owner = owner;
         storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))?;
         Ok(json!({"id": args.id, "owner": instances[index].managed_owner}))

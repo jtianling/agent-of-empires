@@ -7,6 +7,7 @@ mod container_config;
 pub(crate) mod environment;
 mod groups;
 mod instance;
+pub mod managed_pane;
 mod operation_lock;
 mod pane;
 pub mod profile_config;
@@ -32,6 +33,7 @@ pub use instance::{
     IdentityKeyOrigin, Instance, PaneResumeOutcome, RestartMode, SandboxInfo, Status,
     StatusUpdateOptions, TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
 };
+pub use managed_pane::{ManagedPane, ManagedPaneReplacement, ManagedPaneTarget};
 pub use pane::{PaneConfig, PaneDraft, PaneWorktreeInfo, PaneWorktreeRequest};
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,

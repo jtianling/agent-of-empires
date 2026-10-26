@@ -13,34 +13,43 @@ pub(crate) fn load(
     profile: &str,
     id: &str,
     slot: i64,
+    generation: i64,
     launch_id: Option<&str>,
+    pane_id: Option<&str>,
 ) -> Result<Option<Instance>> {
-    if slot != 0 {
+    if let Some(pane_id) = pane_id {
+        let projected =
+            super::target::load_pane(profile, id, pane_id, slot, launch_id, "opencode")?;
+        let row = crate::db::Store::open_with_schema(profile)?
+            .read_slots_for_instance(id)?
+            .into_iter()
+            .find(|row| row.slot == slot)
+            .context("Managed OpenCode slot is missing")?;
         ensure!(
-            launch_id.is_none(),
-            "Managed identity only belongs to the primary pane"
+            row.xats_runtime_generation == generation,
+            "Managed OpenCode slot generation is stale"
         );
-        return Ok(None);
+        return Ok(Some(projected));
     }
+    ensure!(
+        launch_id.is_none(),
+        "Managed OpenCode launch requires its logical pane ID"
+    );
     let instances = Storage::new(profile)?.load()?;
     let Some(instance) = instances.into_iter().find(|item| item.id == id) else {
         ensure!(launch_id.is_none(), "Managed OpenCode session is missing");
         return Ok(None);
     };
-    let Some(identity) = &instance.managed_xats else {
-        ensure!(launch_id.is_none(), "Managed OpenCode identity is missing");
-        return Ok(None);
-    };
-    ensure!(instance.tool == "opencode", "Managed runtime tool mismatch");
-    let claim = identity
-        .claim
-        .as_ref()
-        .context("Managed OpenCode has no claim")?;
+    let managed_target = (slot == 0 && crate::session::managed_pane::has_managed_state(&instance))
+        || instance
+            .managed_panes
+            .iter()
+            .any(|pane| pane.slot == Some(slot));
     ensure!(
-        launch_id == Some(claim.fence.instance_id.as_str()),
-        "Managed OpenCode launch fence is stale or missing"
+        !managed_target,
+        "Managed OpenCode launch requires its logical pane ID"
     );
-    Ok(Some(instance))
+    Ok(None)
 }
 
 pub(crate) async fn bind(

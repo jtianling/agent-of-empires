@@ -558,6 +558,7 @@ async fn rename_session(profile: &str, args: RenameArgs) -> Result<()> {
     }
 
     let storage = Storage::new(profile)?;
+    let _operation = storage.operation_lock()?;
     let (mut instances, groups) = storage.load_with_groups()?;
 
     let inst = if let Some(id) = &args.identifier {

@@ -171,8 +171,10 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
         let selected = instance.id == args.identifier
             || instance.id.starts_with(&args.identifier)
             || instance.title == args.identifier;
-        if selected && instance.managed_xats.is_some() {
+        if selected && crate::session::managed_pane::has_managed_state(instance) {
+            instances[index].source_profile = profile.to_string();
             crate::managed_xats::prepare_release(&mut instances[index])?;
+            crate::session::managed_pane::prepare_children_release(&mut instances[index])?;
             let tree = GroupTree::new_with_groups(&instances, &groups);
             storage.save_with_groups(&instances, &tree)?;
         }
@@ -190,12 +192,13 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
             found = true;
             removed_title = inst.title.clone();
 
-            if inst.managed_xats.is_some() {
+            if crate::session::managed_pane::has_managed_state(&inst) {
                 inst.source_profile = profile.to_string();
                 inst.stop()?;
                 crate::managed_xats::release(&inst)?;
                 crate::managed_codex::cleanup(&inst)?;
                 crate::managed_runtimes::cleanup(&inst)?;
+                crate::session::managed_pane::release_children(&inst)?;
             }
 
             cleanup_pane_worktrees(profile, &inst, &args, &config);

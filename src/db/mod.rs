@@ -17,6 +17,7 @@ pub mod claude_transcript;
 mod codex_binding;
 pub(crate) mod codex_capture;
 pub mod codex_rollout;
+mod managed_pane;
 pub mod reconcile;
 
 use std::path::{Path, PathBuf};

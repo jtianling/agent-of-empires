@@ -13,6 +13,11 @@ pub struct ManagedArgs {
 
 #[derive(Subcommand)]
 pub enum ManagedCommand {
+    /// Manage individual panes without bypassing session ownership
+    Pane {
+        #[command(subcommand)]
+        command: super::pane_args::PaneCommand,
+    },
     /// Create a new manager context at --context (never overwrites)
     Init,
     /// Create an owned session, optionally launch it

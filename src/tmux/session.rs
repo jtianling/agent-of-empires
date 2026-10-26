@@ -165,7 +165,15 @@ impl Session {
     }
 
     pub fn rename(&self, new_name: &str) -> Result<()> {
-        if !self.exists() {
+        let observed = crate::tmux::tmux_command()
+            .args(["has-session", "-t", &format!("={}", self.name)])
+            .output()
+            .context("Checking exact session before rename")?;
+        if !observed.status.success() {
+            let detail = String::from_utf8_lossy(&observed.stderr);
+            if !missing_session_error(&detail) {
+                bail!("Failed to check session before rename: {detail}");
+            }
             return Ok(());
         }
 
@@ -605,7 +613,7 @@ pub fn split_window_right(
         "-F".to_string(),
         "#{pane_id}".to_string(),
         "-t".to_string(),
-        session_name.to_string(),
+        format!("={session_name}:"),
         "-c".to_string(),
         working_dir.to_string(),
         command.to_string(),

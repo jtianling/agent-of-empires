@@ -292,7 +292,28 @@ fn try_list_session_panes(session_name: &str) -> Result<Vec<(u32, String)>> {
 /// Reconcile all managed instances of the active profile.
 ///
 /// Best-effort: store/tmux failures for one session do not abort the others.
-pub fn reconcile_all(profile: &str, instances: &[Instance]) {
+pub fn reconcile_all(profile: &str, _instances: &[Instance]) {
+    let storage = match crate::session::Storage::new(profile) {
+        Ok(storage) => storage,
+        Err(error) => {
+            tracing::warn!("reconcile: cannot open session storage: {error:#}");
+            return;
+        }
+    };
+    let _operation = match storage.operation_lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!("reconcile: cannot lock session operations: {error:#}");
+            return;
+        }
+    };
+    let instances = match storage.load() {
+        Ok(instances) => instances,
+        Err(error) => {
+            tracing::warn!("reconcile: cannot refresh session records: {error:#}");
+            return;
+        }
+    };
     let store = match Store::open_with_schema(profile) {
         Ok(s) => s,
         Err(e) => {
@@ -311,7 +332,7 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
     let listed_at = crate::db::now_unix();
     let mut live_panes: HashSet<String> = HashSet::new();
 
-    for inst in instances {
+    for inst in &instances {
         let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
         let panes = list_session_panes(&session_name);
         if panes.is_empty() {
@@ -319,6 +340,14 @@ pub fn reconcile_all(profile: &str, instances: &[Instance]) {
         }
         for (_, id) in &panes {
             live_panes.insert(id.clone());
+        }
+        if inst.managed_primary_replacement.is_some()
+            || inst
+                .managed_panes
+                .iter()
+                .any(|pane| pane.pending_slot_transition.is_some())
+        {
+            continue;
         }
         let primary = crate::tmux::get_agent_pane_id(&session_name);
         if let Err(error) = capture_codex_bindings(&store, inst, &panes, primary.as_deref()) {

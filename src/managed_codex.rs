@@ -255,7 +255,11 @@ fn profile_config(
     previous: Option<&ClientConfig>,
 ) -> Result<ClientConfig> {
     ensure!(
-        instance.id.len() == 16 && instance.id.bytes().all(|b| b.is_ascii_hexdigit()),
+        instance.primary_pane_id().len() == 16
+            && instance
+                .primary_pane_id()
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit()),
         "Invalid managed session ID"
     );
     let home = match std::env::var_os("CODEX_HOME") {
@@ -265,7 +269,7 @@ fn profile_config(
             .context("Missing home directory")?
             .join(".codex"),
     };
-    let profile_name = format!("aoe-managed-{}", instance.id);
+    let profile_name = format!("aoe-managed-{}", instance.primary_pane_id());
     let profile_path = home.join(format!("{profile_name}.config.toml"));
     if profile_path.exists() {
         ensure!(
@@ -340,7 +344,7 @@ pub(crate) fn command(instance: &Instance, base: &str, cwd: &str) -> Result<Stri
     );
     validate_endpoint(&config.ws_url)?;
     uuid::Uuid::parse_str(&config.thread_id).context("Invalid managed Codex thread")?;
-    let expected_profile = format!("aoe-managed-{}", instance.id);
+    let expected_profile = format!("aoe-managed-{}", instance.primary_pane_id());
     ensure!(
         config.profile_name == expected_profile,
         "Invalid managed Codex profile"
@@ -350,20 +354,21 @@ pub(crate) fn command(instance: &Instance, base: &str, cwd: &str) -> Result<Stri
     } else {
         ""
     };
-    Ok(format!(
+    let command = format!(
         "{base} --remote {} -C {} -p {}{permission} resume {}",
         shell_escape(&config.ws_url),
         shell_escape(cwd),
         shell_escape(&config.profile_name),
         shell_escape(&config.thread_id)
-    ))
+    );
+    crate::managed_runtimes::wrap_pane_command(instance, &command)
 }
 
 pub(crate) fn cleanup(instance: &Instance) -> Result<()> {
     let Some(config) = client_config(instance)? else {
         return Ok(());
     };
-    let expected = format!("aoe-managed-{}.config.toml", instance.id);
+    let expected = format!("aoe-managed-{}.config.toml", instance.primary_pane_id());
     ensure!(
         config
             .profile_path

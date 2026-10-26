@@ -63,7 +63,7 @@ impl DeletionPoller {
     }
 
     fn perform_deletion(request: &DeletionRequest) -> DeletionResult {
-        if request.instance.managed_xats.is_some() {
+        if crate::session::managed_pane::has_managed_state(&request.instance) {
             return Self::perform_managed_deletion(request);
         }
         Self::perform_resources_deletion(request)
@@ -94,7 +94,9 @@ impl DeletionPoller {
             same_managed_launch(current, &request.instance),
             "Managed session changed before deletion; reload and retry"
         );
+        instances[index].source_profile = request.profile.clone();
         crate::managed_xats::prepare_release(&mut instances[index])?;
+        crate::session::managed_pane::prepare_children_release(&mut instances[index])?;
         storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))?;
         let mut instance = instances[index].clone();
         instance.source_profile = request.profile.clone();
@@ -102,6 +104,7 @@ impl DeletionPoller {
         crate::managed_xats::release(&instance)?;
         crate::managed_codex::cleanup(&instance)?;
         crate::managed_runtimes::cleanup(&instance)?;
+        crate::session::managed_pane::release_children(&instance)?;
         let exact = DeletionRequest {
             instance,
             ..request.clone()
@@ -298,16 +301,14 @@ impl DeletionPoller {
 }
 
 fn same_managed_launch(current: &Instance, requested: &Instance) -> bool {
-    let fence = |instance: &Instance| {
-        instance
-            .managed_xats
-            .as_ref()
-            .and_then(|identity| identity.claim.as_ref())
-            .map(|claim| claim.fence.clone())
-    };
-    current.managed_xats.is_some()
+    crate::session::managed_pane::has_managed_state(current)
+        && current.managed_owner == requested.managed_owner
+        && current.managed_primary_id == requested.managed_primary_id
+        && current.managed_primary_replacement == requested.managed_primary_replacement
+        && current.managed_primary_marked == requested.managed_primary_marked
+        && current.managed_panes == requested.managed_panes
         && current.xats_identity_key == requested.xats_identity_key
-        && fence(current) == fence(requested)
+        && current.managed_xats == requested.managed_xats
 }
 
 impl Default for DeletionPoller {
@@ -323,6 +324,30 @@ mod tests {
 
     fn create_test_instance() -> Instance {
         Instance::new("Test Session", "/tmp/test-project")
+    }
+
+    #[test]
+    fn queued_deletion_rejects_new_panes_and_primary_replacement() {
+        let mut requested = create_test_instance();
+        let owner = uuid::Uuid::new_v4().to_string();
+        requested.managed_owner = Some(owner.clone());
+        assert!(same_managed_launch(&requested, &requested));
+        let mut current = requested.clone();
+        current.managed_panes.push(
+            crate::session::ManagedPane::new(
+                owner,
+                crate::session::PaneConfig::new("shell", "/tmp", false, false),
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(!same_managed_launch(&current, &requested));
+        let mut current = requested.clone();
+        current.managed_primary_id = Some("0123456789abcdef".into());
+        assert!(!same_managed_launch(&current, &requested));
+        let mut current = requested.clone();
+        current.managed_owner = None;
+        assert!(!same_managed_launch(&current, &requested));
     }
 
     #[test]
