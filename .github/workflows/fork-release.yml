@@ -1,0 +1,144 @@
+name: Fork binary release
+
+on:
+  push:
+    tags:
+      - "jt-v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.92.0"
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(r"jt-v([0-9]+\.[0-9]+\.[0-9]+)", tag)
+          if match is None:
+              raise SystemExit("Invalid fork release tag")
+          package = Path("Cargo.toml").read_text().split("[dependencies]")[0]
+          version = re.search(r'^version = "([^"]+)"$', package, re.M)[1]
+          if version != match[1]:
+              raise SystemExit("Release tag does not match Cargo.toml")
+          if not Path(f"docs/releases/{version}.md").is_file():
+              raise SystemExit("Release notes are missing")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\n")
+          PY
+          git merge-base --is-ancestor HEAD origin/main
+
+  build:
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin-amd64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-amd64
+    env:
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Build release binary
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Verify binary and CLI
+        run: |
+          test "$(target/$TARGET/release/aoe --version)" = "aoe $VERSION"
+          target/$TARGET/release/aoe managed create --help
+          target/$TARGET/release/aoe session recover-codex --help
+      - name: Package binary
+        run: |
+          mkdir dist
+          cp "target/$TARGET/release/aoe" "dist/aoe-$PLATFORM"
+          cp LICENSE dist/
+          tar -czf "aoe-$PLATFORM.tar.gz" -C dist "aoe-$PLATFORM" LICENSE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aoe-${{ matrix.platform }}
+          path: aoe-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: artifacts
+          pattern: aoe-*
+          merge-multiple: true
+      - name: Check release assets and write checksums
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          root = Path("artifacts")
+          expected = {
+              f"aoe-{platform}.tar.gz"
+              for platform in (
+                  "darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"
+              )
+          }
+          assets = sorted(root.glob("*.tar.gz"))
+          if {path.name for path in assets} != expected:
+              raise SystemExit("Release asset set is incomplete")
+          checksums = "".join(
+              f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+              for path in assets
+          )
+          (root / "SHA256SUMS").write_text(checksums)
+          PY
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" artifacts/*.tar.gz artifacts/SHA256SUMS \
+            --verify-tag --draft --title "AoE jt $VERSION" \
+            --notes-file "docs/releases/$VERSION.md"

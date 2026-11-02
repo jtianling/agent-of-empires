@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-REPO="njbrake/agent-of-empires"
+REPO="jtianling/agent-of-empires"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="aoe"
 

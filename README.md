@@ -59,17 +59,14 @@ The key tmux shortcut to know: **`Ctrl+b d`** detaches from a session and return
 ```bash
 # Quick install (Linux & macOS)
 curl -fsSL \
-  https://raw.githubusercontent.com/njbrake/agent-of-empires/main/scripts/install.sh \
+  https://raw.githubusercontent.com/jtianling/agent-of-empires/main/scripts/install.sh \
   | bash
 
 # Homebrew
-brew install aoe
-
-# Nix
-nix run github:njbrake/agent-of-empires
+brew install jtianling/tap/aoe
 
 # Build from source
-git clone https://github.com/njbrake/agent-of-empires
+git clone https://github.com/jtianling/agent-of-empires
 cd agent-of-empires && cargo build --release
 ```
 

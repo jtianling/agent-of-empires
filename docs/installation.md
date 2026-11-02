@@ -13,20 +13,20 @@ Run the install script:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/njbrake/agent-of-empires/main/scripts/install.sh \
+  https://raw.githubusercontent.com/jtianling/agent-of-empires/main/scripts/install.sh \
   | bash
 ```
 
 ### Homebrew
 
 ```bash
-brew install aoe
+brew install jtianling/tap/aoe
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/njbrake/agent-of-empires
+git clone https://github.com/jtianling/agent-of-empires
 cd agent-of-empires
 cargo build --release
 ```
