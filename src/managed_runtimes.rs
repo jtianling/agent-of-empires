@@ -11,7 +11,8 @@ use crate::session::{environment::shell_escape, Instance};
 pub(crate) mod opencode;
 pub(crate) mod target;
 
-const TOKEN_ENV: &str = "XATS_MANAGED_MCP_TOKEN";
+pub(crate) const MCP_TOKEN_ENV: &str = "XATS_MANAGED_MCP_TOKEN";
+pub(crate) const MANAGER_CONTEXT_ENV: &str = "AOE_MANAGER_CONTEXT";
 
 #[derive(Args)]
 pub struct ManagedLaunchArgs {
@@ -155,9 +156,9 @@ pub fn run_launch(profile: &str, args: ManagedLaunchArgs) -> Result<()> {
     child
         .args(arguments)
         .env_remove(crate::xats_control::IDENTITY_KEY_ENV)
-        .env_remove(TOKEN_ENV);
+        .env_remove(MCP_TOKEN_ENV);
     if args.tool == "claude" {
-        child.env(TOKEN_ENV, crate::managed_xats::mcp_token(instance)?);
+        child.env(MCP_TOKEN_ENV, crate::managed_xats::mcp_token(instance)?);
     }
     #[cfg(unix)]
     {

@@ -2798,6 +2798,7 @@ impl Instance {
                         cmd = match crate::codex_permissions::local_resume_command(
                             &cmd,
                             &pane.working_dir,
+                            resume_token?,
                         ) {
                             Ok(command) => command,
                             Err(error) => {
@@ -5272,6 +5273,22 @@ impl Instance {
             ),
         }
 
+        let prepared = codex_restart
+            .as_ref()
+            .map(codex_restart::CodexRestart::prepare_resume)
+            .transpose();
+        if let Err(error) = prepared {
+            let rollback = codex_restart
+                .map(codex_restart::CodexRestart::abort)
+                .transpose();
+            return PaneResumeOutcome::Error(match rollback {
+                Ok(_) => format!("{error:#}"),
+                Err(rollback) => {
+                    format!("{error:#}; Codex restart rollback failed: {rollback:#}")
+                }
+            });
+        }
+
         if let Err(err) = tmux::respawn_pane_target(
             tmux_pane,
             &command,
@@ -5673,6 +5690,12 @@ mod tests {
             "unexpected codex resume command: {cmd}"
         );
         assert!(cmd.contains("__codex-provider"));
+        let outer = shell_words::split(&cmd).unwrap();
+        let launch = shell_words::split(outer.last().unwrap()).unwrap();
+        assert!(launch
+            .last()
+            .unwrap()
+            .contains("--thread '019d1af9-a899-7df1-8f7d-a244126e5ded'"));
         assert!(cmd.contains("model_provider=$provider"));
         assert!(
             !cmd.contains("AOE_INSTANCE_ID"),

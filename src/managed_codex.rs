@@ -9,10 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::codex_permissions::request;
+use crate::codex_permissions::{current_provider, request, validate_resume};
 use crate::session::Instance;
 
 const HEADER: &str = "X-Xats-Managed-Token";
+
+#[cfg(test)]
+mod provider_tests;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +89,7 @@ pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
 
 struct PreparedThread {
     thread_id: String,
+    provider: String,
     server_name: String,
     headers: Value,
     error: Option<anyhow::Error>,
@@ -125,24 +129,39 @@ async fn prepare_thread(
         json!({"includeLayers": false, "cwd": cwd}),
     )
     .await?;
+    let provider = current_provider(configuration.clone())?;
     let (server_name, headers) = mcp_headers(&configuration, mcp_url, token)?;
     let override_key = format!("mcp_servers.{server_name}.http_headers");
     let url_key = format!("mcp_servers.{server_name}.url");
     let config = json!({(override_key): headers, (url_key): mcp_url.as_str()});
     if let Some(id) = previous {
         uuid::Uuid::parse_str(id).context("Invalid stored managed Codex thread")?;
-        unsubscribe_previous(&mut socket, id, cwd).await?;
+        unsubscribe_previous(&mut socket, id).await?;
     }
     let resumed_thread = previous.filter(|_| !fresh);
     let (method, params) = match resumed_thread {
         Some(id) => (
             "thread/resume",
-            json!({"threadId": id, "cwd": cwd,
+            json!({"threadId": id, "cwd": cwd, "modelProvider": provider,
             "config": config, "excludeTurns": true}),
         ),
-        None => ("thread/start", json!({"cwd": cwd, "config": config})),
+        None => (
+            "thread/start",
+            json!({"cwd": cwd, "config": config, "modelProvider": provider}),
+        ),
     };
-    let response = request(&mut socket, 3, method, params).await?;
+    let response = if method == "thread/resume" {
+        crate::codex_permissions::resume_current_provider(
+            &mut socket,
+            3,
+            params,
+            &configuration,
+            true,
+        )
+        .await?
+    } else {
+        request(&mut socket, 3, method, params).await?
+    };
     let thread_id = response
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -153,24 +172,30 @@ async fn prepare_thread(
         resumed_thread.map_or(true, |id| id == thread_id),
         "Codex resumed a different thread"
     );
-    let persisted = request(
-        &mut socket,
-        4,
-        "thread/name/set",
-        json!({"threadId": thread_id, "name": title}),
-    )
-    .await;
+    let validated = validate_resume(response, &thread_id, &provider, false);
+    let persisted = if validated.is_ok() {
+        request(
+            &mut socket,
+            4,
+            "thread/name/set",
+            json!({"threadId": thread_id, "name": title}),
+        )
+        .await
+        .map(|_| ())
+    } else {
+        Ok(())
+    };
     let closed = socket
         .close(None)
         .await
         .context("Closing managed Codex connection");
-    let error = match (persisted.err(), closed.err()) {
-        (Some(first), Some(second)) => Some(anyhow::anyhow!("{first:#}; {second:#}")),
-        (Some(error), None) | (None, Some(error)) => Some(error),
-        (None, None) => None,
-    };
+    let error = [validated.err(), persisted.err(), closed.err()]
+        .into_iter()
+        .flatten()
+        .reduce(|first, second| anyhow::anyhow!("{first:#}; {second:#}"));
     Ok(PreparedThread {
         thread_id,
+        provider,
         server_name,
         headers,
         error,
@@ -180,27 +205,20 @@ async fn prepare_thread(
 async fn unsubscribe_previous(
     socket: &mut crate::codex_permissions::Socket,
     id: &str,
-    cwd: &str,
 ) -> Result<()> {
-    let resumed = request(
-        socket,
-        10,
-        "thread/resume",
-        json!({"threadId": id, "cwd": cwd, "excludeTurns": true}),
-    )
-    .await?;
-    ensure!(
-        resumed.pointer("/thread/id").and_then(Value::as_str) == Some(id),
-        "Codex subscribed to a different thread"
-    );
     let result = request(socket, 11, "thread/unsubscribe", json!({"threadId": id})).await?;
     ensure!(
         matches!(
             result.get("status").and_then(Value::as_str),
-            Some("unsubscribed" | "notLoaded")
+            Some("unsubscribed" | "notLoaded" | "notSubscribed")
         ),
         "Codex did not unsubscribe the managed thread"
     );
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("invalid");
+    tracing::info!(thread_id = id, status, "Managed Codex unsubscribe response");
     Ok(())
 }
 
@@ -289,7 +307,7 @@ fn profile_config(
 }
 
 fn write_profile(config: &ClientConfig, prepared: &PreparedThread) -> Result<()> {
-    let value = json!({"mcp_servers": {(prepared.server_name.clone()): {
+    let value = json!({"model_provider": prepared.provider, "mcp_servers": {(prepared.server_name.clone()): {
         "http_headers": prepared.headers
     }}});
     let body = toml::to_string(&value).context("Serializing managed Codex profile")?;

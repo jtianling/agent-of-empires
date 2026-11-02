@@ -144,10 +144,26 @@ AoE SHALL 在宿主机 agent 的首次启动, resume 和 restart 中优先使用
 AoE SHALL 在宿主机 Codex 恢复时使用目标 pane 工作目录下当前生效的 provider,
 而非历史线程保存的 provider.  远程恢复 SHALL 通过同一 app-server 的
 `config/read` 解析 provider, 显式传入 `thread/resume` 并验证返回的 provider 和
-线程 UUID.  本地恢复 SHALL 通过临时 stdio app-server 解析配置并向原 Codex
-命令追加 provider 覆盖参数.  未显式配置 provider 时 SHALL 使用 Codex 默认
+线程 UUID.  本地恢复 SHALL 确保 daemon 已启动, 通过其 stdio proxy 读取实际
+配置与历史, 并向原 Codex 命令追加 provider 覆盖参数, 不重启已运行的 daemon.
+未显式配置 provider 时 SHALL 使用 Codex 默认
 `openai`.  此规则 SHALL 同时覆盖 YOLO 和非 YOLO 恢复, 不改变非 YOLO 权限,
 不应用于容器或完整自定义命令覆盖.
+
+此规则 SHALL 覆盖普通本地, 原有 xats 和 managed xats 的主 pane 与附加 pane,
+包括 `r` 和 `R` 触发的恢复.  远程恢复 SHALL 在目标旧 TUI 退出后进行,
+避免旧订阅阻止 provider 切换.  managed xats SHALL 不为退订而先恢复旧 provider,
+并 SHALL 将本次选定的 provider 写入生成的客户端 profile, 供后续远程 TUI 使用.
+
+当历史 provider 不同且 Codex 要求历史归属一致时, AoE SHALL 仅在同一服务确认
+原 thread 为 `notLoaded`, 并核对本机 Codex home、原 UUID、规范化目录、rollout
+和受支持数据库中的原记录后迁移 provider.  AoE SHALL 先落盘私有备份, 再以
+事务和旧值校验更新准确 thread 的单个 provider 字段, 保留 UUID、rollout 和
+其他 thread.  迁移 SHALL 同时覆盖 Resume 与保留上下文的 Restart.
+
+AoE SHALL 对同一 thread 的 provider 迁移加锁.  非本机服务、仍加载的 thread、
+归档历史、目录或 rollout 不匹配及未知数据库版本 SHALL 不触发本地数据修改.
+服务加载状态 SHALL 不被宣称为跨 app-server 的全机器排他保证.
 
 #### Scenario: 历史 provider 已被移除
 
@@ -155,11 +171,36 @@ AoE SHALL 在宿主机 Codex 恢复时使用目标 pane 工作目录下当前生
 - **THEN** 恢复 SHALL 使用当前 provider, 保留原线程 UUID 和历史
 - **AND** 项目目录的配置覆盖 SHALL 按 Codex 自身的解析规则生效
 
-#### Scenario: 已加载的远程线程拒绝切换 provider
+#### Scenario: 已加载但无订阅的远程线程切换 provider
+
+- **WHEN** 目标旧 TUI 已退出, 线程空闲且没有其它客户端订阅
+- **AND** 当前生效的 provider 与历史 provider 不同
+- **THEN** AoE SHALL 仅在服务确认原 thread 已卸载后迁移历史 provider 并恢复原 UUID
+- **AND** AoE SHALL 不先用已删除的历史 provider 加载线程
+
+#### Scenario: 远程线程仍被其它客户端占用
 
 - **WHEN** Codex 返回的 provider 与当前生效的 provider 不同
-- **THEN** AoE SHALL 明确报错并保留原 pane, 不使用旧 provider 假报恢复成功
+- **THEN** AoE SHALL 明确报错并保留 pane 与原线程记录, 不使用旧 provider 假报恢复成功
 - **AND** AoE SHALL 不通过归档线程或重启共享服务绕过限制
+
+#### Scenario: provider 迁移后恢复明确失败
+
+- **WHEN** 历史 provider 已迁移, 但恢复请求失败
+- **AND** 同一服务再次确认原 thread 为 `notLoaded`
+- **THEN** AoE SHALL 按准确 UUID 和迁移后的 provider 做旧值校验, 回滚原 provider
+- **AND** 回滚失败 SHALL 保留具体原因及备份路径
+
+#### Scenario: provider 迁移后的恢复结果未知
+
+- **WHEN** 恢复超时、断连或被取消, 且不能确认原 thread 仍未加载
+- **THEN** AoE SHALL 保留当前 provider 与备份, 记录结果无法确认的具体原因
+- **AND** AoE SHALL 不盲目回滚可能已在服务端加载成功的 thread
+
+#### Scenario: 新建上下文的 Restart
+
+- **WHEN** 用户选择不保留旧上下文的 Restart
+- **THEN** AoE SHALL 直接使用当前生效的 provider 新建上下文, 不迁移旧历史记录
 
 #### Scenario: 配置解析或恢复请求失败
 

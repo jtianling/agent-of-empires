@@ -7,6 +7,7 @@ pub(super) struct CodexRestart {
     store: Store,
     slot: AgentSlot,
     verified: bool,
+    resume: Option<(String, String)>,
 }
 
 impl CodexRestart {
@@ -31,21 +32,31 @@ impl CodexRestart {
             None
         };
         let verified = store.codex_resume_verified(slot)?;
-        if verified && mode == RestartMode::Resume {
+        let resume = if verified && mode == RestartMode::Resume {
             let endpoint = super::codex_app_server_endpoint().map_err(anyhow::Error::msg)?;
-            crate::codex_permissions::prepare_resume(
-                endpoint.url,
-                slot.native_session_id.clone(),
-                working_dir.to_string(),
-                slot.yolo_mode,
-            )?;
-        }
+            Some((endpoint.url, working_dir.to_string()))
+        } else {
+            None
+        };
         store.prepare_codex_restart(slot, mode, target, retiring.as_deref())?;
         Ok(Some(Self {
             store,
             slot: slot.clone(),
             verified,
+            resume,
         }))
+    }
+
+    pub(super) fn prepare_resume(&self) -> Result<()> {
+        if let Some((endpoint, working_dir)) = &self.resume {
+            crate::codex_permissions::prepare_resume(
+                endpoint.clone(),
+                self.slot.native_session_id.clone(),
+                working_dir.clone(),
+                self.slot.yolo_mode,
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn finish(self) -> Result<()> {

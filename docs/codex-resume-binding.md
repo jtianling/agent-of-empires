@@ -29,13 +29,33 @@ launch ID, 旧 launch 的结果仍被拒绝.  启动失败恢复原有已验证�
 Codex 宿主机 resume 始终使用当前工作目录下生效的 provider, 不沿用历史线程
 保存的旧 provider.  远程恢复先通过同一 app-server 的 `config/read` 解析配置,
 再向 `thread/resume` 显式传入 `modelProvider`, 并校验返回的 provider 与原 UUID.
-本地恢复通过短生命周期的 stdio app-server 解析配置, 向原 Codex resume 命令
-追加 `--config model_provider=...`.  未指定 provider 时使用 Codex 默认的 `openai`.
-此行为不改写配置文件, 不清空历史, 不应用于容器和完整自定义命令覆盖.
+本地恢复确保 Codex daemon 已启动, 通过其 stdio proxy 查询当前配置和准确历史,
+再向原 Codex resume 命令追加 `--config model_provider=...`.  此操作不重启已经
+运行的 daemon.  未指定 provider 时使用 Codex 默认的 `openai`.
+此行为不改写用户配置文件, 不清空历史, 不应用于容器和完整自定义命令覆盖.
 
-Codex 0.164.0 对已加载线程会忽略 provider 切换参数.  返回的 provider 与当前
-配置不一致时, AoE 明确拒绝远程恢复并保留原 pane, 不假报成功, 不通过归档线程
-或重启共享服务绕过限制.  provider 解析和 RPC 失败均保留具体错误原因.
+`r` 和 `R` 的普通本地, 原有 xats 和 managed xats 恢复均采用上述规则,
+覆盖主 pane 和附加 pane.  远程恢复在目标旧 TUI 退出后执行, 避免旧订阅阻止
+切换.  managed xats 直接退订, 不先恢复可能已从配置删除的历史 provider,
+并将本次选定的 provider 写入 AoE 生成的客户端 profile, 保持后续 TUI 一致.
+
+Codex 0.166.0 会在恢复前拒绝历史 provider 不匹配, 不能只依靠恢复参数覆盖.
+AoE 在 Resume 和保留上下文的 Restart 中比较 `thread/read` 的历史 provider 与
+当前配置.  不一致时, 必须由同一服务确认 thread 为 `notLoaded`, 并核对原 UUID,
+规范化 cwd、rollout 路径及本地 `state_5.sqlite` 的准确记录.  仅本机回环地址的
+服务和本地 daemon proxy 可执行此步骤, 非本机服务不修改本机历史数据.
+
+更新前在 AoE 数据目录的 `codex-provider-backups/` 保存只含准确 UUID、数据库
+路径和新旧 provider 的私有备份.  然后通过事务和旧值校验, 仅更新原 thread
+的 provider 字段, 不重写 rollout 或其他 thread.  同一 thread 的 AoE provider
+迁移使用文件锁.  数据库版本不支持、目录或路径不匹配、历史归档及 thread
+仍加载时明确拒绝修改.  这里的加载状态只反映被查询的服务, 不构成不同
+app-server 之间的全机器排他保证.
+
+恢复失败后, 只有同一服务再次确认原 thread 未加载, 才回滚 provider.  如果请求
+超时、连接中断或结果无法确认, 保留当前 provider 和备份, 明确记录原因, 避免
+把服务端可能已经加载成功的 thread 改回旧 provider.  不通过归档线程或重启
+共享服务绕过限制.  新建上下文的 Restart 直接使用当前配置, 不修改旧历史.
 
 Codex 远程 resume 不接受 CLI 权限覆盖.  `r`/`R` 恢复时不追加
 `--approve-for-me` 或 `--dangerously-bypass-approvals-and-sandbox`.

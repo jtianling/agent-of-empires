@@ -4,13 +4,26 @@ use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
+mod history;
 mod local;
 pub(crate) use local::current_local_provider;
+pub(crate) use local::current_local_resume_provider;
 
-pub(crate) fn local_resume_command(cmd: &str, cwd: &str) -> Result<String> {
+pub(crate) fn project_trust_override(working_dir: &str) -> String {
+    let trust = toml::Value::Table(
+        [("trust_level".into(), toml::Value::String("trusted".into()))]
+            .into_iter()
+            .collect(),
+    );
+    let projects = toml::Value::Table([(working_dir.into(), trust)].into_iter().collect());
+    format!("projects={projects}")
+}
+
+pub(crate) fn local_resume_command(cmd: &str, cwd: &str, thread: &str) -> Result<String> {
     use crate::session::environment::shell_escape;
 
     let executable = std::env::current_exe().context("locating AoE for Codex resume")?;
@@ -18,10 +31,11 @@ pub(crate) fn local_resume_command(cmd: &str, cwd: &str) -> Result<String> {
         .to_str()
         .context("AoE executable path is not UTF-8")?;
     let script = format!(
-        "provider=$({} __codex-provider --cwd {}) || exit $?; \
+        "provider=$({} __codex-provider --cwd {} --thread {}) || exit $?; \
          exec {cmd} --config \"model_provider=$provider\"",
         shell_escape(executable),
-        shell_escape(cwd)
+        shell_escape(cwd),
+        shell_escape(thread)
     );
     Ok(format!("sh -c {}", shell_escape(&script)))
 }
@@ -107,7 +121,7 @@ async fn restore(endpoint: &str, thread_id: &str, working_dir: &str, yolo: bool)
         ))
         .await
         .context("initializing Codex permissions client")?;
-    restore_thread(&mut socket, thread_id, working_dir, yolo).await?;
+    restore_thread(&mut socket, thread_id, working_dir, yolo, endpoint).await?;
     socket
         .close(None)
         .await
@@ -119,6 +133,7 @@ async fn restore_thread(
     thread_id: &str,
     working_dir: &str,
     yolo: bool,
+    endpoint: &str,
 ) -> Result<()> {
     let config = request(
         socket,
@@ -127,14 +142,15 @@ async fn restore_thread(
         json!({"includeLayers": false, "cwd": working_dir}),
     )
     .await?;
-    let provider = current_provider(config)?;
+    let provider = current_provider(config.clone())?;
     let params = json!({
         "threadId": thread_id,
         "cwd": working_dir,
         "excludeTurns": true,
         "modelProvider": provider
     });
-    let resumed = request(socket, 3, "thread/resume", params.clone()).await?;
+    let resumed =
+        resume_current_provider(socket, 3, params.clone(), &config, is_local(endpoint)).await?;
     validate_resume(resumed, thread_id, &provider, false)?;
     if !yolo {
         return Ok(());
@@ -154,6 +170,111 @@ async fn restore_thread(
     validate_resume(verified, thread_id, &provider, true)
 }
 
+fn is_local(endpoint: &str) -> bool {
+    url::Url::parse(endpoint).is_ok_and(|url| match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    })
+}
+
+pub(crate) async fn resume_current_provider<S>(
+    socket: &mut WebSocketStream<S>,
+    id: u64,
+    params: Value,
+    configuration: &Value,
+    local: bool,
+) -> Result<Value>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let thread = params["threadId"]
+        .as_str()
+        .context("Missing Codex resume UUID")?;
+    let cwd = params["cwd"]
+        .as_str()
+        .context("Missing Codex resume directory")?;
+    let provider = current_provider(configuration.clone())?;
+    let response = request(
+        socket,
+        id + 100,
+        "thread/read",
+        json!({"threadId": thread, "includeTurns": false}),
+    )
+    .await?;
+    let history = serde_json::from_value(response).context("Invalid Codex history response")?;
+    let change = history::prepare(history, thread, cwd, &provider, configuration, local)?;
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(10),
+        request(socket, id, "thread/resume", params.clone()),
+    )
+    .await
+    .context("Timed out resuming Codex with the current provider")
+    .and_then(|result| result);
+    let resumed = if change.is_some() {
+        resumed.and_then(|value| {
+            validate_resume(value.clone(), thread, &provider, false)?;
+            Ok(value)
+        })
+    } else {
+        resumed
+    };
+    let inspection = if change.is_some() && resumed.is_err() {
+        inspect_provider_rollback(socket, id + 200, thread).await
+    } else {
+        Ok(Value::Null)
+    };
+    finish_provider_resume(change, resumed, inspection)
+}
+
+async fn inspect_provider_rollback<S>(
+    socket: &mut WebSocketStream<S>,
+    id: u64,
+    thread: &str,
+) -> Result<Value>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        request(
+            socket,
+            id,
+            "thread/read",
+            json!({"threadId": thread, "includeTurns": false}),
+        ),
+    )
+    .await
+    .context("Timed out checking Codex provider rollback safety")
+    .and_then(|result| result)
+}
+
+fn finish_provider_resume(
+    change: Option<history::ProviderChange>,
+    result: Result<Value>,
+    inspection: Result<Value>,
+) -> Result<Value> {
+    match (change, result) {
+        (Some(change), Err(error)) => {
+            match inspection.and_then(|value| change.is_unloaded(value)) {
+                Ok(true) => match change.rollback() {
+                    Ok(()) => Err(error),
+                    Err(rollback) => {
+                        bail!("{error:#}; Codex provider rollback failed: {rollback:#}")
+                    }
+                },
+                Ok(false) => Err(change.retain(error)),
+                Err(inspection) => Err(change.retain(anyhow::anyhow!("{error:#}; {inspection:#}"))),
+            }
+        }
+        (Some(change), Ok(value)) => {
+            change.commit();
+            Ok(value)
+        }
+        (_, result) => result,
+    }
+}
+
 pub(super) fn current_provider(value: Value) -> Result<String> {
     let response: ConfigResponse =
         serde_json::from_value(value).context("invalid Codex config response")?;
@@ -167,7 +288,7 @@ pub(super) fn current_provider(value: Value) -> Result<String> {
     Ok(provider)
 }
 
-fn validate_resume(
+pub(crate) fn validate_resume(
     value: Value,
     thread_id: &str,
     provider: &str,
@@ -179,7 +300,10 @@ fn validate_resume(
         bail!("Codex permissions response belongs to a different thread");
     }
     if response.model_provider != provider {
-        bail!("Codex did not retain the current model provider {provider}");
+        bail!(
+            "Codex did not retain the current model provider {provider}: returned {}",
+            response.model_provider
+        );
     }
     if require_yolo
         && (response.approval_policy != "never" || response.sandbox.kind != "dangerFullAccess")
@@ -189,12 +313,15 @@ fn validate_resume(
     Ok(())
 }
 
-pub(crate) async fn request(
-    socket: &mut Socket,
+pub(crate) async fn request<S>(
+    socket: &mut WebSocketStream<S>,
     id: u64,
     method: &str,
     params: Value,
-) -> Result<Value> {
+) -> Result<Value>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     socket
         .send(Message::Text(
             json!({"id": id, "method": method, "params": params})
@@ -238,6 +365,17 @@ pub(crate) async fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trust_override_keeps_special_characters_in_one_project_key() {
+        let cwd = "/project/with spaces.and\"quotes";
+        let argument = project_trust_override(cwd);
+        assert_eq!(argument.split_once('=').unwrap().0, "projects");
+        let value: toml::Value = toml::from_str(&argument).unwrap();
+        let projects = value["projects"].as_table().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[cwd]["trust_level"].as_str(), Some("trusted"));
+    }
 
     #[test]
     fn rejects_wrong_thread_and_partial_yolo_permissions() {
