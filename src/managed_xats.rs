@@ -46,6 +46,10 @@ impl std::fmt::Debug for Claim {
 pub struct ManagedXats {
     pub name: String,
     pub team: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub launch_instance_id: String,
     #[serde(default)]
     pub claim: Option<Claim>,
@@ -62,6 +66,8 @@ impl ManagedXats {
         let identity = Self {
             name,
             team,
+            model: None,
+            effort: None,
             launch_instance_id: Uuid::new_v4().to_string(),
             claim: None,
             pending_restart: None,
@@ -73,6 +79,27 @@ impl ManagedXats {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(effort) = &self.effort {
+            if self.model.is_none()
+                || effort.is_empty()
+                || effort.len() > 32
+                || !effort
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                bail!("invalid managed reasoning effort");
+            }
+        }
+        if let Some(model) = &self.model {
+            if model.is_empty()
+                || model.len() > 128
+                || !model.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/')
+                })
+            {
+                bail!("invalid managed model ID");
+            }
+        }
         for (field, value) in [("name", &self.name), ("team", &self.team)] {
             if value.trim().is_empty()
                 || value.trim() != value

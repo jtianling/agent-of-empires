@@ -10,8 +10,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 mod history;
 mod local;
+mod recovery;
+pub(crate) use local::current_local_config;
 pub(crate) use local::current_local_provider;
 pub(crate) use local::current_local_resume_provider;
+pub(crate) use recovery::verify_recovery_thread;
 
 pub(crate) fn project_trust_override(working_dir: &str) -> String {
     let trust = toml::Value::Table(

@@ -68,6 +68,32 @@ Tracks container sandbox state for a session.
 | `extra_env` | `Option<Vec<String>>` | Session-specific env vars (`KEY` or `KEY=VALUE`) |
 | `custom_instruction` | `Option<String>` | Instruction text injected into agent's system prompt |
 
+### Requirement: Codex 原生会话名与协作身份一致
+
+启用 xats 的 Codex pane 在启动、resume 和 restart 时 SHALL 将 Codex 原生会话名设为该 pane 的 `name@team`, 使用与 `/rename` 相同的原生命名接口.  managed pane SHALL 使用明确配置的协作身份; 普通 TUI pane SHALL 仅使用当前 pane 和启动代次验证通过的 thread 绑定及 launcher key 对应的已注册身份.  命名 SHALL 不改变 thread ID, 不添加模型回合, 不改写已有对话内容或 AoE 的 session 标题.
+
+#### Scenario: 多 pane 恢复后命名
+
+- **WHEN** 启用 xats 的 Codex 主 pane 和附加 pane 完成 resume 或 restart
+- **THEN** 每个原生 Codex 会话使用自己的 `name@team`
+- **AND** 邻 pane 的会话名和历史不因该 pane 命名而改变
+
+#### Scenario: 普通 pane 等待注册
+
+- **WHEN** 普通 TUI pane 启动时尚未取得当前启动的注册身份
+- **THEN** 命名助手最多等待 120 秒, 不使用标题或目录猜测名称
+- **AND** 命名前重新核对启动代次、thread 和身份, 对旧代、不匹配、歧义或接口错误保留原名并记录具体原因
+
+#### Scenario: 用户随后手动改名
+
+- **WHEN** 本次启动的自动命名已经成功, 用户随后执行 `/rename`
+- **THEN** AoE 不再持续覆盖本次启动中的手动名称
+
+#### Scenario: 没有协作身份
+
+- **WHEN** pane 未启用 xats 或未注册协作身份
+- **THEN** AoE 不猜测或创建 `name@team` 名称
+
 ## Session Lifecycle
 
 ```
@@ -207,6 +233,32 @@ AoE SHALL 对同一 thread 的 provider 迁移加锁.  非本机服务、仍加�
 - **WHEN** 配置解析或恢复 RPC 返回错误
 - **THEN** AoE SHALL 保留具体错误原因
 - **AND** 临时本地配置服务 SHALL 在成功, 失败和超时后退出
+
+### Requirement: xats 绑定丢失后恢复已验证的 Codex 对话
+
+实时绑定查询返回 `pending`, `not_found` 或 `stale` 时, AoE SHALL 允许 `r`/`R`
+使用与当前 slot 的 generation, 身份, pane 和线程一致的持久化绑定证明.
+当前进程的 launch ID SHALL 与已验证证明一致, 或进程树中的 Codex SHALL 都明确
+执行 `resume <原线程 UUID>`.  `awaiting_launch` SHALL 拒绝已退役的 launch ID.
+查询前后的 pane 进程和启动信息 SHALL 一致.  恢复 SHALL 保留原线程和历史,
+并继续执行原有 provider 和权限准备.
+
+#### Scenario: 共享服务重启后重试同一对话
+
+- **WHEN** xats 重启后当前 Codex 启动的绑定查询返回 `pending`
+- **AND** slot 保留有效证明, 当前启动明确 resume 同一线程
+- **THEN** AoE SHALL 允许恢复该线程, 不要求旧 TUI 先重新完成 xats 注册
+
+#### Scenario: 缺少证明或启动不匹配
+
+- **WHEN** 持久化证明缺失, 已过期, 属于另一 pane, 或当前启动既不匹配证明也未明确 resume 原线程
+- **THEN** AoE SHALL 拒绝恢复, 不按目录或时间猜测线程
+- **AND** fresh, fork 和已退役的启动 SHALL 不得作为同线程 resume 的证据
+
+#### Scenario: 实时查询报告冲突或失败
+
+- **WHEN** 实时查询返回不同线程, 歧义绑定, 接口错误或协议错误
+- **THEN** AoE SHALL 保留具体失败原因并拒绝恢复, 不使用持久化证明绕过错误
 
 ### Requirement: Session attach configures tmux key bindings
 When attaching to any AoE-managed tmux session, the attach operation SHALL configure tmux key bindings for navigation: root-table `Ctrl+,` and `Ctrl+.` for session cycling, `Ctrl+b 1-9` for number jump via key tables, `Ctrl+b b` for back toggle, `Ctrl+b h/j/k/l` for pane navigation, and `Ctrl+;` for pane cycling. The `attach()` method accepts a `profile` parameter to scope session cycling and number jump to the current profile.
@@ -364,3 +416,24 @@ When a session is created with the Shell tool as the left (main) pane, the shell
 - **SC-002**: Session state is fully recoverable after AoE is closed and reopened.
 - **SC-003**: Status polling correctly reflects Running/Waiting/Idle states for all supported agents.
 - **SC-004**: Ctrl-Z does not suspend agent processes inside tmux sessions.
+### Requirement: 人工选择原线程恢复缺失的绑定
+
+系统 SHALL 提供仅限非托管 host xats Codex 的显式恢复入口,
+要求完整 session ID、slot 和原 thread UUID, 不猜测历史归属.
+系统 SHALL 验证当前 pane 启动、原线程 UUID、规范化目录和 notLoaded 状态,
+拒绝与当前 argv、xats 或其他 slot 的已知线程冲突.
+系统 SHALL 在验证前后核对启动与 xats 证据, 通过事务和 CAS 持久化恢复证明及审计记录.
+该入口 SHALL 不重启进程或创建新对话, 用户随后执行普通 Resume.
+
+存活的普通 host xats Codex 的 CLI restart SHALL 复用逐 pane Resume,
+先验证主 pane、全部目标 pane 的归属和 Codex 恢复证明, 再保留原布局和原线程恢复.
+缺少证明或 pane 归属冲突时 SHALL 拒绝, 不销毁 session 或静默 fresh.
+单 pane 的恢复错误 SHALL 向调用者报告, 不以整个 restart 成功掩盖失败.
+
+#### Scenario: 原绑定过期但历史仍在
+- **WHEN** 用户明确指定缺失绑定的 slot 和可读的原线程
+- **THEN** 系统保存准确绑定, 下一次 Resume 仍使用原线程
+
+#### Scenario: 明确冲突或验证失败
+- **WHEN** 原线程已加载、目录不匹配、其他 slot 已绑定该线程或控制面验证失败
+- **THEN** 系统拒绝恢复, 不改动已有绑定或启动新对话

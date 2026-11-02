@@ -6,6 +6,7 @@ mod input;
 mod on_create;
 mod operations;
 mod render;
+mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -18,7 +19,7 @@ use tui_input::Input;
 use crate::session::{
     config::{load_config, save_config, SortOrder},
     expanded_groups, flatten_tree, resolve_config, Group, GroupTree, Instance, Item, PaneDraft,
-    Storage,
+    Status, Storage,
 };
 use crate::tmux::AvailableTools;
 
@@ -98,6 +99,7 @@ pub struct HomeView {
     pub(super) storage: Storage,
     pub(super) instances: Vec<Instance>,
     pub(super) instance_map: HashMap<String, Instance>,
+    pub(super) detected_worktree_branches: HashMap<String, String>,
     pub(super) groups: Vec<Group>,
     pub(super) group_tree: GroupTree,
     pub(super) flat_items: Vec<Item>,
@@ -164,8 +166,6 @@ pub struct HomeView {
     // Performance: background status polling
     pub(super) status_poller: StatusPoller,
     pub(super) pending_status_refresh: bool,
-    /// Session IDs that were just renamed; skip next stale Error from in-flight poll
-    pub(super) skip_stale_errors: HashSet<String>,
 
     // Performance: background deletion
     pub(super) deletion_poller: DeletionPoller,
@@ -246,6 +246,7 @@ impl HomeView {
         launch_dir: std::path::PathBuf,
     ) -> anyhow::Result<Self> {
         let (instances, groups) = storage.load_with_groups()?;
+        let detected_worktree_branches = worktree::detect_branches(&instances);
 
         let instance_map: HashMap<String, Instance> = instances
             .iter()
@@ -277,6 +278,7 @@ impl HomeView {
             storage,
             instances,
             instance_map,
+            detected_worktree_branches,
             groups,
             group_tree,
             flat_items,
@@ -318,7 +320,6 @@ impl HomeView {
             launch_dir,
             status_poller: StatusPoller::new(poller_profile),
             pending_status_refresh: false,
-            skip_stale_errors: HashSet::new(),
             deletion_poller: DeletionPoller::new(),
             restart_poller: RestartPoller::new(),
             creation_poller: CreationPoller::new(),
@@ -359,9 +360,20 @@ impl HomeView {
                 inst.pre_spike_status = prev.pre_spike_status;
                 inst.acknowledged = prev.acknowledged;
                 inst.detected_inner_agent = prev.detected_inner_agent.clone();
+                if inst.title != prev.title {
+                    if inst.status == Status::Error {
+                        inst.status = Status::Unknown;
+                    }
+                    inst.last_error = None;
+                    inst.last_error_check = None;
+                    inst.last_spinner_seen = None;
+                    inst.spike_start = None;
+                    inst.pre_spike_status = None;
+                }
             }
         }
 
+        self.detected_worktree_branches = worktree::detect_branches(&instances);
         self.instances = instances;
         self.instance_map = self
             .instances
@@ -464,16 +476,14 @@ impl HomeView {
                     continue;
                 };
                 // A completed restart invalidates the previous launch's poll.
-                if inst.restart_in_flight || inst.last_start_time != update.last_start_time {
+                if inst.restart_in_flight
+                    || inst.last_start_time != update.last_start_time
+                    || inst.title != update.title
+                {
                     continue;
                 }
                 let old_status = self.get_instance(&update.id).map(|i| i.status);
                 let resume_token = update.resume_token.clone();
-
-                // Skip stale Error from in-flight poll that used old tmux session name
-                if update.status == Status::Error && self.skip_stale_errors.remove(&update.id) {
-                    continue;
-                }
 
                 let should_update = old_status.is_some_and(|s| {
                     s != Status::Deleting
@@ -939,24 +949,21 @@ impl HomeView {
     /// re-checks live tmux state; called on the disk/status refresh cadence so
     /// the render and input paths only consult the cached set.
     pub(super) fn refresh_recoverable_cache(&mut self) {
-        let store = match crate::db::Store::open_with_schema(self.storage.profile()) {
-            Ok(store) => store,
+        let tracked = match crate::db::Store::instance_ids_with_slots(self.storage.profile()) {
+            Ok(tracked) => tracked,
             Err(e) => {
-                tracing::debug!("recoverable: cannot open store: {}", e);
+                tracing::debug!("recoverable: cannot read session identities: {e:#}");
                 return;
             }
         };
 
+        if !tracked.is_empty() {
+            crate::tmux::refresh_session_cache();
+        }
+
         let mut recoverable = HashSet::new();
         for inst in &self.instances {
-            let has_slots = match store.read_slots_for_instance(&inst.id) {
-                Ok(slots) => !slots.is_empty(),
-                Err(e) => {
-                    tracing::debug!("recoverable: read slots for {} failed: {}", inst.id, e);
-                    continue;
-                }
-            };
-            if inst.is_recoverable(has_slots) {
+            if tracked.contains(&inst.id) && inst.is_recoverable(true) {
                 recoverable.insert(inst.id.clone());
             }
         }

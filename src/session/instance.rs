@@ -1,6 +1,6 @@
 //! Session instance definition and operations
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -20,8 +20,10 @@ use super::PaneConfig;
 mod agent_switch;
 mod codex_restart;
 mod managed;
+mod managed_claude;
 mod managed_pane_lifecycle;
 mod managed_panes;
+mod managed_recovery;
 mod relaunch_dir;
 
 pub(crate) trait PaneConfigTarget {
@@ -881,12 +883,6 @@ fn parse_codex_app_server_url(raw: &str) -> Option<CodexAppServerEndpoint> {
 /// xats side, as a Codex that connected but cannot be resumed, and nobody
 /// debugging that goes looking through AoE's warnings. A pane that refuses to
 /// start is loud; two systems quietly talking to different servers is not.
-pub(crate) fn managed_codex_endpoint() -> anyhow::Result<String> {
-    codex_app_server_endpoint()
-        .map(|endpoint| endpoint.url)
-        .map_err(anyhow::Error::msg)
-}
-
 fn codex_app_server_endpoint() -> Result<CodexAppServerEndpoint, String> {
     resolve_codex_app_server_endpoint(
         std::env::var(CODEX_XATS_APP_SERVER_URL_ENV).ok(),
@@ -1097,6 +1093,8 @@ pub struct Instance {
     pub managed_primary_marked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_primary_replacement: Option<super::managed_pane::ManagedPaneReplacement>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub managed_recovery_panes: BTreeMap<i64, String>,
     #[serde(skip)]
     pub managed_pane_target: Option<super::ManagedPaneTarget>,
     pub title: String,
@@ -1216,6 +1214,7 @@ impl Instance {
             managed_primary_id: None,
             managed_primary_marked: false,
             managed_primary_replacement: None,
+            managed_recovery_panes: BTreeMap::new(),
             managed_pane_target: None,
             title: title.to_string(),
             project_path: project_path.to_string(),
@@ -1778,6 +1777,11 @@ impl Instance {
         endpoint: &CodexAppServerEndpoint,
     ) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
+        let name_monitor =
+            crate::codex_name::monitor_command(&endpoint.url).unwrap_or_else(|error| {
+                tracing::warn!("Cannot prepare Codex session naming: {error:#}");
+                String::new()
+            });
         let working_dir = shell_escape(working_dir);
         let app_server_url = shell_escape(&endpoint.url);
         let codex_command = format!(
@@ -1841,6 +1845,7 @@ impl Instance {
                  printf '%s\\n' '{prereg_failed}' >&2; \
                  exit 1; \
              fi; \
+             {name_monitor} \
              exec {codex_command}",
             host = shell_escape(&endpoint.host),
             port = endpoint.port,
@@ -2001,7 +2006,7 @@ impl Instance {
             return Ok(());
         }
 
-        if self.managed_xats.is_some() {
+        if launch == SessionLaunch::Agent && self.managed_xats.is_some() {
             crate::managed_codex::prepare(self)?;
             crate::managed_runtimes::prepare(self)?;
         }
@@ -2083,7 +2088,7 @@ impl Instance {
         let cmd = match launch {
             SessionLaunch::Agent => self.build_pane_command_with_runtime(
                 &self.primary_pane,
-                if self.managed_xats.is_some()
+                if super::managed_pane::has_managed_state(self)
                     && self.tool == "claude"
                     && mode == RestartMode::Resume
                 {
@@ -3324,6 +3329,7 @@ impl Instance {
         fork.managed_primary_id = None;
         fork.managed_primary_marked = false;
         fork.managed_primary_replacement = None;
+        fork.managed_recovery_panes.clear();
         fork.managed_pane_target = None;
         // Pre-allocate a new session UUID for the fork if the tool supports it.
         // This is passed via `--session-id <uuid>` alongside the fork template.
@@ -4022,7 +4028,7 @@ impl Instance {
         self.relaunch_notes.clear();
 
         let mut ordered: Vec<crate::db::AgentSlot> = if managed {
-            store.read_slots_for_instance(&self.id)?
+            self.prepare_managed_recovery(store)?
         } else {
             slots.to_vec()
         };
@@ -4258,6 +4264,17 @@ impl Instance {
 
         self.report_slots_that_did_not_come_back(store, &session_name, &paired, &mut outcomes, now);
 
+        if managed
+            && outcomes
+                .iter()
+                .all(|outcome| !matches!(outcome, PaneResumeOutcome::Error(_)))
+        {
+            let layout = tmux::session_window_layout(&session_name)?;
+            store.upsert_layout_snapshot(&self.id, &layout, crate::db::now_unix())?;
+            self.managed_recovery_panes.clear();
+            self.persist_managed_snapshot()?;
+        }
+
         self.auto_confirm_panes(&confirmable_panes);
         self.apply_tmux_options(&Self::current_profile());
         self.status = Status::Starting;
@@ -4436,6 +4453,15 @@ impl Instance {
         }
         let session = self.tmux_session()?;
 
+        if session.exists()
+            && self.tool == "codex"
+            && self.primary_pane.cross_agent_team
+            && !self.is_sandboxed()
+            && !self.has_command_override()
+        {
+            return self.resume_recorded_codex_panes();
+        }
+
         if session.exists() {
             session.kill()?;
         }
@@ -4447,6 +4473,8 @@ impl Instance {
     }
 
     pub fn kill(&self) -> Result<()> {
+        crate::managed_codex::verify_stop_scope(self)?;
+        self.capture_managed_claude_sessions()?;
         let session = self.tmux_session()?;
         if session.exists() {
             session.kill()?;
@@ -4459,6 +4487,7 @@ impl Instance {
     /// restarted on re-attach.
     pub fn stop(&self) -> Result<()> {
         self.kill()?;
+        crate::managed_codex::stop_all(self)?;
 
         if self.is_sandboxed() {
             let container = containers::DockerContainer::from_session_id(&self.id);

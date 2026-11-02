@@ -119,6 +119,9 @@ pub enum Commands {
     #[command(name = "__codex-provider", hide = true)]
     CodexProvider(super::codex_provider::CodexProviderArgs),
 
+    #[command(name = "__codex-name", hide = true)]
+    CodexName(super::codex_name::CodexNameArgs),
+
     /// Internal: own one exact OpenCode server/session runtime (hidden).
     #[command(name = "__opencode-runtime", hide = true)]
     OpenCodeRuntime(OpenCodeRuntimeArgs),

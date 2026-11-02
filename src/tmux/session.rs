@@ -80,6 +80,8 @@ impl Session {
         }
 
         let mut args = build_create_args(&self.name, working_dir, command, size);
+        let path = std::env::var("PATH").context("Reading session launch PATH")?;
+        args.splice(1..1, ["-e".to_string(), format!("PATH={path}")]);
         append_remain_on_exit_args(&mut args, &self.name, remain_on_exit);
         append_pane_died_hook_args(&mut args, &self.name);
         append_store_pane_id_args(&mut args, &self.name);
@@ -186,6 +188,7 @@ impl Session {
             bail!("Failed to rename tmux session: {}", stderr);
         }
 
+        refresh_session_cache();
         Ok(())
     }
 
@@ -297,8 +300,6 @@ impl Session {
         respawn_pane_target(&target, command, working_dir, remain_on_exit)
     }
 
-    /// Send a message to the agent, handling multi-line text with Shift+Enter
-    /// and pressing Enter to submit.
     pub fn send_keys(&self, text: &str) -> Result<()> {
         if !self.exists() {
             bail!("Session does not exist: {}", self.name);
@@ -306,34 +307,7 @@ impl Session {
 
         let target = format!("={}:^.0", self.name);
 
-        let lines: Vec<&str> = text.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            Self::tmux_send(&target, &["-l", line])?;
-            if i < lines.len() - 1 {
-                // ESC + CR: what terminals send for Shift+Enter (inserts newline)
-                Self::tmux_send(&target, &["-H", "1b", "0d"])?;
-            }
-        }
-
-        // Enter to submit
-        Self::tmux_send(&target, &["Enter"])?;
-
-        Ok(())
-    }
-
-    fn tmux_send(target: &str, args: &[&str]) -> Result<()> {
-        let output = crate::tmux::tmux_command()
-            .arg("send-keys")
-            .args(["-t", target])
-            .args(args)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to send keys: {}", stderr);
-        }
-
-        Ok(())
+        super::submit_text_to_pane_target(&target, text)
     }
 
     pub fn send_keys_to_agent_pane(&self, keys: &[&str]) -> Result<()> {
@@ -539,34 +513,6 @@ pub fn capture_pane_screen(pane: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// The `send-keys` argv that types `text` into `pane` verbatim.
-///
-/// `-l` is what keeps a word that also names a tmux key (`Enter`, `Up`, `C-c`)
-/// from being delivered as that key instead of as the characters it spells.
-fn literal_send_args<'a>(pane: &'a str, text: &'a str) -> [&'a str; 5] {
-    ["send-keys", "-t", pane, "-l", text]
-}
-
-/// Type `text` into an explicit tmux pane target and submit it, the way a user
-/// typing into that pane would.
-///
-/// The Enter is a second send rather than part of the literal text: sent
-/// literally a newline is a character in the input, not the act of submitting
-/// it. This is the same pairing [`Session::send_keys`] uses, applied to a pane
-/// the caller names instead of the session's first pane.
-pub fn submit_text_to_pane_target(pane: &str, text: &str) -> Result<()> {
-    let output = crate::tmux::tmux_command()
-        .args(literal_send_args(pane, text))
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to submit text to pane {}: {}", pane, stderr.trim());
-    }
-
-    send_keys_to_pane_target(pane, &["Enter"])
 }
 
 /// Send raw key strings to an explicit tmux pane target. No-op for empty input.
@@ -896,23 +842,6 @@ mod tests {
                 .args(["kill-session", "-t", &self.0])
                 .output();
         }
-    }
-
-    /// The `-l` and the pane target are the two things that make this a
-    /// submission into one named pane rather than a keystroke broadcast: without
-    /// `-l` a text like `Enter` arrives as the Enter key, and without an explicit
-    /// `-t` the send lands wherever tmux considers current.
-    #[test]
-    fn literal_send_targets_the_named_pane_and_does_not_interpret_the_text() {
-        assert_eq!(
-            literal_send_args("%42", "reconnect"),
-            ["send-keys", "-t", "%42", "-l", "reconnect"]
-        );
-        assert_eq!(
-            literal_send_args("%7", "Enter"),
-            ["send-keys", "-t", "%7", "-l", "Enter"],
-            "text that spells a key name must still travel as text"
-        );
     }
 
     /// Helper: check if tmux is available for tests that need it

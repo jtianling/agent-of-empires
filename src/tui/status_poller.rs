@@ -48,6 +48,7 @@ fn polling_tier(status: Status) -> u64 {
 #[derive(Debug)]
 pub struct StatusUpdate {
     pub id: String,
+    pub title: String,
     pub last_start_time: Option<Instant>,
     pub status: Status,
     pub last_error: Option<String>,
@@ -104,6 +105,7 @@ impl StatusPoller {
         // Track pane titles we've set for agents that don't manage their own,
         // so we only call tmux select-pane when the title actually changes.
         let mut managed_pane_titles: HashMap<String, String> = HashMap::new();
+        let mut polled_titles: HashMap<String, String> = HashMap::new();
         // Start at TIER_COLD - 1 so the first wrapping_add produces TIER_COLD,
         // which is divisible by all tier intervals -- ensuring every session is
         // polled on the very first cycle.
@@ -125,7 +127,10 @@ impl StatusPoller {
             // If not, skip the batch subprocess calls entirely.
             let any_pollable = instances.iter().any(|inst| {
                 let tier = polling_tier(inst.status);
-                tier != 0 && cycle_count % tier == 0
+                let renamed = polled_titles
+                    .get(&inst.id)
+                    .is_some_and(|title| title != &inst.title);
+                tier != 0 && (renamed || cycle_count % tier == 0)
             });
 
             if any_pollable {
@@ -162,9 +167,20 @@ impl StatusPoller {
             for mut inst in instances {
                 // Adaptive polling: skip instances whose tier interval hasn't elapsed
                 let tier = polling_tier(inst.status);
-                if tier == 0 || cycle_count % tier != 0 {
+                let renamed = polled_titles
+                    .get(&inst.id)
+                    .is_some_and(|title| title != &inst.title);
+                if tier == 0 || (!renamed && cycle_count % tier != 0) {
                     continue;
                 }
+                if renamed {
+                    previous_statuses.remove(&inst.id);
+                    last_activity.remove(&inst.id);
+                    last_full_check.remove(&inst.id);
+                    managed_pane_titles.remove(&inst.id);
+                    inst.last_error_check = None;
+                }
+                polled_titles.insert(inst.id.clone(), inst.title.clone());
 
                 let previous_status = previous_statuses.get(&inst.id).copied();
                 let now = Instant::now();
@@ -183,6 +199,7 @@ impl StatusPoller {
                                 next_previous_statuses.insert(inst.id.clone(), Status::Error);
                                 updates.push(StatusUpdate {
                                     id: inst.id,
+                                    title: inst.title,
                                     last_start_time: inst.last_start_time,
                                     status: Status::Error,
                                     last_error: Some("Container is not running".to_string()),
@@ -288,6 +305,7 @@ impl StatusPoller {
                 next_previous_statuses.insert(inst.id.clone(), inst.status);
                 updates.push(StatusUpdate {
                     id: inst.id,
+                    title: inst.title,
                     last_start_time: inst.last_start_time,
                     status: inst.status,
                     last_error: inst.last_error,

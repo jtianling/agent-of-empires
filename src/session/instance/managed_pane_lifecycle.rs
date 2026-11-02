@@ -38,6 +38,8 @@ impl Instance {
         if crate::session::managed_pane::recover_pending_slot(storage.profile(), self, index)? {
             persist(&storage, &mut instances, &groups, self)?;
         }
+        let previous_launch =
+            crate::managed_codex::launch_marker(self.managed_panes[index].xats.as_ref());
         let mut outcome = self.relaunch_managed_record(
             &storage,
             &mut instances,
@@ -55,8 +57,28 @@ impl Instance {
                 ));
             }
         }
-        persist(&storage, &mut instances, &groups, self)?;
-        outcome
+        let persisted = persist(&storage, &mut instances, &groups, self);
+        let error = [outcome.err(), persisted.err()]
+            .into_iter()
+            .flatten()
+            .reduce(|first, second| anyhow::anyhow!("{first:#}; {second:#}"));
+        if let Some(error) = error {
+            let cleanup =
+                if crate::managed_codex::launch_marker(self.managed_panes[index].xats.as_ref())
+                    != previous_launch
+                {
+                    self.managed_panes[index]
+                        .project(self)
+                        .and_then(|runtime| crate::managed_codex::stop_current_launch(&runtime))
+                } else {
+                    Ok(())
+                };
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(anyhow::anyhow!("{error:#}; {cleanup:#}")),
+            };
+        }
+        Ok(())
     }
 
     fn rollback_managed_replacement(
@@ -109,6 +131,9 @@ impl Instance {
         requested: RestartMode,
         replacement: Option<&str>,
     ) -> Result<()> {
+        if replacement.is_none() {
+            self.capture_managed_claude_sessions()?;
+        }
         let record = self.managed_panes[index].clone();
         ensure!(!record.removing, "Managed pane removal is incomplete");
         let store = crate::db::Store::open_with_schema(storage.profile())?;
@@ -120,6 +145,7 @@ impl Instance {
         let mode = resume_mode(&record, &row.native_session_id, requested);
         self.validate_managed_relaunch(storage.profile(), &record, replacement)?;
         let mut projection = record.project(self)?;
+        crate::managed_codex::preflight(&projection)?;
         if mode == RestartMode::Resume
             && !row.native_session_id.is_empty()
             && !(record.config.tool == "codex" && record.xats.is_some())
@@ -141,6 +167,7 @@ impl Instance {
             let session = crate::tmux::Session::generate_name(&self.id, &self.title);
             crate::tmux::managed_pane::clear_ready(&session, target, &record.id)?;
             self.stop_managed_pane(target)?;
+            crate::managed_codex::stop(&record.project(self)?)?;
         }
         self.managed_panes[index]
             .stage_slot_transition(mode == RestartMode::Resume, replacement.is_some())?;
@@ -255,10 +282,19 @@ impl Instance {
         if self.tmux_session()?.exists() {
             return Ok(());
         }
+        self.capture_managed_claude_sessions()?;
+        let restore_mode = mode;
+        let mode = if self.tool == "claude" {
+            let mode = self.managed_primary_launch_mode(Some(mode))?;
+            self.begin_fresh_identity(mode);
+            mode
+        } else {
+            mode
+        };
         let result = self.start_with_size_inner(size, skip_on_launch, SessionLaunch::Agent, mode);
         persist(&storage, &mut instances, &groups, self)?;
         result?;
-        self.restore_managed_extras(mode)
+        self.restore_managed_extras(restore_mode)
     }
 
     pub(super) fn restart_managed_container(
@@ -283,7 +319,15 @@ impl Instance {
         if !self.tmux_session()?.exists() {
             return self.start_managed_container(size, false, mode);
         }
+        let mode = if self.tool == "claude" {
+            self.managed_primary_launch_mode(Some(mode))?
+        } else {
+            mode
+        };
         let snapshot = self.begin_fresh_identity(mode);
+        if self.tool == "claude" && mode == RestartMode::Resume {
+            self.resume_token = self.agent_session_id.clone();
+        }
         self.mark_managed_primary()?;
         let result = self.respawn_single_pane_inner(mode);
         self.rollback_fresh_identity_on_failure(snapshot, result.is_ok());
@@ -389,7 +433,7 @@ impl Instance {
         Ok(())
     }
 
-    fn managed_profile(&self) -> String {
+    pub(crate) fn managed_profile(&self) -> String {
         if self.source_profile.is_empty() {
             Self::current_profile()
         } else {

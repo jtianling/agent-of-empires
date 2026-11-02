@@ -34,6 +34,14 @@
 
 系统 SHALL 提供 `pane create <session-id> --tool <tool> [--path <path>] [--xats-name <name> --xats-team <team>]`, 只在当前 owner 所有且已运行的 session 中创建.  SHALL 复用四 pane 上限, 默认右侧分屏, 返回新持久 ID.  xats 参数 SHALL 成对验证, 未支持的组合在副作用前拒绝.
 
+带 xats 的 Codex pane MAY 通过 `--model` 指定独立模型, 并在新建和恢复线程时使用该模型.  系统 SHALL 验证模型 ID 和 Codex 返回的实际模型, 不匹配时拒绝启动.
+
+指定模型时 MAY 同时通过 `--effort` 指定推理强度.  启动及恢复时 SHALL 显式传入并核对返回的强度, 被拒绝或回退时启动失败, 不以可能滞后的模型目录阻挡显式设置.
+
+#### Scenario: 双 pane 使用不同模型
+- **WHEN** 为同一 session 的两个 Codex pane 指定不同模型并恢复 session
+- **THEN** 每个 pane 保留自己的模型, 不修改共享 Codex 配置
+
 #### Scenario: 创建工作 pane
 - **WHEN** 在运行中的自有 session 创建一个 pane
 - **THEN** 新 pane 拥有独立 ID 和 owner, 原 pane 的进程、内容和身份保留
@@ -41,6 +49,15 @@
 #### Scenario: 父 session 停止或满额
 - **WHEN** 父 session 未运行或四 pane 容量已满
 - **THEN** 创建被拒绝, 不隐式启动 session 或占用 xats 身份
+
+### Requirement: 附加 pane 默认无人值守模式
+
+附加受管 pane SHALL 在创建时默认保存已有的 YOLO 模式,
+并在按持久身份恢复时保留该模式, 与主 pane 的默认无人值守规则一致.
+
+#### Scenario: 新建与恢复附加 pane
+- **WHEN** 管理者创建受管附加 pane 并按其持久身份恢复
+- **THEN** 该 pane 的 YOLO 配置保持启用, 相邻 pane 的模式保持原值
 
 ### Requirement: 定向输入与输出
 
@@ -78,7 +95,19 @@
 
 每个受管 pane SHALL 使用独立 xats name/team、identity key、claim、token 和运行配置.  SHALL 支持已有 Codex、Claude、OpenCode 自动绑定, 不注入 register/reconnect prompt.  人工/CLI 重启与恢复 SHALL 保留逻辑 pane 身份并推进实际启动的独立 fence, 不修改邻 pane 的身份.  helper SHALL 拒绝旧 pane 占用或旧 fence.  父 session 删除 SHALL 精确释放其可管理 pane 的全部资源.
 
-用户在实现期间明确暂缓 Claude, 本轮交付验收 SHALL 以 Codex、OpenCode 及通用 pane 操作为范围.  Claude 已有接入代码保留, 新增 pane 的冷恢复连续性 SHALL 标为暂缓, 不宣称已通过或已修复.
+Claude SHALL 支持同一受管 session 内的独立附加 pane、冷恢复及主 pane 接任.
+在没有 AoE TUI 运行时, 已确认属于准确 pane 的 Claude 对话 ID
+SHALL 在停止或换代前持久保存, 不依赖后台 reconcile 才能恢复.
+启用或关闭 xats SHALL 不改变已有对话的恢复规则.
+尚未创建可恢复对话的预分配 UUID SHALL 不作为 resume 的充分依据.
+
+#### Scenario: 无 TUI 的 Claude 冷恢复
+- **WHEN** Claude 主 pane 或附加 pane 已完成真实对话, 管理者在没有 AoE TUI 的环境停止并启动 session
+- **THEN** 保留各自原生对话 ID、持久 pane ID 和对话内容, 不因 slot 尚未收到后台快照而创建新对话
+
+#### Scenario: 无 xats 的 Claude 接任后恢复
+- **WHEN** 没有启用 xats 的 Claude 附加 pane 接任主 pane, 随后重启或冷恢复
+- **THEN** 使用原生 resume 恢复其原有对话, 不以旧 UUID 创建 fresh 会话
 
 #### Scenario: 同类双 agent 协作
 - **WHEN** 在同一 session 创建两个相同类型但不同 xats name 的 agent pane

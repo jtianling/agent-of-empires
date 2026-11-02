@@ -368,9 +368,14 @@ impl HomeView {
                         format!("  {} [{} repos]", ws_info.branch, ws_info.repos.len()),
                         Style::default().fg(theme.branch),
                     ));
-                } else if let Some(wt_info) = &inst.worktree_info {
+                } else if let Some(branch) = inst
+                    .worktree_info
+                    .as_ref()
+                    .map(|info| &info.branch)
+                    .or_else(|| self.detected_worktree_branches.get(id))
+                {
                     line_spans.push(Span::styled(
-                        format!("  {}", wt_info.branch),
+                        format!("  {}", branch),
                         Style::default().fg(theme.branch),
                     ));
                 }

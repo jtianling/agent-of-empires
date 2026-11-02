@@ -7,6 +7,9 @@ use serde::Serialize;
 use crate::db::reconcile::MAX_AGENT_PANES;
 use crate::session::{GroupTree, Storage};
 
+mod codex_recovery;
+use codex_recovery::CodexRecoveryArgs;
+
 #[derive(Subcommand)]
 pub enum SessionCommands {
     /// Human administration: take ownership, or transfer to a manager context
@@ -20,6 +23,8 @@ pub enum SessionCommands {
 
     /// Restart session
     Restart(SessionIdArgs),
+    /// Explicitly recover one disconnected Codex thread binding without restarting
+    RecoverCodex(CodexRecoveryArgs),
 
     /// Attach to session interactively
     Attach(SessionIdArgs),
@@ -177,6 +182,7 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Start(args) => start_session(profile, args).await,
         SessionCommands::Stop(args) => stop_session(profile, args).await,
         SessionCommands::Restart(args) => restart_session(profile, args).await,
+        SessionCommands::RecoverCodex(args) => codex_recovery::run(profile, args),
         SessionCommands::Attach(args) => attach_session(profile, args).await,
         SessionCommands::Show(args) => show_session(profile, args).await,
         SessionCommands::Capture(args) => capture_session(profile, args).await,
@@ -403,11 +409,16 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         })
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
 
-    instances[idx].restart_with_size(crate::terminal::get_size())?;
+    let restarted = instances[idx].restart_with_size(crate::terminal::get_size());
     let title = instances[idx].title.clone();
 
     let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.save_with_groups(&instances, &group_tree)?;
+    let saved = storage.save_with_groups(&instances, &group_tree);
+    match (restarted, saved) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+        (Err(restart), Err(save)) => bail!("{restart:#}; Saving session failed: {save:#}"),
+    }
 
     println!("✓ Restarted session: {}", title);
     Ok(())

@@ -18,13 +18,15 @@ mod codex_binding;
 pub(crate) mod codex_capture;
 pub mod codex_rollout;
 mod inventory;
+mod managed_claude;
 mod managed_pane;
 pub mod reconcile;
+mod recovery;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 /// Highest valid agent slot index. Slots are constrained to `0..=MAX_SLOT`
 /// (at most four panes tracked per session).
@@ -199,7 +201,7 @@ impl Store {
                     })
                 },
             )
-            .ok();
+            .optional()?;
         Ok(row)
     }
 

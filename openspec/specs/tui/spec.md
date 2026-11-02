@@ -76,7 +76,68 @@ Sessions are displayed in a list with:
 
 Sessions can be organized into collapsible groups (slash-delimited group paths).
 
+### Requirement: 已有 worktree 的分支后缀
+
+session 列表 SHALL 优先显示已保存的 workspace 或 worktree 分支元数据.  对没有此元数据的本机 session, TUI SHALL 在加载和刷新列表时只读识别工作目录根部的 Git linked worktree, 并显示其当前分支, 包括通过 CLI 创建的已有 session.  检测结果 SHALL 仅用于内存中的显示缓存, 不修改持久元数据、worktree 所有权或删除清理行为.  普通仓库、非 Git 目录和 detached HEAD SHALL 不产生此补充分支后缀.
+
+#### Scenario: CLI session 使用外部 worktree
+
+- **WHEN** CLI 创建的 session 指向已有 linked worktree 根目录, 且没有 worktree 元数据
+- **THEN** TUI 在 session 名称后显示该 worktree 的当前分支
+- **AND** session 保存及删除不会因显示后缀而写入 worktree 元数据或删除外部 worktree
+
+#### Scenario: 外部分支更新
+
+- **WHEN** 没有 worktree 元数据的 session 所指向的 linked worktree 切换分支
+- **THEN** TUI 下次刷新列表时更新分支后缀
+- **AND** 切换到 detached HEAD 时移除补充分支后缀
+
+### Requirement: 标题编辑不等待整轮后台扫描
+
+后台状态同步 SHALL 按单个 session 持有操作锁, 每次取得锁后重新读取当前元数据, 完成后释放.  锁被前台操作占用时, 后台 SHALL 跳过本轮并在后续刷新重试.  TUI 的 session 标题编辑 SHALL 不等待整个 profile 的扫描完成, 同时保留前台生命周期操作的互斥保护.
+
+#### Scenario: 多 session 背景扫描期间编辑标题
+
+- **WHEN** 后台正在同步多个活跃 session, 用户通过 `e` 修改其中一个标题
+- **THEN** 编辑只需等待当前单个 session 的临界区, 不等待整轮 profile 扫描
+- **AND** session ID、pane 进程和其他 session 的记录保持不变
+
+#### Scenario: 扫描中发生元数据变化
+
+- **WHEN** 一轮后台扫描期间有 session 被编辑、新增或删除
+- **THEN** 后续单个 session 同步使用新读取的元数据
+- **AND** 本轮跳过 orphan capture 清理, 避免清理未完整观察的 pane
+
+### Requirement: 界面恢复标记只读查询
+
+TUI 查询哪些 session 有恢复记录时 SHALL 使用只读、无锁等待的批量查询, 不执行 schema 修复、事件清理或 VACUUM.  数据库忙或暂不可读时 SHALL 保留上次的显示缓存并记录具体原因, 不阻塞标题编辑.  缺失数据库 SHALL 不因显示查询而创建.
+
+#### Scenario: SQLite 后台写入期间编辑
+
+- **WHEN** 后台持有 SQLite 写事务, 用户编辑 session 标题
+- **THEN** 恢复标记查询读取已提交数据, 不等待写事务结束
+- **AND** 编辑不因界面刷新执行数据库维护
+
 ## Polling
+
+### Requirement: 改名后的状态结果必须匹配采样标题
+
+状态轮询结果 SHALL 携带采样时的 session 标题.  TUI SHALL 只应用与当前标题及启动代次匹配的结果,
+不接受改名前的错误、健康状态或恢复 token.  外部元数据刷新发现标题变化时,
+SHALL 清除旧错误退避和旧活动采样缓存, 重新检查当前名称, 不因改名重启任何 pane.
+当前标题下采样到的真实故障 SHALL 正常显示, 不以忽略一次错误的方式掩盖.
+
+#### Scenario: managed CLI 改名期间旧采样延迟返回
+- **WHEN** CLI 完成改名且 TUI 已加载新标题, 旧标题的轮询结果随后返回
+- **THEN** TUI 丢弃旧结果及其恢复 token, 原 pane 和进程保持不变
+
+#### Scenario: 外部改名清除旧错误退避
+- **WHEN** TUI 保留的旧错误状态对应改名前的标题
+- **THEN** 标题变化后清除旧错误和检查时间, 不等待旧名称的错误轮询退避
+
+#### Scenario: 改名后真实进程故障
+- **WHEN** 当前标题对应的 session 确实不存在或 agent 已退出
+- **THEN** 当前采样正常报告错误, 不丢弃新标题下的首次错误
 
 Background tasks keep the TUI live:
 - `StatusPoller`: updates session statuses from tmux pane content
@@ -209,6 +270,16 @@ The TUI home screen SHALL support the `R` (Shift+R) keybinding as the state-awar
 - **THEN** the system SHALL invoke cold recovery for that instance
 - **AND** it SHALL rebuild the session and resume its persisted panes
 
+#### Scenario: 恢复 CLI 创建的 managed Codex session
+- **WHEN** 用户对 CLI 创建且已停止的 managed xats Codex session 按 `r` 或 `R`
+- **THEN** 系统 SHALL 保留主 pane 和附加 pane 各自的对话 ID、历史及 xats 身份
+- **AND** 占位 pane 创建 SHALL 不启动或绑定 agent runtime, 实际恢复时再换代并绑定
+- **AND** 创建新 pane 前 SHALL 校验并解除附加 pane 的旧物理绑定, 避免编号复用误判
+- **AND** 旧附加 pane 若仍位于其他 session, SHALL 在创建新 runtime 前拒绝恢复
+- **AND** 外来位置检查 SHALL 先于 pending 槽位换代, 拒绝时不改变持久元数据
+- **AND** 占位创建或持久化失败后的重试 SHALL 保留原布局的 pane 映射
+- **AND** `r` SHALL 停留在列表, `R` SHALL 在恢复后进入 session
+
 #### Scenario: R on missing non-recoverable session
 - **WHEN** the user presses `R` on a selected instance whose tmux session does not exist
 - **AND** the instance has no durable slots
@@ -240,6 +311,11 @@ The TUI home screen SHALL support the `C` (Shift+C) keybinding as the state-awar
 - **WHEN** the user presses `C` on a selected instance with durable slots whose tmux session does not exist
 - **THEN** the system SHALL invoke cold recovery for that instance in fresh mode
 - **AND** it SHALL rebuild the session and launch its persisted panes without any resume flag or token
+
+#### Scenario: 全新启动 CLI 创建的 managed Codex session
+- **WHEN** 用户对 CLI 创建且已停止的 managed xats Codex session 按 `c` 或 `C`
+- **THEN** 系统 SHALL 为每个 agent pane 创建新对话, 保留 xats 身份及 pane 配置
+- **AND** `c` SHALL 停留在列表, `C` SHALL 在启动后进入 session
 
 #### Scenario: C on missing non-recoverable session
 - **WHEN** the user presses `C` on a selected instance whose tmux session does not exist

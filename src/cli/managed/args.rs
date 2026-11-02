@@ -31,7 +31,7 @@ pub enum ManagedCommand {
     /// Stop an owned session
     Stop(TargetArgs),
     /// Restart an owned session
-    Restart(TargetArgs),
+    Restart(RestartArgs),
     /// Rename an owned session
     Rename(RenameArgs),
     /// Send literal input to an owned session
@@ -49,12 +49,28 @@ pub struct TargetArgs {
 }
 
 #[derive(Args)]
+pub struct RestartArgs {
+    pub id: String,
+    #[arg(
+        long,
+        help = "Enable YOLO for this owned session and its panes, then restart all panes"
+    )]
+    pub yolo: bool,
+}
+
+#[derive(Args)]
 pub struct CreateArgs {
     /// Existing project directory
     pub path: PathBuf,
     /// Agent tool from the AoE registry
     #[arg(long)]
     pub tool: String,
+    /// Codex model for this managed xats pane
+    #[arg(long, requires = "xats_name")]
+    pub model: Option<String>,
+    /// Reasoning effort for the specified Codex model
+    #[arg(long, requires = "model")]
+    pub effort: Option<String>,
     #[arg(long)]
     pub title: String,
     #[arg(long, default_value = "")]

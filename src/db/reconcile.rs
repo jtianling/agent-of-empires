@@ -15,6 +15,8 @@ use anyhow::{Context, Result};
 use crate::db::{Store, MAX_SLOT};
 use crate::session::Instance;
 
+mod driver;
+
 /// One pane of a managed session, after slot assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignedPane {
@@ -293,73 +295,9 @@ fn try_list_session_panes(session_name: &str) -> Result<Vec<(u32, String)>> {
 ///
 /// Best-effort: store/tmux failures for one session do not abort the others.
 pub fn reconcile_all(profile: &str, _instances: &[Instance]) {
-    let storage = match crate::session::Storage::new(profile) {
-        Ok(storage) => storage,
-        Err(error) => {
-            tracing::warn!("reconcile: cannot open session storage: {error:#}");
-            return;
-        }
-    };
-    let _operation = match storage.operation_lock() {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::warn!("reconcile: cannot lock session operations: {error:#}");
-            return;
-        }
-    };
-    let instances = match storage.load() {
-        Ok(instances) => instances,
-        Err(error) => {
-            tracing::warn!("reconcile: cannot refresh session records: {error:#}");
-            return;
-        }
-    };
-    let store = match Store::open_with_schema(profile) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!("reconcile: cannot open store: {}", e);
-            return;
-        }
-    };
-
-    // Stamped before the first pane list is read, and handed to orphan
-    // collection at the end. Everything between the two is slow -- a rollout
-    // claim per pane shells out, and it runs for every instance -- so a pane
-    // created in that span is absent from a list read before it existed. Its
-    // capture would then be collected as an orphan while the pane is alive, and
-    // for an agent whose captures come from hooks nothing writes it again until
-    // the next hook event fires.
-    let listed_at = crate::db::now_unix();
-    let mut live_panes: HashSet<String> = HashSet::new();
-
-    for inst in &instances {
-        let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
-        let panes = list_session_panes(&session_name);
-        if panes.is_empty() {
-            continue;
-        }
-        for (_, id) in &panes {
-            live_panes.insert(id.clone());
-        }
-        if inst.managed_primary_replacement.is_some()
-            || inst
-                .managed_panes
-                .iter()
-                .any(|pane| pane.pending_slot_transition.is_some())
-        {
-            continue;
-        }
-        let primary = crate::tmux::get_agent_pane_id(&session_name);
-        if let Err(error) = capture_codex_bindings(&store, inst, &panes, primary.as_deref()) {
-            tracing::debug!("Codex bindings for {} unavailable: {error:#}", inst.id);
-        }
-        if let Err(e) = reconcile_session(&store, inst, &panes, primary.as_deref()) {
-            tracing::debug!("reconcile: session {} failed: {}", inst.id, e);
-        }
-        capture_coherent_layout(&store, &inst.id, &session_name, &panes);
+    if let Err(error) = driver::run(profile) {
+        tracing::warn!("reconcile failed: {error:#}");
     }
-
-    gc_orphan_pane_live(&store, &live_panes, listed_at);
 }
 
 fn capture_codex_bindings(

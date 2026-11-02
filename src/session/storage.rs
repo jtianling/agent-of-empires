@@ -112,6 +112,14 @@ impl Storage {
         super::operation_lock::acquire(&self.sessions_path.with_file_name("managed-operation.lock"))
     }
 
+    pub(crate) fn try_operation_lock(
+        &self,
+    ) -> Result<Option<super::operation_lock::OperationGuard>> {
+        super::operation_lock::try_acquire(
+            &self.sessions_path.with_file_name("managed-operation.lock"),
+        )
+    }
+
     fn read_instances(&self) -> Result<Vec<Instance>> {
         let mut instances: Vec<Instance> = self.read_json(&self.sessions_path)?;
         for instance in &mut instances {

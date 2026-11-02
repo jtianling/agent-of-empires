@@ -55,6 +55,7 @@ def main():
             ("pane", "capture", sid, pane_id),
             ("pane", "remove", sid, pane_id),
             ("stop", sid), ("restart", sid), ("remove", sid),
+            ("restart", sid, "--yolo"),
         ]:
             call(*command, success=False)
             assert data_path.read_bytes() == before

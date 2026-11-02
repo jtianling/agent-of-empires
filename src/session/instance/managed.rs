@@ -4,6 +4,19 @@ use super::{Instance, RestartMode, SessionLaunch, Status, PANE_EXIT_ATTEMPTS, PA
 use crate::session::{Group, GroupTree, Storage};
 
 impl Instance {
+    pub(super) fn managed_primary_launch_mode(
+        &self,
+        requested: Option<RestartMode>,
+    ) -> Result<RestartMode> {
+        self.capture_managed_claude_sessions()?;
+        let native = crate::db::Store::open_with_schema(&self.managed_profile())?
+            .read_slots_for_instance(&self.id)?
+            .into_iter()
+            .find(|slot| slot.slot == 0 && slot.agent == self.tool)
+            .map(|slot| slot.native_session_id);
+        Ok(launch_mode(self, requested, native.as_deref()))
+    }
+
     pub(super) fn managed_lifecycle(
         &mut self,
         restart: Option<RestartMode>,
@@ -36,6 +49,9 @@ impl Instance {
         if restart.is_none() && running {
             return Ok(());
         }
+        crate::managed_codex::verify_stop_scope(self)?;
+        crate::managed_codex::preflight_all(self)?;
+        let previous_launch = crate::managed_codex::launch_marker(self.managed_xats.as_ref());
         let outcome = self.managed_transition(
             &storage,
             &mut instances,
@@ -49,8 +65,24 @@ impl Instance {
             self.status = Status::Error;
             self.last_error = Some(format!("{error:#}"));
         }
-        persist(&storage, &mut instances, &groups, self)?;
-        outcome?;
+        let persisted = persist(&storage, &mut instances, &groups, self);
+        let error = [outcome.err(), persisted.err()]
+            .into_iter()
+            .flatten()
+            .reduce(|first, second| anyhow::anyhow!("{first:#}; {second:#}"));
+        if let Some(error) = error {
+            let cleanup = if crate::managed_codex::launch_marker(self.managed_xats.as_ref())
+                != previous_launch
+            {
+                crate::managed_codex::stop_current_launch(self)
+            } else {
+                Ok(())
+            };
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(anyhow::anyhow!("{error:#}; {cleanup:#}")),
+            };
+        }
         if !running {
             self.restore_managed_extras(restart.unwrap_or(RestartMode::Resume))?;
         }
@@ -68,12 +100,7 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
     ) -> Result<()> {
-        let native = crate::db::Store::open_with_schema(storage.profile())?
-            .read_slots_for_instance(&self.id)?
-            .into_iter()
-            .find(|slot| slot.slot == 0 && slot.agent == self.tool)
-            .map(|slot| slot.native_session_id);
-        let mode = launch_mode(self, restart, native.as_deref());
+        let mode = self.managed_primary_launch_mode(restart)?;
         crate::managed_xats::stage_restart(self)?;
         persist(storage, instances, groups, self)?;
         crate::managed_xats::prepare(self)?;
@@ -103,7 +130,8 @@ impl Instance {
     fn stop_managed_primary(&self) -> Result<()> {
         let session = crate::tmux::Session::generate_name(&self.id, &self.title);
         let pane = crate::tmux::managed::primary_pane(&session)?;
-        self.stop_managed_pane(&pane)
+        self.stop_managed_pane(&pane)?;
+        crate::managed_codex::stop(self)
     }
 
     pub(super) fn stop_managed_pane(&self, pane: &str) -> Result<()> {

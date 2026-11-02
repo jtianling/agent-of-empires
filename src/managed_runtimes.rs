@@ -120,7 +120,7 @@ fn wrap_launch(instance: &Instance, original: &str, tool: &str) -> Result<String
         ),
     };
     Ok(format!(
-        "{} -p {} __managed-launch --instance-id {}{pane_args} --tool {} --launch-id {} -- \
+        "env -u {MANAGER_CONTEXT_ENV} {} -p {} __managed-launch --instance-id {}{pane_args} --tool {} --launch-id {} -- \
          env {original}",
         shell_escape(executable),
         shell_escape(&profile),
@@ -156,9 +156,25 @@ pub fn run_launch(profile: &str, args: ManagedLaunchArgs) -> Result<()> {
     child
         .args(arguments)
         .env_remove(crate::xats_control::IDENTITY_KEY_ENV)
+        .env_remove(MANAGER_CONTEXT_ENV)
         .env_remove(MCP_TOKEN_ENV);
     if args.tool == "claude" {
         child.env(MCP_TOKEN_ENV, crate::managed_xats::mcp_token(instance)?);
+    }
+    if args.tool == "codex" {
+        let result = child
+            .status()
+            .context("Launching managed Codex TUI")
+            .and_then(|status| {
+                ensure!(status.success(), "Managed Codex TUI exited with {status}");
+                Ok(())
+            });
+        let cleanup = crate::managed_codex::stop_current_launch(instance);
+        return match (result, cleanup) {
+            (Err(error), Err(cleanup)) => Err(anyhow::anyhow!("{error:#}; {cleanup:#}")),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        };
     }
     #[cfg(unix)]
     {
@@ -223,11 +239,7 @@ fn channel_name(instance: &Instance) -> Result<String> {
 }
 
 fn profile(instance: &Instance) -> String {
-    if instance.source_profile.is_empty() {
-        crate::session::resolve_profile(None)
-    } else {
-        instance.source_profile.clone()
-    }
+    instance.managed_profile()
 }
 
 fn config_path(instance: &Instance) -> Result<PathBuf> {

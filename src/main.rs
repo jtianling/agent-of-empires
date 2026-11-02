@@ -131,6 +131,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Commands::CodexProvider(args)) => return cli::codex_provider::run(args),
+        Some(Commands::CodexName(args)) => return cli::codex_name::run(args).await,
         Some(Commands::OpenCodeRuntime(args)) => {
             let profile = session::resolve_profile(cli.profile);
             std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);

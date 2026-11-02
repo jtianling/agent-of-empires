@@ -204,6 +204,7 @@ fn remove_primary(
     let child = candidate(storage, &instances[index], owner, &live)?;
     let replacement = instances[index].managed_panes[child].id.clone();
     if instances[index].managed_primary_replacement.is_none() {
+        instances[index].capture_managed_claude_sessions()?;
         super::primary_target(storage, instances, groups, index)?;
     }
     instances[index].managed_primary_replacement = Some(crate::session::ManagedPaneReplacement {

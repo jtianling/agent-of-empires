@@ -6,6 +6,41 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+pub(crate) fn parent_id() -> u32 {
+    nix::unistd::getppid().as_raw() as u32
+}
+
+pub(crate) async fn output_with_timeout(
+    command: std::process::Command,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    use anyhow::Context;
+
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut command = tokio::process::Command::from(command);
+    command.kill_on_drop(true);
+    tokio::time::timeout(timeout, command.output())
+        .await
+        .with_context(|| format!("Timed out running {program}"))?
+        .with_context(|| format!("Running {program}"))
+}
+
+pub(crate) fn arguments(pid: u32) -> anyhow::Result<Vec<String>> {
+    anyhow::ensure!(pid > 0 && pid <= i32::MAX as u32, "Invalid process ID");
+    #[cfg(target_os = "linux")]
+    {
+        linux::arguments(pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::arguments(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        anyhow::bail!("Process arguments are unsupported on this platform")
+    }
+}
+
 pub(crate) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
     anyhow::ensure!(pid > 0 && pid <= i32::MAX as u32, "Invalid process ID");
     #[cfg(target_os = "linux")]
@@ -19,6 +54,65 @@ pub(crate) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         anyhow::bail!("Process start identity is unsupported on this platform")
+    }
+}
+
+pub(crate) fn isolate_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+pub(crate) fn group_members(group: u32) -> anyhow::Result<Vec<(u32, String)>> {
+    use anyhow::{ensure, Context};
+    ensure!(group > 1, "Invalid owned process group");
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,pgid="])
+        .output()
+        .context("Inspecting owned process group")?;
+    ensure!(
+        output.status.success(),
+        "Inspecting process group failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut members = Vec::new();
+    for line in String::from_utf8(output.stdout)?.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        ensure!(fields.len() == 2, "Invalid process group response");
+        let pid = fields[0].parse::<u32>()?;
+        if fields[1].parse::<u32>()? == group {
+            if let Some(identity) = start_identity(pid)? {
+                members.push((pid, identity));
+            }
+        }
+    }
+    Ok(members)
+}
+
+pub(crate) fn signal_verified_group(
+    group: u32,
+    witnesses: &[(u32, String)],
+    force: bool,
+) -> anyhow::Result<()> {
+    use anyhow::{ensure, Context};
+    use nix::errno::Errno;
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+    let current = group_members(group)?;
+    if current.is_empty() {
+        return Ok(());
+    }
+    ensure!(
+        current.iter().any(|member| witnesses.contains(member)),
+        "Owned process group has no matching start identity"
+    );
+    let signal = if force {
+        Signal::SIGKILL
+    } else {
+        Signal::SIGTERM
+    };
+    match killpg(Pid::from_raw(i32::try_from(group)?), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error).context("Signalling verified owned process group"),
     }
 }
 

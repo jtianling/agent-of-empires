@@ -8,6 +8,16 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use tracing::debug;
 
+pub(super) fn arguments(pid: u32) -> anyhow::Result<Vec<String>> {
+    use anyhow::{ensure, Context};
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).context("Reading process arguments")?;
+    ensure!(bytes.last() == Some(&0), "Invalid process arguments");
+    bytes[..bytes.len() - 1]
+        .split(|byte| *byte == 0)
+        .map(|arg| String::from_utf8(arg.to_vec()).context("Invalid process argument encoding"))
+        .collect()
+}
+
 /// Kill a process and all its descendants
 /// Uses SIGTERM first, then SIGKILL after a short delay for stragglers
 pub fn kill_process_tree(pid: u32) {
@@ -164,6 +174,9 @@ pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
         Err(error) => return Err(error).context("Reading process start identity"),
     };
     let fields = stat.rsplit_once(')').context("Invalid process stat")?.1;
+    if fields.split_whitespace().next() == Some("Z") {
+        return Ok(None);
+    }
     let ticks = fields
         .split_whitespace()
         .nth(19)

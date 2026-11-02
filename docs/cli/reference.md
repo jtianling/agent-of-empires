@@ -35,6 +35,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session start`↴](#aoe-session-start)
 * [`aoe session stop`↴](#aoe-session-stop)
 * [`aoe session restart`↴](#aoe-session-restart)
+* [`aoe session recover-codex`↴](#aoe-session-recover-codex)
 * [`aoe session attach`↴](#aoe-session-attach)
 * [`aoe session show`↴](#aoe-session-show)
 * [`aoe session rename`↴](#aoe-session-rename)
@@ -167,6 +168,8 @@ Create an owned agent pane in a running owned session
 ###### **Options:**
 
 * `--tool <TOOL>`
+* `--model <MODEL>` — Codex model for this managed xats pane
+* `--effort <EFFORT>` — Reasoning effort for the specified Codex model
 * `--path <PATH>`
 * `--xats-name <XATS_NAME>`
 * `--xats-team <XATS_TEAM>`
@@ -240,6 +243,8 @@ Create an owned session, optionally launch it
 ###### **Options:**
 
 * `--tool <TOOL>` — Agent tool from the AoE registry
+* `--model <MODEL>` — Codex model for this managed xats pane
+* `--effort <EFFORT>` — Reasoning effort for the specified Codex model
 * `--title <TITLE>`
 * `--group <GROUP>`
 
@@ -298,11 +303,15 @@ Stop an owned session
 
 Restart an owned session
 
-**Usage:** `aoe managed restart <ID>`
+**Usage:** `aoe managed restart [OPTIONS] <ID>`
 
 ###### **Arguments:**
 
-* `<ID>` — Complete session ID (no titles or prefixes)
+* `<ID>`
+
+###### **Options:**
+
+* `--yolo` — Enable YOLO for this owned session and its panes, then restart all panes
 
 
 
@@ -494,6 +503,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `start` — Start a session's tmux process
 * `stop` — Stop session process
 * `restart` — Restart session
+* `recover-codex` — Explicitly recover one disconnected Codex thread binding without restarting
 * `attach` — Attach to session interactively
 * `show` — Show session details
 * `rename` — Rename a session
@@ -553,6 +563,23 @@ Restart session
 ###### **Arguments:**
 
 * `<IDENTIFIER>` — Session ID or title
+
+
+
+## `aoe session recover-codex`
+
+Explicitly recover one disconnected Codex thread binding without restarting
+
+**Usage:** `aoe session recover-codex --slot <SLOT> --thread <THREAD> <IDENTIFIER>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Complete session ID
+
+###### **Options:**
+
+* `--slot <SLOT>`
+* `--thread <THREAD>` — Complete original Codex thread UUID, selected explicitly
 
 
 

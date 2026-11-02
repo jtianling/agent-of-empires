@@ -47,6 +47,9 @@ pub(super) fn create(
     instances[index].managed_panes.push(pane);
     super::save(storage, instances, groups)?;
     let result = (|| {
+        crate::git::GitWorktree::sync_existing_worktree_agent_config(std::path::Path::new(
+            &instances[index].managed_panes[child].config.working_dir,
+        ));
         start(storage, instances, groups, index, child, &name, &live)?;
         let pane = &instances[index].managed_panes[child];
         Ok(json!({"session_id":instances[index].id,"pane_id":pane.id,
@@ -54,6 +57,12 @@ pub(super) fn create(
             "xats":crate::managed_xats::status(&pane.project(&instances[index])?)?}))
     })();
     result.map_err(|error| {
+        let runtime = instances[index].managed_panes[child].project(&instances[index]);
+        let cleanup = runtime.and_then(|runtime| crate::managed_codex::stop(&runtime));
+        let error = match cleanup {
+            Ok(()) => error,
+            Err(cleanup) => anyhow::anyhow!("{error:#}; {cleanup:#}"),
+        };
         super::super::coded_pane(error, "pane_create_incomplete", &instances[index].id, &id)
     })
 }
@@ -71,12 +80,16 @@ fn config(parent: &Instance, args: &CreateArgs) -> Result<PaneConfig> {
         .context("Resolving pane working directory")?;
     ensure!(directory.is_dir(), "Pane working directory must exist");
     let path = directory.to_str().context("Pane path must be UTF-8")?;
-    let config = PaneConfig::new(&args.tool, path, false, args.xats_name.is_some());
+    let config = PaneConfig::new(&args.tool, path, true, args.xats_name.is_some());
     config.validate()?;
     Ok(config)
 }
 
 fn xats(args: &CreateArgs) -> Result<Option<crate::managed_xats::ManagedXats>> {
+    ensure!(
+        args.model.is_none() || args.tool == "codex",
+        "Model is only supported for Codex"
+    );
     match (&args.xats_name, &args.xats_team) {
         (None, None) => Ok(None),
         (Some(name), Some(team)) => {
@@ -84,10 +97,11 @@ fn xats(args: &CreateArgs) -> Result<Option<crate::managed_xats::ManagedXats>> {
                 matches!(args.tool.as_str(), "codex" | "claude" | "opencode"),
                 "Managed xats pane launch is unsupported for this tool"
             );
-            Ok(Some(crate::managed_xats::ManagedXats::new(
-                name.clone(),
-                team.clone(),
-            )?))
+            let mut identity = crate::managed_xats::ManagedXats::new(name.clone(), team.clone())?;
+            identity.model = args.model.clone();
+            identity.effort = args.effort.clone();
+            identity.validate()?;
+            Ok(Some(identity))
         }
         _ => anyhow::bail!("Specify both xats name and team"),
     }

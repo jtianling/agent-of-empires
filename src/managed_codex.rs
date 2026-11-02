@@ -14,6 +14,10 @@ use crate::session::Instance;
 
 const HEADER: &str = "X-Xats-Managed-Token";
 
+mod legacy;
+mod scope;
+mod server;
+
 #[cfg(test)]
 mod provider_tests;
 
@@ -26,6 +30,8 @@ struct ClientConfig {
     profile_path: PathBuf,
     #[serde(default)]
     fresh: bool,
+    #[serde(default)]
+    owned: bool,
 }
 
 pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
@@ -34,25 +40,51 @@ pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
     }
     let token = crate::managed_xats::mcp_token(instance)?.to_string();
     let previous = client_config(instance)?;
-    let endpoint = url::Url::parse(&crate::session::managed_codex_endpoint()?)?.to_string();
-    validate_endpoint(&endpoint)?;
     if let Some(previous) = &previous {
-        ensure!(
-            url::Url::parse(&previous.ws_url)? == url::Url::parse(&endpoint)?,
-            "Managed Codex app-server changed"
-        );
+        legacy::retire(previous)?;
     }
+    let yolo = instance.primary_pane.yolo_mode;
+    let configuration =
+        crate::codex_permissions::current_local_config(&instance.project_path, yolo)?;
+    let provider = current_provider(configuration.clone())?;
     let mcp_url = crate::xats_control::discover_control_plane()?
         .base_url
         .join("/mcp")?;
     let cwd = instance.project_path.clone();
-    let title = instance.title.clone();
-    let previous_thread = previous.as_ref().map(|config| config.thread_id.clone());
+    let identity = instance
+        .managed_xats
+        .as_ref()
+        .context("Missing managed identity")?;
+    let title = crate::codex_name::session_name(&identity.name, &identity.team)?;
+    let model = identity.model.clone();
+    let effort = identity.effort.clone();
+    let previous_thread = previous
+        .as_ref()
+        .map(|config| config.thread_id.clone())
+        .filter(|id| !id.is_empty());
     let fresh = previous.as_ref().is_some_and(|config| config.fresh);
-    let mut config = profile_config(instance, &endpoint, previous.as_ref())?;
+    let (server_name, headers) = mcp_headers(&configuration, &mcp_url, &token)?;
+    let seed = PreparedThread {
+        thread_id: String::new(),
+        provider,
+        server_name,
+        headers,
+        yolo,
+        model: model.clone(),
+        effort: effort.clone(),
+        error: None,
+    };
+    server::stop(instance, false)?;
+    let mut config = profile_config(instance, previous.as_ref())?;
+    remember_config(instance, &config)?;
+    write_profile(&config, &seed, &instance.project_path)?;
+    let endpoint = server::start(instance, &seed, &mcp_url)?;
+    config.ws_url = endpoint.clone();
+    config.owned = true;
+    remember_config(instance, &config)?;
     let rpc_endpoint = endpoint.clone();
     let rpc_token = token.clone();
-    let mut prepared = crate::xats_control::block_on_control("managed-codex", move || {
+    let result = crate::xats_control::block_on_control("managed-codex", move || {
         Box::pin(async move {
             tokio::time::timeout(
                 Duration::from_secs(20),
@@ -64,27 +96,111 @@ pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
                     &rpc_token,
                     previous_thread.as_deref(),
                     fresh,
+                    yolo,
+                    model.as_deref(),
+                    effort.as_deref(),
                 ),
             )
             .await
             .context("Timed out preparing managed Codex thread")?
         })
     })
-    .map_err(|error| anyhow::anyhow!(format!("{error:#}").replace(&token, "[redacted]")))?;
+    .map_err(|error| anyhow::anyhow!(format!("{error:#}").replace(&token, "[redacted]")));
+    let mut prepared = match result {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(with_cleanup(instance, error)),
+    };
     config.thread_id = prepared.thread_id.clone();
+    config.fresh = false;
     let runtime = json!({"agent_type": "codex", "thread_id": config.thread_id,
         "ws_url": config.ws_url});
     instance.agent_session_id = Some(config.thread_id.clone());
+    remember_config(instance, &config)?;
+    if let Some(error) = prepared.error.take() {
+        return Err(with_cleanup(
+            instance,
+            anyhow::anyhow!(format!("{error:#}").replace(&token, "[redacted]")),
+        ));
+    }
+    write_profile(&config, &prepared, &instance.project_path)
+        .map_err(|error| with_cleanup(instance, error))?;
+    crate::managed_xats::bind(instance, runtime).map_err(|error| with_cleanup(instance, error))
+}
+
+fn remember_config(instance: &mut Instance, config: &ClientConfig) -> Result<()> {
     instance
         .managed_xats
         .as_mut()
         .context("Missing managed identity")?
-        .client_config = Some(serde_json::to_value(&config)?);
-    if let Some(error) = prepared.error.take() {
-        bail!(format!("{error:#}").replace(&token, "[redacted]"));
+        .client_config = Some(serde_json::to_value(config)?);
+    Ok(())
+}
+
+fn with_cleanup(instance: &Instance, error: anyhow::Error) -> anyhow::Error {
+    match stop(instance) {
+        Ok(()) => error,
+        Err(cleanup) => anyhow::anyhow!("{error:#}; owned server cleanup failed: {cleanup:#}"),
     }
-    write_profile(&config, &prepared)?;
-    crate::managed_xats::bind(instance, runtime)
+}
+
+pub(crate) fn stop(instance: &Instance) -> Result<()> {
+    if instance.tool == "codex" && instance.managed_xats.is_some() {
+        server::stop(instance, false)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_stop_scope(instance: &Instance) -> Result<()> {
+    scope::verify(instance)
+}
+
+pub(crate) fn preflight(instance: &Instance) -> Result<()> {
+    if instance.tool == "codex" && instance.managed_xats.is_some() {
+        if let Some(previous) = client_config(instance)? {
+            legacy::preflight(&previous)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn preflight_all(instance: &Instance) -> Result<()> {
+    preflight(instance)?;
+    for pane in &instance.managed_panes {
+        preflight(&pane.project(instance)?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn stop_current_launch(instance: &Instance) -> Result<()> {
+    if instance.tool == "codex" && instance.managed_xats.is_some() {
+        server::stop(instance, true)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn launch_marker(identity: Option<&crate::managed_xats::ManagedXats>) -> Option<String> {
+    identity
+        .and_then(|identity| identity.claim.as_ref())
+        .map(|claim| claim.fence.instance_id.clone())
+}
+
+pub(crate) fn stop_all(instance: &Instance) -> Result<()> {
+    let errors = std::iter::once(stop(instance))
+        .chain(
+            instance
+                .managed_panes
+                .iter()
+                .map(|pane| pane.project(instance).and_then(|runtime| stop(&runtime))),
+        )
+        .filter_map(Result::err)
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>();
+    ensure!(
+        errors.is_empty(),
+        "Owned Codex shutdown failed: {}",
+        errors.join("; ")
+    );
+    Ok(())
 }
 
 struct PreparedThread {
@@ -92,9 +208,13 @@ struct PreparedThread {
     provider: String,
     server_name: String,
     headers: Value,
+    yolo: bool,
+    model: Option<String>,
+    effort: Option<String>,
     error: Option<anyhow::Error>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_thread(
     endpoint: &str,
     mcp_url: &url::Url,
@@ -103,6 +223,9 @@ async fn prepare_thread(
     token: &str,
     previous: Option<&str>,
     fresh: bool,
+    yolo: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<PreparedThread> {
     let (mut socket, _) = connect_async(endpoint)
         .await
@@ -133,13 +256,17 @@ async fn prepare_thread(
     let (server_name, headers) = mcp_headers(&configuration, mcp_url, token)?;
     let override_key = format!("mcp_servers.{server_name}.http_headers");
     let url_key = format!("mcp_servers.{server_name}.url");
-    let config = json!({(override_key): headers, (url_key): mcp_url.as_str()});
+    let mut config = json!({(override_key): headers, (url_key): mcp_url.as_str()});
+    if let Some(effort) = effort {
+        ensure!(model.is_some(), "Reasoning effort requires a model");
+        config["model_reasoning_effort"] = json!(effort);
+    }
     if let Some(id) = previous {
         uuid::Uuid::parse_str(id).context("Invalid stored managed Codex thread")?;
         unsubscribe_previous(&mut socket, id).await?;
     }
     let resumed_thread = previous.filter(|_| !fresh);
-    let (method, params) = match resumed_thread {
+    let (method, mut params) = match resumed_thread {
         Some(id) => (
             "thread/resume",
             json!({"threadId": id, "cwd": cwd, "modelProvider": provider,
@@ -150,6 +277,13 @@ async fn prepare_thread(
             json!({"cwd": cwd, "config": config, "modelProvider": provider}),
         ),
     };
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
+    if yolo {
+        params["approvalPolicy"] = json!("never");
+        params["sandbox"] = json!("danger-full-access");
+    }
     let response = if method == "thread/resume" {
         crate::codex_permissions::resume_current_provider(
             &mut socket,
@@ -172,7 +306,23 @@ async fn prepare_thread(
         resumed_thread.map_or(true, |id| id == thread_id),
         "Codex resumed a different thread"
     );
-    let validated = validate_resume(response, &thread_id, &provider, false);
+    let model_valid = model.map_or(true, |requested| {
+        response.get("model").and_then(Value::as_str) == Some(requested)
+    });
+    let effort_valid = effort.map_or(true, |requested| {
+        response.get("reasoningEffort").and_then(Value::as_str) == Some(requested)
+    });
+    let validated = validate_resume(response, &thread_id, &provider, yolo).and_then(|()| {
+        ensure!(
+            model_valid,
+            "Codex returned a different model than requested"
+        );
+        ensure!(
+            effort_valid,
+            "Codex returned a different reasoning effort than requested"
+        );
+        Ok(())
+    });
     let persisted = if validated.is_ok() {
         request(
             &mut socket,
@@ -198,6 +348,9 @@ async fn prepare_thread(
         provider,
         server_name,
         headers,
+        yolo,
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
         error,
     })
 }
@@ -267,11 +420,7 @@ fn mcp_headers(config: &Value, url: &url::Url, token: &str) -> Result<(String, V
     Ok((name.clone(), headers))
 }
 
-fn profile_config(
-    instance: &Instance,
-    endpoint: &str,
-    previous: Option<&ClientConfig>,
-) -> Result<ClientConfig> {
+fn profile_config(instance: &Instance, previous: Option<&ClientConfig>) -> Result<ClientConfig> {
     ensure!(
         instance.primary_pane_id().len() == 16
             && instance
@@ -298,18 +447,37 @@ fn profile_config(
     }
     fs::create_dir_all(&home)?;
     Ok(ClientConfig {
-        thread_id: String::new(),
-        ws_url: endpoint.into(),
+        thread_id: previous
+            .map(|config| config.thread_id.clone())
+            .unwrap_or_default(),
+        ws_url: previous
+            .map(|config| config.ws_url.clone())
+            .unwrap_or_default(),
         profile_name,
         profile_path,
-        fresh: false,
+        fresh: previous.is_some_and(|config| config.fresh),
+        owned: true,
     })
 }
 
-fn write_profile(config: &ClientConfig, prepared: &PreparedThread) -> Result<()> {
-    let value = json!({"model_provider": prepared.provider, "mcp_servers": {(prepared.server_name.clone()): {
-        "http_headers": prepared.headers
-    }}});
+fn write_profile(config: &ClientConfig, prepared: &PreparedThread, cwd: &str) -> Result<()> {
+    let mut value = json!({
+        "model_provider": prepared.provider,
+        "mcp_servers": {(prepared.server_name.clone()): {
+            "http_headers": prepared.headers
+        }}
+    });
+    if let Some(model) = &prepared.model {
+        value["model"] = json!(model);
+    }
+    if let Some(effort) = &prepared.effort {
+        value["model_reasoning_effort"] = json!(effort);
+    }
+    if prepared.yolo {
+        value["projects"] = json!({(cwd): {"trust_level": "trusted"}});
+        value["approval_policy"] = json!("never");
+        value["sandbox_mode"] = json!("danger-full-access");
+    }
     let body = toml::to_string(&value).context("Serializing managed Codex profile")?;
     write_private(&config.profile_path, body.as_bytes())
 }
@@ -361,19 +529,17 @@ pub(crate) fn command(instance: &Instance, base: &str, cwd: &str) -> Result<Stri
         "Managed Codex binding does not match its profile"
     );
     validate_endpoint(&config.ws_url)?;
+    if config.owned {
+        server::verify(instance, &config.ws_url)?;
+    }
     uuid::Uuid::parse_str(&config.thread_id).context("Invalid managed Codex thread")?;
     let expected_profile = format!("aoe-managed-{}", instance.primary_pane_id());
     ensure!(
         config.profile_name == expected_profile,
         "Invalid managed Codex profile"
     );
-    let permission = if instance.primary_pane.yolo_mode {
-        " --dangerously-bypass-approvals-and-sandbox"
-    } else {
-        ""
-    };
     let command = format!(
-        "{base} --remote {} -C {} -p {}{permission} resume {}",
+        "{base} --remote {} -C {} -p {} resume {}",
         shell_escape(&config.ws_url),
         shell_escape(cwd),
         shell_escape(&config.profile_name),
@@ -383,6 +549,7 @@ pub(crate) fn command(instance: &Instance, base: &str, cwd: &str) -> Result<Stri
 }
 
 pub(crate) fn cleanup(instance: &Instance) -> Result<()> {
+    stop(instance)?;
     let Some(config) = client_config(instance)? else {
         return Ok(());
     };
@@ -482,6 +649,7 @@ mod tests {
                 profile_name: profile_name.clone(),
                 profile_path: PathBuf::from("unused"),
                 fresh: false,
+                owned: false,
             })
             .unwrap(),
         );
@@ -491,5 +659,8 @@ mod tests {
         assert!(command.contains(&profile_name));
         assert!(!command.contains("private-token"));
         assert!(!command.contains("pre-register"));
+        instance.primary_pane.yolo_mode = true;
+        let command = super::command(&instance, "codex", "/tmp").unwrap();
+        assert!(!command.contains("--dangerously-bypass-approvals-and-sandbox"));
     }
 }

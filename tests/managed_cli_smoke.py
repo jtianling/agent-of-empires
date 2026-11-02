@@ -49,10 +49,12 @@ def main():
         owner = call("init")["data"]["owner"]
         call("init", context=second)
         assert call("list")["data"] == []
-        item = call("create", str(project), "--tool", "shell", "--title", "first")["data"]
+        item = call("create", str(project), "--tool", "codex", "--title", "first")["data"]
         session_id = item["id"]
         assert item["owner"] == owner
         assert len(session_id) == 16
+        stored = json.loads(next(root.rglob("sessions.json")).read_text())[0]
+        assert stored["primary_pane"]["yolo_mode"] is True
         assert call("show", session_id)["data"]["owned"]
         assert call("capture", session_id, "--lines", "0", success=False)["error"]["code"] == "invalid_input"
         assert call("create", str(project), "--tool", "codex", "--title", "invalid",
@@ -60,6 +62,7 @@ def main():
         assert not log.exists(), "Create/list/show unexpectedly touched tmux"
         for args in [
             ("start", session_id), ("stop", session_id), ("restart", session_id),
+            ("restart", session_id, "--yolo"),
             ("remove", session_id), ("rename", session_id, "--title", "new"),
             ("send", session_id, "message"), ("capture", session_id),
         ]:

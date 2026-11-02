@@ -416,7 +416,6 @@ impl HomeView {
                     self.selected_session = None;
 
                     self.reload()?;
-                    self.invalidate_stale_poll(&id);
                     return Ok(());
                 }
             }
@@ -458,15 +457,8 @@ impl HomeView {
             }
 
             self.reload()?;
-            self.invalidate_stale_poll(&id);
         }
         Ok(())
-    }
-
-    fn invalidate_stale_poll(&mut self, id: &str) {
-        self.skip_stale_errors.insert(id.to_string());
-        let _ = self.status_poller.try_recv_updates();
-        self.pending_status_refresh = false;
     }
 
     fn apply_group_updates(
@@ -508,7 +500,6 @@ fn rename_tmux_session(
     };
     let new_tmux_name = crate::tmux::Session::generate_name(id, effective_title);
     tmux_session.rename(&new_tmux_name)?;
-    crate::tmux::refresh_session_cache();
     Ok(())
 }
 

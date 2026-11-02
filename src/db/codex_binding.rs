@@ -5,6 +5,39 @@ use super::{AgentSlot, Store, MAX_XATS_RUNTIME_GENERATION};
 use crate::session::RestartMode;
 
 impl Store {
+    pub(crate) fn codex_resume_launch_verified(
+        &self,
+        slot: &AgentSlot,
+        launch_id: &str,
+        resume_thread: Option<&str>,
+    ) -> Result<bool> {
+        if !self.codex_resume_verified(slot)? {
+            return Ok(false);
+        }
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM codex_binding b \
+             JOIN agent_slot s USING (instance_id, slot) \
+             WHERE b.instance_id = ?1 AND b.slot = ?2 AND b.generation = ?3 \
+             AND b.thread_id = ?4 AND b.identity_key = ?5 \
+             AND s.tmux_pane = ?6 AND s.xats_runtime_generation = b.generation \
+             AND s.native_session_id = b.thread_id AND s.xats_identity_key = b.identity_key \
+             AND b.state IN ('verified', 'awaiting_launch') \
+             AND (b.state != 'awaiting_launch' OR b.launch_id != ?7) \
+             AND (b.launch_id = ?7 OR b.thread_id = ?8))",
+            params![
+                slot.instance_id,
+                slot.slot,
+                slot.xats_runtime_generation,
+                slot.native_session_id,
+                slot.xats_identity_key,
+                slot.tmux_pane,
+                launch_id,
+                resume_thread
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn codex_resume_verified(&self, slot: &AgentSlot) -> Result<bool> {
         if uuid::Uuid::try_parse(&slot.native_session_id).is_err() {
             return Ok(false);
@@ -37,6 +70,38 @@ impl Store {
         if !write_capture(&transaction, slot, launch_id, thread_id, now)? {
             return Ok(false);
         }
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub(crate) fn recover_codex_binding(
+        &self,
+        slot: &AgentSlot,
+        launch_id: &str,
+        thread_id: &str,
+    ) -> Result<bool> {
+        uuid::Uuid::try_parse(launch_id)?;
+        uuid::Uuid::try_parse(thread_id)?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let duplicate: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_slot WHERE instance_id = ?1 \
+             AND slot != ?2 AND agent = 'codex' AND native_session_id = ?3)",
+            params![slot.instance_id, slot.slot, thread_id],
+            |row| row.get(0),
+        )?;
+        if duplicate {
+            bail!("Another slot already records the selected conversation");
+        }
+        let now = super::now_unix();
+        if !write_capture(&transaction, slot, launch_id, thread_id, now)? {
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO events(instance_id, slot, kind, detail, created_at) \
+             VALUES (?1, ?2, 'codex_explicit_recovery', ?3, ?4)",
+            params![slot.instance_id, slot.slot, thread_id, now],
+        )?;
         transaction.commit()?;
         Ok(true)
     }
@@ -367,6 +432,33 @@ mod tests {
     }
 
     #[test]
+    fn explicit_recovery_rejects_a_siblings_conversation_and_records_provenance() {
+        let store = store();
+        let slots = store.read_slots_for_instance("instance").unwrap();
+        store
+            .capture_codex_binding(&slots[1], RIGHT, RIGHT)
+            .unwrap();
+        assert!(store.recover_codex_binding(&slots[0], LEFT, RIGHT).is_err());
+        assert!(store.read_slots_for_instance("instance").unwrap()[0]
+            .native_session_id
+            .is_empty());
+        assert!(store.recover_codex_binding(&slots[0], LEFT, LEFT).unwrap());
+        let current = store.read_slots_for_instance("instance").unwrap();
+        assert_eq!(current[0].native_session_id, LEFT);
+        assert_eq!(current[1].native_session_id, RIGHT);
+        assert!(store.codex_resume_verified(&current[0]).unwrap());
+        let events: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'codex_explicit_recovery'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1);
+    }
+
+    #[test]
     fn fresh_rejects_late_capture_and_cannot_resume_old_thread() {
         let store = store();
         let old = store.read_slots_for_instance("instance").unwrap()[0].clone();
@@ -396,6 +488,72 @@ mod tests {
             .prepare_codex_restart(&slot, RestartMode::Resume, "%18", Some(LEFT),)
             .is_err());
         assert_eq!(store.read_slots_for_instance("instance").unwrap()[0], slot);
+    }
+
+    #[test]
+    fn unavailable_live_binding_requires_proof_of_the_same_launch_or_resume() {
+        let store = store();
+        let slot = store.read_slots_for_instance("instance").unwrap()[0].clone();
+        assert!(!store
+            .codex_resume_launch_verified(&slot, LEFT, Some(LEFT))
+            .unwrap());
+        store.capture_codex_binding(&slot, LEFT, LEFT).unwrap();
+        let slot = store.read_slots_for_instance("instance").unwrap()[0].clone();
+        assert!(store
+            .codex_resume_launch_verified(&slot, LEFT, None)
+            .unwrap());
+        assert!(store
+            .codex_resume_launch_verified(&slot, RIGHT, Some(LEFT))
+            .unwrap());
+        for thread in [None, Some(RIGHT)] {
+            assert!(!store
+                .codex_resume_launch_verified(&slot, RIGHT, thread)
+                .unwrap());
+        }
+        let sibling = store.read_slots_for_instance("instance").unwrap()[1].clone();
+        assert!(!store
+            .codex_resume_launch_verified(&sibling, RIGHT, Some(LEFT))
+            .unwrap());
+        let wrong_pane = AgentSlot {
+            tmux_pane: "%19".to_string(),
+            ..slot.clone()
+        };
+        assert!(!store
+            .codex_resume_launch_verified(&wrong_pane, LEFT, Some(LEFT))
+            .unwrap());
+    }
+
+    #[test]
+    fn pending_resume_can_retry_without_accepting_retired_launch_or_generation() {
+        let store = store();
+        let slot = store.read_slots_for_instance("instance").unwrap()[0].clone();
+        store.capture_codex_binding(&slot, LEFT, LEFT).unwrap();
+        let slot = store.read_slots_for_instance("instance").unwrap()[0].clone();
+        store
+            .prepare_codex_restart(&slot, RestartMode::Resume, "%18", Some(LEFT))
+            .unwrap();
+        let waiting = store.read_slots_for_instance("instance").unwrap()[0].clone();
+        assert!(!store
+            .codex_resume_launch_verified(&waiting, RIGHT, Some(LEFT))
+            .unwrap());
+        store.finish_codex_restart(&slot).unwrap();
+        assert!(store
+            .codex_resume_launch_verified(&waiting, RIGHT, Some(LEFT))
+            .unwrap());
+        assert!(!store
+            .codex_resume_launch_verified(&waiting, LEFT, Some(LEFT))
+            .unwrap());
+        assert!(!store
+            .codex_resume_launch_verified(&slot, RIGHT, Some(LEFT))
+            .unwrap());
+        store
+            .prepare_codex_restart(&waiting, RestartMode::Fresh, "%18", Some(RIGHT))
+            .unwrap();
+        store.finish_codex_restart(&waiting).unwrap();
+        let fresh = store.read_slots_for_instance("instance").unwrap()[0].clone();
+        assert!(!store
+            .codex_resume_launch_verified(&fresh, LEFT, Some(LEFT))
+            .unwrap());
     }
 
     #[test]

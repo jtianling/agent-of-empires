@@ -131,6 +131,9 @@ async fn uses_current_provider_for_resume_start_and_fresh_restart() {
             "test-token",
             stored,
             fresh,
+            false,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -158,6 +161,9 @@ async fn rejects_loaded_thread_that_keeps_the_old_provider() {
         "test-token",
         Some(previous),
         false,
+        false,
+        None,
+        None,
     )
     .await;
     let prepared = result.unwrap();
@@ -167,5 +173,196 @@ async fn rejects_loaded_thread_that_keeps_the_old_provider() {
         .unwrap()
         .to_string()
         .contains("current model provider"));
+    server.await.unwrap();
+}
+
+#[test]
+fn generated_profile_keeps_the_selected_provider_for_the_remote_tui() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = ClientConfig {
+        thread_id: uuid::Uuid::new_v4().to_string(),
+        ws_url: "ws://127.0.0.1:8799".into(),
+        profile_name: "test-profile".into(),
+        profile_path: directory.path().join("test-profile.config.toml"),
+        fresh: false,
+        owned: false,
+    };
+    let mut prepared = PreparedThread {
+        thread_id: config.thread_id.clone(),
+        provider: "current-provider".into(),
+        server_name: "xats".into(),
+        headers: json!({"X-Xats-Managed-Token": "test-token"}),
+        yolo: true,
+        model: Some("gpt-6.1-sol".into()),
+        effort: Some("xhigh".into()),
+        error: None,
+    };
+    let cwd = "/project/with spaces.and\"quotes";
+    write_profile(&config, &prepared, cwd).unwrap();
+    let profile: toml::Value =
+        toml::from_str(&fs::read_to_string(&config.profile_path).unwrap()).unwrap();
+    assert_eq!(profile["model_provider"].as_str(), Some("current-provider"));
+    assert_eq!(profile["model"].as_str(), Some("gpt-6.1-sol"));
+    assert_eq!(profile["model_reasoning_effort"].as_str(), Some("xhigh"));
+    assert_eq!(profile["approval_policy"].as_str(), Some("never"));
+    assert_eq!(profile["sandbox_mode"].as_str(), Some("danger-full-access"));
+    assert_eq!(
+        profile["projects"][cwd]["trust_level"].as_str(),
+        Some("trusted")
+    );
+    assert_eq!(profile["projects"].as_table().unwrap().len(), 1);
+    assert_eq!(
+        profile["mcp_servers"]["xats"]["http_headers"][HEADER].as_str(),
+        Some("test-token")
+    );
+    prepared.yolo = false;
+    write_profile(&config, &prepared, cwd).unwrap();
+    let profile: toml::Value =
+        toml::from_str(&fs::read_to_string(&config.profile_path).unwrap()).unwrap();
+    assert!(profile.get("projects").is_none());
+}
+
+#[tokio::test]
+async fn requested_model_is_checked_for_new_and_resumed_threads() {
+    let previous = "019d1af9-a899-7df1-8f7d-a244126e5def";
+    for stored in [None, Some(previous)] {
+        for returned in ["gpt-6.1-terra", "another-model"] {
+            let mut calls = exchanges(stored, false, "current-provider");
+            let index = calls
+                .iter()
+                .position(|(method, _, _)| matches!(*method, "thread/start" | "thread/resume"))
+                .unwrap();
+            calls[index].1["model"] = json!("gpt-6.1-terra");
+            calls[index].2["model"] = json!(returned);
+            if returned != "gpt-6.1-terra" {
+                calls.pop();
+            }
+            let (endpoint, server) = serve(calls).await;
+            let prepared = prepare_thread(
+                &endpoint,
+                &url::Url::parse("http://127.0.0.1:1234/mcp").unwrap(),
+                "/project",
+                "worker",
+                "test-token",
+                stored,
+                false,
+                false,
+                Some("gpt-6.1-terra"),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(prepared.error.is_none(), returned == "gpt-6.1-terra");
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn verifies_explicit_effort_for_sol_and_terra_on_start_and_resume() {
+    let previous = "019d1af9-a899-7df1-8f7d-a244126e5def";
+    for model in ["gpt-6.1-sol", "gpt-6.1-terra"] {
+        for (stored, fresh) in [
+            (None, false),
+            (Some(previous), false),
+            (Some(previous), true),
+        ] {
+            for returned in ["xhigh", "none"] {
+                let mut calls = exchanges(stored, fresh, "current-provider");
+                let (_, params, response) = calls
+                    .iter_mut()
+                    .find(|(method, _, _)| matches!(*method, "thread/start" | "thread/resume"))
+                    .unwrap();
+                params["model"] = json!(model);
+                params["config"]["model_reasoning_effort"] = json!("xhigh");
+                response["model"] = json!(model);
+                response["reasoningEffort"] = json!(returned);
+                if returned != "xhigh" {
+                    calls.pop();
+                }
+                let (endpoint, server) = serve(calls).await;
+                let prepared = prepare_thread(
+                    &endpoint,
+                    &url::Url::parse("http://127.0.0.1:1234/mcp").unwrap(),
+                    "/project",
+                    "worker",
+                    "test-token",
+                    stored,
+                    fresh,
+                    false,
+                    Some(model),
+                    Some("xhigh"),
+                )
+                .await
+                .unwrap();
+                assert_eq!(prepared.error.is_none(), returned == "xhigh");
+                server.await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn prepares_and_verifies_yolo_on_start_and_resume() {
+    let previous = "019d1af9-a899-7df1-8f7d-a244126e5def";
+    for stored in [None, Some(previous)] {
+        let mut requests = exchanges(stored, false, "current-provider");
+        let (_, params, response) = requests
+            .iter_mut()
+            .find(|(method, _, _)| matches!(*method, "thread/start" | "thread/resume"))
+            .unwrap();
+        params["approvalPolicy"] = json!("never");
+        params["sandbox"] = json!("danger-full-access");
+        response["approvalPolicy"] = json!("never");
+        response["sandbox"] = json!({"type": "dangerFullAccess"});
+        let (endpoint, server) = serve(requests).await;
+        let prepared = prepare_thread(
+            &endpoint,
+            &url::Url::parse("http://127.0.0.1:1234/mcp").unwrap(),
+            "/project",
+            "worker",
+            "test-token",
+            stored,
+            false,
+            true,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(prepared.yolo);
+        assert!(prepared.error.is_none());
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn retains_created_thread_when_yolo_is_rejected() {
+    let mut requests = exchanges(None, false, "current-provider");
+    requests.pop();
+    let (_, params, _) = requests.last_mut().unwrap();
+    params["approvalPolicy"] = json!("never");
+    params["sandbox"] = json!("danger-full-access");
+    let (endpoint, server) = serve(requests).await;
+    let prepared = prepare_thread(
+        &endpoint,
+        &url::Url::parse("http://127.0.0.1:1234/mcp").unwrap(),
+        "/project",
+        "worker",
+        "test-token",
+        None,
+        false,
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.thread_id, "019d1af9-a899-7df1-8f7d-a244126e5ded");
+    assert!(prepared
+        .error
+        .unwrap()
+        .to_string()
+        .contains("Codex did not retain the requested YOLO permissions"));
     server.await.unwrap();
 }

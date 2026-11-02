@@ -10,6 +10,7 @@ use crate::tui::status_poller::StatusUpdate;
 fn poll_result(instance: &Instance, status: Status) -> StatusUpdate {
     StatusUpdate {
         id: instance.id.clone(),
+        title: instance.title.clone(),
         last_start_time: instance.last_start_time,
         status,
         last_error: (status == Status::Error)
@@ -116,4 +117,67 @@ fn status_results_cannot_restore_tokens_during_restart() {
     assert_eq!(instance.status, Status::Restarting);
     assert_eq!(instance.last_error, None);
     assert_eq!(instance.resume_token, None);
+}
+
+fn rename_on_disk(env: &mut super::TestEnv, title: &str) {
+    let (mut instances, groups) = env.view.storage.load_with_groups().unwrap();
+    instances[0].title = title.to_string();
+    let tree = crate::session::GroupTree::new_with_groups(&instances, &groups);
+    env.view
+        .storage
+        .save_with_groups(&instances, &tree)
+        .unwrap();
+    env.view.reload().unwrap();
+}
+
+#[test]
+#[serial]
+fn external_rename_rejects_old_title_status_and_tokens() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.selected_session.clone().unwrap();
+    env.view.mutate_instance(&id, |instance| {
+        instance.status = Status::Idle;
+        instance.resume_token = Some("current-conversation".to_string());
+    });
+    let old = env.view.get_instance(&id).unwrap().clone();
+    rename_on_disk(&mut env, "renamed");
+    for status in [Status::Error, Status::Idle, Status::Running] {
+        env.view
+            .status_poller
+            .inject_updates(vec![poll_result(&old, status)]);
+        assert!(env.view.apply_status_updates());
+        let current = env.view.get_instance(&id).unwrap();
+        assert_eq!(current.title, "renamed");
+        assert_eq!(current.status, Status::Idle);
+        assert_eq!(current.last_error, None);
+        assert_eq!(
+            current.resume_token.as_deref(),
+            Some("current-conversation")
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn external_rename_clears_old_error_backoff_but_accepts_current_failure() {
+    crate::tmux::isolate_tmux_socket();
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.selected_session.clone().unwrap();
+    env.view.mutate_instance(&id, |instance| {
+        instance.status = Status::Error;
+        instance.last_error = Some("old title was not found".to_string());
+        instance.last_error_check = Some(Instant::now());
+    });
+    rename_on_disk(&mut env, "renamed");
+    let current = env.view.get_instance(&id).unwrap();
+    assert_eq!(current.status, Status::Unknown);
+    assert_eq!(current.last_error, None);
+    assert_eq!(current.last_error_check, None);
+    let update = poll_result(current, Status::Error);
+    env.view.status_poller.inject_updates(vec![update]);
+    assert!(env.view.apply_status_updates());
+    let current = env.view.get_instance(&id).unwrap();
+    assert_eq!(current.status, Status::Error);
+    assert!(current.last_error.as_deref().unwrap().contains("%83, %84"));
 }

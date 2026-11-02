@@ -8,6 +8,66 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use tracing::debug;
 
+pub(super) fn arguments(pid: u32) -> anyhow::Result<Vec<String>> {
+    use anyhow::{ensure, Context};
+    use nix::libc;
+    let capacity = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    ensure!(capacity > 0, "Cannot determine process argument size");
+    let mut bytes = vec![0u8; usize::try_from(capacity)?];
+    let mut size = bytes.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, i32::try_from(pid)?];
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            u32::try_from(mib.len())?,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("Reading process arguments");
+    }
+    ensure!(size <= bytes.len(), "Invalid process argument size");
+    parse_arguments(&bytes[..size])
+}
+
+fn parse_arguments(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
+    use anyhow::{ensure, Context};
+    let count = i32::from_ne_bytes(
+        bytes
+            .get(..4)
+            .context("Missing process argument count")?
+            .try_into()?,
+    );
+    ensure!(count > 0, "Invalid process argument count");
+    let data = &bytes[4..];
+    let executable_end = data
+        .iter()
+        .position(|byte| *byte == 0)
+        .context("Missing process executable terminator")?;
+    let data = &data[executable_end + 1..];
+    let start = data
+        .iter()
+        .position(|byte| *byte != 0)
+        .context("Missing process arguments")?;
+    let mut remaining = &data[start..];
+    let mut args = Vec::new();
+    for _ in 0..count {
+        let end = remaining
+            .iter()
+            .position(|byte| *byte == 0)
+            .context("Missing process argument terminator")?;
+        args.push(
+            String::from_utf8(remaining[..end].to_vec())
+                .context("Invalid process argument encoding")?,
+        );
+        remaining = &remaining[end + 1..];
+    }
+    Ok(args)
+}
+
 /// Kill a process and all its descendants
 /// Uses SIGTERM first, then SIGKILL after a short delay for stragglers
 pub fn kill_process_tree(pid: u32) {
@@ -187,6 +247,9 @@ pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
     }
     ensure!(read as usize == size, "Incomplete process start identity");
     let info = unsafe { info.assume_init() };
+    if info.pbi_status == libc::SZOMB {
+        return Ok(None);
+    }
     Ok(Some(format!(
         "macos:{}:{}",
         info.pbi_start_tvsec, info.pbi_start_tvusec
@@ -196,6 +259,20 @@ pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arguments_preserve_boundaries_and_exclude_environment() {
+        let mut bytes = 4i32.to_ne_bytes().to_vec();
+        bytes.extend_from_slice(
+            b"/bin/codex\0\0codex\0resume\0\0prompt with spaces\0TOKEN=private\0",
+        );
+        assert_eq!(
+            parse_arguments(&bytes).unwrap(),
+            ["codex", "resume", "", "prompt with spaces"]
+        );
+        assert!(parse_arguments(&[]).is_err());
+        assert!(parse_arguments(&bytes[..8]).is_err());
+    }
 
     #[test]
     fn test_collect_descendants_from_map_empty() {

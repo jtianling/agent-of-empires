@@ -6,10 +6,10 @@ use crate::session::{builder, Group, GroupTree, Instance, PaneDraft, Status, Sto
 
 pub(super) fn target_id(command: &ManagedCommand) -> &str {
     match command {
-        ManagedCommand::Start(args)
-        | ManagedCommand::Stop(args)
-        | ManagedCommand::Restart(args)
-        | ManagedCommand::Remove(args) => &args.id,
+        ManagedCommand::Start(args) | ManagedCommand::Stop(args) | ManagedCommand::Remove(args) => {
+            &args.id
+        }
+        ManagedCommand::Restart(args) => &args.id,
         ManagedCommand::Rename(args) => &args.id,
         ManagedCommand::Send(args) => &args.id,
         ManagedCommand::Capture(args) => &args.id,
@@ -31,6 +31,9 @@ pub(super) fn create(
     instances.push(instance.clone());
     save(storage, &instances, &groups)?;
     let result = (|| {
+        crate::git::GitWorktree::sync_existing_worktree_agent_config(std::path::Path::new(
+            &instance.project_path,
+        ));
         crate::managed_xats::prepare(&mut instance)?;
         replace(storage, &mut instances, &groups, &instance)?;
         if args.launch {
@@ -59,7 +62,11 @@ fn build(profile: &str, owner: &str, args: &CreateArgs) -> Result<Instance> {
         .to_str()
         .context("Project path must be UTF-8")?
         .to_string();
-    let xats = match (&args.xats_name, &args.xats_team) {
+    ensure!(
+        args.model.is_none() || args.tool == "codex",
+        "Model is only supported for Codex"
+    );
+    let mut xats = match (&args.xats_name, &args.xats_team) {
         (Some(name), Some(team)) => {
             ensure!(
                 args.tool != "kimi",
@@ -77,6 +84,11 @@ fn build(profile: &str, owner: &str, args: &CreateArgs) -> Result<Instance> {
         (None, None) => None,
         _ => anyhow::bail!("Specify both --xats-name and --xats-team"),
     };
+    if let Some(identity) = &mut xats {
+        identity.model = args.model.clone();
+        identity.effort = args.effort.clone();
+        identity.validate()?;
+    }
     let config = crate::session::resolve_config(profile)?;
     let mut instance = builder::build_instance(
         builder::InstanceParams {
@@ -85,7 +97,7 @@ fn build(profile: &str, owner: &str, args: &CreateArgs) -> Result<Instance> {
             primary: PaneDraft {
                 tool: args.tool.clone(),
                 path,
-                yolo_mode: false,
+                yolo_mode: true,
                 cross_agent_team: xats.is_some(),
                 worktree: Default::default(),
             },
@@ -175,10 +187,24 @@ pub(super) fn mutate(
             _ => unreachable!(),
         };
     }
+    if matches!(&command, ManagedCommand::Restart(_)) {
+        crate::managed_codex::preflight_all(&instances[index])?;
+    }
+    if matches!(&command, ManagedCommand::Restart(args) if args.yolo) {
+        enable_yolo(&mut instances[index]);
+        save(storage, instances, groups)?;
+    }
     let instance = &mut instances[index];
     let outcome = match command {
         ManagedCommand::Start(_) => instance.start_with_size(crate::terminal::get_size()),
-        ManagedCommand::Restart(_) => instance.restart_with_size(crate::terminal::get_size()),
+        ManagedCommand::Restart(args) => {
+            if args.yolo {
+                instance.stop()?;
+                instance.start_with_size(crate::terminal::get_size())
+            } else {
+                instance.restart_with_size(crate::terminal::get_size())
+            }
+        }
         ManagedCommand::Stop(_) => {
             instance.stop()?;
             instance.status = Status::Stopped;
@@ -195,6 +221,17 @@ pub(super) fn mutate(
         "xats": crate::managed_xats::status_report(&instances[index])}))
 }
 
+fn enable_yolo(instance: &mut Instance) {
+    let mut config = instance.primary_pane.clone();
+    config.yolo_mode = true;
+    instance.set_primary_pane_config(config);
+    for pane in &mut instance.managed_panes {
+        let mut config = pane.config.clone();
+        config.yolo_mode = true;
+        pane.config = config.normalized();
+    }
+}
+
 fn validate_title(title: &str) -> Result<()> {
     ensure!(
         !title.trim().is_empty() && title.len() <= 200 && !title.chars().any(char::is_control),
@@ -206,12 +243,10 @@ fn validate_title(title: &str) -> Result<()> {
 fn rename(instance: &mut Instance, title: &str) -> Result<()> {
     validate_title(title)?;
     let session = crate::tmux::Session::new(&instance.id, &instance.title)?;
-    if session.exists() {
-        session.rename(&crate::tmux::Session::generate_name(
-            &instance.id,
-            title.trim(),
-        ))?;
-    }
+    session.rename(&crate::tmux::Session::generate_name(
+        &instance.id,
+        title.trim(),
+    ))?;
     instance.title = title.trim().to_string();
     Ok(())
 }

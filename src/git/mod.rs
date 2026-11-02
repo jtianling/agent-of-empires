@@ -309,6 +309,32 @@ impl GitWorktree {
         Ok(())
     }
 
+    pub(crate) fn sync_existing_worktree_agent_config(path: &Path) {
+        let result = (|| -> Result<()> {
+            let repo = match open_repo_at(path) {
+                Ok(repo) => repo,
+                Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            let Some(workdir) = repo.workdir() else {
+                return Ok(());
+            };
+            if !repo.is_worktree() || workdir.canonicalize()? != path.canonicalize()? {
+                return Ok(());
+            }
+            let source = Self::find_main_repo(path)?;
+            Self::sync_agent_config_to_worktree(&source, path);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(
+                "Failed to sync worktree agent configuration at {}: {}",
+                path.display(),
+                error
+            );
+        }
+    }
+
     /// Copy untracked agent directories and files from the source repo to a new worktree.
     /// Covers both `.gitignore`'d entries and entries that simply haven't been added to git.
     /// Tracked entries are skipped because `git worktree add` already populates them.
@@ -321,7 +347,7 @@ impl GitWorktree {
             if !source_path.is_dir() {
                 continue;
             }
-            if target_path.exists() {
+            if target_path.symlink_metadata().is_ok() {
                 continue;
             }
             if is_tracked(source_dir, dir_name) {
@@ -345,7 +371,7 @@ impl GitWorktree {
             if !source_path.is_file() && !is_symlink {
                 continue;
             }
-            if target_path.exists() {
+            if target_path.symlink_metadata().is_ok() {
                 continue;
             }
             if is_tracked(source_dir, file_name) {

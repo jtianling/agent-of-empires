@@ -28,6 +28,26 @@ struct Unavailable {
 }
 
 pub(crate) fn lookup(request: BindingRequest) -> Result<Option<String>> {
+    lookup_checked(request, false)
+}
+
+pub(crate) fn lookup_for_resume(request: BindingRequest) -> Result<Option<String>> {
+    lookup_checked(request, true)
+}
+
+pub(crate) async fn lookup_with(
+    control: &xats_control::ControlPlane,
+    client: &reqwest::Client,
+    request: &BindingRequest,
+) -> Result<Option<String>> {
+    validate_request(request)?;
+    let value = xats_control::invoke(control, client, "/api/codex/binding/lookup", request)
+        .await
+        .map_err(xats_control::ControlFailure::into_error)?;
+    parse_lookup(request, value, true)
+}
+
+fn lookup_checked(request: BindingRequest, reject_ambiguous: bool) -> Result<Option<String>> {
     validate_request(&request)?;
     let control = xats_control::discover_control_plane()?;
     xats_control::block_on_control("codex-binding", move || {
@@ -37,12 +57,25 @@ pub(crate) fn lookup(request: BindingRequest) -> Result<Option<String>> {
                 xats_control::invoke(&control, &client, "/api/codex/binding/lookup", &request)
                     .await
                     .map_err(xats_control::ControlFailure::into_error)?;
-            parse_binding(&request, value)
+            parse_lookup(&request, value, reject_ambiguous)
         })
     })
 }
 
-fn validate_request(request: &BindingRequest) -> Result<()> {
+fn parse_lookup(
+    request: &BindingRequest,
+    value: serde_json::Value,
+    reject_ambiguous: bool,
+) -> Result<Option<String>> {
+    let ambiguous = value.get("error").and_then(serde_json::Value::as_str) == Some("ambiguous");
+    let thread = parse_binding(request, value)?;
+    if reject_ambiguous && ambiguous {
+        bail!("live Codex binding is ambiguous; cannot resume stored history");
+    }
+    Ok(thread)
+}
+
+pub(crate) fn validate_request(request: &BindingRequest) -> Result<()> {
     let index = request.pane_id.strip_prefix('%').unwrap_or_default();
     if request.protocol_version != PROTOCOL_VERSION
         || index.is_empty()
@@ -150,5 +183,22 @@ mod tests {
             .as_deref(),
             Some(thread)
         );
+    }
+
+    #[test]
+    fn resume_only_falls_back_for_unavailable_unambiguous_bindings() {
+        for error in ["pending", "not_found", "stale"] {
+            assert_eq!(
+                parse_lookup(&request(), json!({"ok": false, "error": error}), true).unwrap(),
+                None
+            );
+        }
+        for value in [
+            json!({"ok": false, "error": "ambiguous"}),
+            json!({"ok": false, "error": "unknown"}),
+            json!({"ok": false, "error": "pending", "thread_id": "old"}),
+        ] {
+            assert!(parse_lookup(&request(), value, true).is_err());
+        }
     }
 }

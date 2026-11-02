@@ -31,6 +31,12 @@ pub struct CreateArgs {
     pub session_id: String,
     #[arg(long)]
     pub tool: String,
+    /// Codex model for this managed xats pane
+    #[arg(long, requires = "xats_name")]
+    pub model: Option<String>,
+    /// Reasoning effort for the specified Codex model
+    #[arg(long, requires = "model")]
+    pub effort: Option<String>,
     #[arg(long)]
     pub path: Option<PathBuf>,
     #[arg(long, requires = "xats_team")]

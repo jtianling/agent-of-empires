@@ -12,6 +12,7 @@ use crate::session::Instance;
 struct Launch {
     pane_pid: u32,
     launch_id: String,
+    codex_pids: Vec<u32>,
     cwd: String,
     session_name: String,
 }
@@ -119,16 +120,109 @@ fn resolve_thread(pane: &str, launch: &Launch) -> Result<Option<String>> {
     })
 }
 
-pub(crate) fn verify_live_resume(slot: &crate::db::AgentSlot, session: &str) -> Result<()> {
+pub(crate) fn recover_explicit_binding(
+    store: &Store,
+    slot: &AgentSlot,
+    session: &str,
+    endpoint: &str,
+    thread: &str,
+) -> Result<()> {
+    uuid::Uuid::try_parse(thread).context("Invalid original Codex thread UUID")?;
+    anyhow::ensure!(
+        slot.agent == "codex" && slot.cross_agent_team,
+        "Recovery requires a cross-agent Codex slot"
+    );
+    anyhow::ensure!(
+        slot.native_session_id.is_empty() || slot.native_session_id == thread,
+        "Slot already records a different conversation"
+    );
+    let before = read_launch_checked(&slot.tmux_pane, true)?
+        .context("Codex launch is unavailable; no binding was changed")?;
+    anyhow::ensure!(
+        before.session_name == session,
+        "Codex pane belongs to another session"
+    );
+    verify_selected_thread(&slot.tmux_pane, &before, thread)?;
+    crate::codex_permissions::verify_recovery_thread(endpoint, thread, &before.cwd)?;
+    verify_selected_thread(&slot.tmux_pane, &before, thread)?;
+    anyhow::ensure!(
+        read_launch(&slot.tmux_pane)?.as_ref() == Some(&before),
+        "Codex launch changed during recovery"
+    );
+    anyhow::ensure!(
+        store.recover_codex_binding(slot, &before.launch_id, thread)?,
+        "Codex slot changed during recovery; no binding was changed"
+    );
+    tracing::info!(
+        instance_id = slot.instance_id,
+        slot = slot.slot,
+        thread_id = thread,
+        "Recovered explicitly selected Codex thread binding"
+    );
+    Ok(())
+}
+
+fn verify_selected_thread(pane: &str, launch: &Launch, thread: &str) -> Result<()> {
+    for pid in &launch.codex_pids {
+        let args = crate::process::arguments(*pid)?;
+        anyhow::ensure!(
+            launch_from_args(&args).as_deref() == Some(&launch.launch_id),
+            "Live Codex launch arguments changed during recovery"
+        );
+        if let Some(resuming) = resume_thread_from_args(&args) {
+            anyhow::ensure!(
+                resuming == thread,
+                "Live Codex command resumes a different thread"
+            );
+        }
+    }
+    if let Some(bound) = codex_xats::lookup_for_resume(BindingRequest {
+        protocol_version: 1,
+        pane_id: pane.into(),
+        launch_id: launch.launch_id.clone(),
+    })? {
+        anyhow::ensure!(
+            bound == thread,
+            "Live Codex is bound to a different conversation"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_live_resume(
+    store: &Store,
+    slot: &crate::db::AgentSlot,
+    session: &str,
+) -> Result<()> {
     let Some(before) = read_launch_checked(&slot.tmux_pane, true)? else {
         return Ok(());
     };
     if before.session_name != session {
         bail!("Codex resume pane belongs to another session");
     }
-    let thread = resolve_thread(&slot.tmux_pane, &before)?
-        .context("live Codex conversation is not yet verified; wait before resuming")?;
-    if thread != slot.native_session_id || read_launch(&slot.tmux_pane)?.as_ref() != Some(&before) {
+    let thread = codex_xats::lookup_for_resume(BindingRequest {
+        protocol_version: 1,
+        pane_id: slot.tmux_pane.clone(),
+        launch_id: before.launch_id.clone(),
+    })?;
+    match thread {
+        Some(thread) if thread == slot.native_session_id => {}
+        Some(_) => bail!("live Codex conversation changed; wait for its binding before resuming"),
+        None => {
+            if !store.codex_resume_launch_verified(
+                slot,
+                &before.launch_id,
+                resume_thread_in_processes(&before)?.as_deref(),
+            )? {
+                bail!("live Codex conversation is not yet verified; wait before resuming");
+            }
+            tracing::info!(
+                "Resuming Codex pane {} from its persisted binding while xats binding is unavailable",
+                slot.tmux_pane
+            );
+        }
+    }
+    if read_launch(&slot.tmux_pane)?.as_ref() != Some(&before) {
         bail!("live Codex conversation changed; wait for its binding before resuming");
     }
     Ok(())
@@ -136,6 +230,33 @@ pub(crate) fn verify_live_resume(slot: &crate::db::AgentSlot, session: &str) -> 
 
 pub(crate) fn current_launch_id(pane: &str) -> Result<Option<String>> {
     Ok(read_launch(pane)?.map(|launch| launch.launch_id))
+}
+
+pub(crate) async fn current_launch_id_async(pane: &str) -> Result<Option<String>> {
+    let timeout = std::time::Duration::from_secs(5);
+    let mut tmux = crate::tmux::tmux_command();
+    tmux.args(["display-message", "-p", "-t", pane, "#{pane_pid}"]);
+    let output = crate::process::output_with_timeout(tmux, timeout).await?;
+    if !output.status.success() {
+        bail!(
+            "Reading Codex name pane failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let pane_pid = String::from_utf8(output.stdout)?
+        .trim()
+        .parse::<u32>()
+        .context("Invalid Codex name pane PID")?;
+    let mut ps = Command::new("ps");
+    ps.args(["-Ao", "pid=,ppid=,command="]);
+    let output = crate::process::output_with_timeout(ps, timeout).await?;
+    if !output.status.success() {
+        bail!(
+            "Reading Codex name process tree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    launch_in_tree(&String::from_utf8(output.stdout)?, pane_pid)
 }
 
 fn read_launch(pane: &str) -> Result<Option<Launch>> {
@@ -182,9 +303,16 @@ fn read_launch_checked(pane: &str, require_bound: bool) -> Result<Option<Launch>
     {
         bail!("live Codex has no verified launch identity; cannot resume stored history");
     }
+    let mut codex_pids: Vec<_> = commands_in_tree(&listing, pane_pid)
+        .into_iter()
+        .filter(|(_, command)| is_codex_command(command))
+        .map(|(pid, _)| pid)
+        .collect();
+    codex_pids.sort_unstable();
     Ok(launch_id.map(|launch_id| Launch {
         pane_pid,
         launch_id,
+        codex_pids,
         cwd: cwd.to_string(),
         session_name: session_name.to_string(),
     }))
@@ -199,6 +327,47 @@ fn is_codex_command(command: &str) -> bool {
                 .next()
                 .and_then(|word| Path::new(word).file_name())
                 .is_some_and(|name| name == "codex" || name == "codex.js"))
+}
+
+fn resume_thread_in_processes(launch: &Launch) -> Result<Option<String>> {
+    let mut threads = HashSet::new();
+    for pid in &launch.codex_pids {
+        let args = crate::process::arguments(*pid)?;
+        if launch_from_args(&args).as_deref() != Some(&launch.launch_id) {
+            bail!("live Codex launch arguments changed; cannot resume stored history");
+        }
+        let Some(thread) = resume_thread_from_args(&args) else {
+            return Ok(None);
+        };
+        threads.insert(thread);
+    }
+    Ok((threads.len() == 1)
+        .then(|| threads.into_iter().next())
+        .flatten())
+}
+
+fn resume_thread_from_args(words: &[String]) -> Option<String> {
+    let mut index = codex_args_start(words)?;
+    while let Some(word) = words.get(index) {
+        match word.as_str() {
+            "-c" | "--config" | "-C" | "--cd" | "-p" | "--profile" | "--remote" => {
+                index += 2;
+            }
+            "--yolo" | "--dangerously-bypass-approvals-and-sandbox" | "--approve-for-me" => {
+                index += 1;
+            }
+            "resume" => break,
+            _ => return None,
+        }
+    }
+    let thread = words.get(index + 1)?;
+    uuid::Uuid::try_parse(thread).ok()?;
+    if words[index + 2..].iter().any(|word| {
+        matches!(word.as_str(), "--last" | "--all" | "--fork") || word.starts_with("--fork=")
+    }) {
+        return None;
+    }
+    Some(thread.clone())
 }
 
 fn launch_in_tree(listing: &str, root: u32) -> Result<Option<String>> {
@@ -248,16 +417,26 @@ fn commands_in_tree(listing: &str, root: u32) -> Vec<(u32, &str)> {
 
 fn launch_from_command(command: &str) -> Option<String> {
     let words = shell_words::split(command).ok()?;
-    let binary = Path::new(words.first()?).file_name()?.to_str()?;
-    let codex = binary == "codex"
-        || (binary == "node"
-            && matches!(
+    launch_from_args(&words)
+}
+
+fn codex_args_start(words: &[String]) -> Option<usize> {
+    match Path::new(words.first()?).file_name()?.to_str()? {
+        "codex" => Some(1),
+        "node"
+            if matches!(
                 Path::new(words.get(1)?).file_name()?.to_str()?,
                 "codex" | "codex.js"
-            ));
-    if !codex {
-        return None;
+            ) =>
+        {
+            Some(2)
+        }
+        _ => None,
     }
+}
+
+fn launch_from_args(words: &[String]) -> Option<String> {
+    codex_args_start(words)?;
     let mut launches = words.windows(2).filter_map(|pair| {
         if !matches!(pair[0].as_str(), "-c" | "--config") {
             return None;
@@ -274,6 +453,41 @@ mod tests {
     use super::*;
     const LEFT: &str = "00000000-0000-4000-8000-000000000001";
     const RIGHT: &str = "00000000-0000-4000-8000-000000000002";
+
+    #[test]
+    fn resume_thread_requires_an_exact_unambiguous_codex_resume() {
+        let args = [
+            "node",
+            "/bin/codex",
+            "--remote",
+            "ws://localhost:8799",
+            "resume",
+            LEFT,
+        ]
+        .map(str::to_string);
+        assert_eq!(resume_thread_from_args(&args).as_deref(), Some(LEFT));
+        for command in [
+            format!("codex resume {LEFT} --fork"),
+            format!("codex resume {LEFT} --last"),
+            "codex resume --last".to_string(),
+            format!("codex -- resume {LEFT}"),
+            "codex resume invalid-thread".to_string(),
+        ] {
+            let args = shell_words::split(&command).unwrap();
+            assert!(resume_thread_from_args(&args).is_none(), "{command}");
+        }
+        for args in [
+            vec!["codex".to_string(), format!("explain resume {LEFT}")],
+            vec!["codex".to_string(), format!("resume {LEFT}")],
+            ["codex", "-C", "resume", LEFT].map(str::to_string).to_vec(),
+            ["codex", "exec", "resume", LEFT]
+                .map(str::to_string)
+                .to_vec(),
+            ["shell", "resume", LEFT].map(str::to_string).to_vec(),
+        ] {
+            assert!(resume_thread_from_args(&args).is_none(), "{args:?}");
+        }
+    }
 
     #[test]
     fn siblings_in_same_directory_do_not_share_launches() {

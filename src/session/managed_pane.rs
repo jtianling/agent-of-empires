@@ -302,7 +302,12 @@ pub(crate) fn verify_stored_location(parent: &Instance, pane: &ManagedPane) -> R
     Ok(())
 }
 
-fn require_stored_location(session: &str, id: &str, target: &str, legacy: bool) -> Result<()> {
+pub(crate) fn require_stored_location(
+    session: &str,
+    id: &str,
+    target: &str,
+    legacy: bool,
+) -> Result<()> {
     if let Some(location) = crate::tmux::managed_pane::locate(target)? {
         validate_stored_location(
             session,

@@ -39,6 +39,69 @@ aoe managed remove <完整-session-id>
 
 未指定 `--launch` 时创建 session 记录但不启动 agent 进程; 带 xats 参数时还会预留协作身份.  项目目录必须已存在, 此入口不会创建或删除 worktree、分支.  `remove` 保留代码目录与共享资源.  所有目标操作必须使用返回的完整 16 字符 session ID, 不接受标题和短前缀.
 
+`managed rename` 同步修改准确 tmux session 的名称并保存标题, 保留已有 pane、进程和对话.
+TUI 加载外部标题更新后会丢弃旧标题的延迟状态采样, 并重新检查新名称,
+避免将仍然存活的 session 误报为红叉.  新名称下的真实故障仍会正常显示.
+
+创建带 xats 身份的 Codex 主 pane 或附加 pane 时可传 `--model <模型 ID>`.  每个 pane 单独保存该值, 新建和恢复线程时均使用它; Codex 返回的实际模型不一致时启动失败.  未指定时沿用 Codex 默认设置.  此参数目前仅支持带 xats 的 Codex pane, 不修改共享配置.
+
+可同时传 `--effort <等级>` 为该 pane 指定推理强度.  启动或恢复时, AoE 显式传入该值并核对线程响应中的强度, 被拒绝或回退时启动失败.  不传时沿用默认值.  模型目录可能滞后, 不作为拒绝显式设置的依据.
+
+传入已有 Git linked worktree 的根目录时, TUI 会在 session 名称后显示其当前分支.  已有的 CLI session 同样适用, 列表刷新时更新显示.  此显示信息仅缓存在 TUI 内存中, 不会让 AoE 接管外部 worktree 的删除或清理.
+
+`managed create` 和 `managed pane create` 接入已有 linked worktree 根目录时,
+会从主仓库复用 TUI 的 agent 配置拷贝规则, 补齐未跟踪的 `.agents`、`.codex`、
+`.claude` 等目录和已知配置文件.  skills 内的符号链接保持为链接.
+已有目标目录整体保留, 单独列出的缺失配置文件仍可补齐; 已有文件和符号链接不覆盖,
+也不会穿过目标符号链接目录写入外部文件.  普通仓库及子目录不会触发补齐,
+不改变 worktree 的清理归属.  Git 识别或单项拷贝失败记录具体警告, 不阻止创建.
+
+`managed create` 与 `managed pane create` 默认保存 YOLO 模式,
+启动和恢复时复用各 runtime 的自动批准机制.  该模式仅作用于创建的 pane,
+既有记录仍按保存的模式恢复.  YOLO 不改变 manager owner、xats fence,
+也不替代用户对生产发布、转账或隐私操作的授权.
+
+带 xats 身份的 YOLO Codex pane 会在自身配置读取进程、托管服务和独立客户端 profile 中,
+显式信任该 pane 的工作目录, 避免新目录停在 Folder access 提示.
+该设置不写共享 Codex 配置, 不新增父目录或其他项目的信任条目, 非 YOLO 启动保留原有目录确认流程.
+
+已有 session 可由原管理者执行
+`aoe -p <profile> managed --context <原context绝对路径> restart <完整session-id> --yolo`,
+显式启用主 pane 和全部自有附加 pane 的 YOLO 模式并持久保存.
+该操作先验证受影响 pane 的 owner 和实际占用, 随后停止并恢复整个目标 session,
+会中断其中全部 pane 的当前进程, 并保留逻辑 ID.  含人工或其他 owner pane 时拒绝操作.
+不带 `--yolo` 的重启保留原保存模式.
+
+原共享 app-server 方案在 Codex 0.164.0 和 0.165.0 的部分 remote resume
+路径中会丢失 MCP 配置和权限.  当前候选改为每个启用 xats 的 managed Codex pane
+启动自有 loopback app-server, 使用该进程专属的 MCP 与权限配置,
+并按工作目录解析任务模型.  TUI 退出及受检 stop/remove/restart 会准确回收自有服务.
+旧 shared 记录仅在受检恢复中切换, 不停止共享 app-server; 活跃旧 thread 会拒绝迁移.
+
+自有服务候选已通过真实 Codex 0.165.0 的 Sol 原生双 pane 矩阵,
+包括真实 xats poke/steer、任务及后续工具、冷恢复、接任和旧代拒绝.
+旧 shared 0.164/0.165 到 owned 0.165 的迁移也验证了原 native thread、agent ID
+和收件游标保留, 共享服务及旁路线程继续可用.
+创建成功、Full Access 回显或 xats ready 仍不能代替任务验收.
+
+启用 xats 的 managed Codex 在创建、resume 和 restart 时, 会将 Codex 原生会话名设为该 pane 的 `name@team`, 与 `/rename` 的命名效果一致.  主 pane、附加 pane 和接任后的 pane 分别使用自己的协作身份, 不使用 AoE 的 session 标题.  此操作不创建模型回合, 不改变 thread ID 和对话历史; 无 xats 身份时不自动命名.
+
+新旧 AoE 的生命周期操作不能混用.  client_config 作为 opaque JSON 保存,
+普通并发保存可以保留内部字段, 但旧版本不认识 owned 标记和私有服务清理逻辑.
+启用自有服务前应由用户正常退出并用新版本重开访问该 profile 的旧 TUI,
+随后使用同版 managed CLI 操作.  这不要求停止全部 agent session 或重启共享 Codex 服务.
+
+旧 shared 迁移在停止旧 TUI 后, 仅将准确目标 thread 的卸载延迟设为零,
+退订并观察它从 loaded 列表消失后才交给自有服务.
+不会修改共享 server 的全局保留策略.  若有其他客户端保持订阅或服务无法卸载,
+会带准确目标和最后状态超时失败; 保留原记录, 使用同一 context 和完整 ID 重试,
+不要重复 create、改存储或回滚旧 fence/token.
+
+完整运行验收为 Linux arm64 隔离结果; macOS 本轮只做编译及只读登记核对,
+没有在业务现场启用.  资源采样的一对 Sol/high agent 含 TUI/wrapper 与独立 daemon
+约用 PSS 1395.47 MiB, 5 秒空闲窗口约占单核 CPU 0.8%.
+实际只测 1→2 agent, 不能据此承诺宿主容量或真实云模型、复杂 MCP 的成本.
+
 自动 xats 身份启动首批支持 `codex`、`claude` 和 `opencode`.  `kimi` 的共享引擎目前不能注入会话独立的 managed 凭据, 因此 `--tool kimi` 与 xats 参数组合会在创建前拒绝.  不带 xats 参数的 managed Kimi session 可正常创建.
 
 自动注册需要配套支持 `/api/managed/{prepare,bind,status,release}` v1 的 xats daemon.  旧 daemon 不会被自动更新, 接口不可用时会明确失败.  配套实现已完成独立容器中的 Codex、Claude、OpenCode 实际启动和重启验收, 尚未替换生产 daemon.
@@ -47,7 +110,16 @@ aoe managed remove <完整-session-id>
 
 ## 单独管理 pane
 
-本轮新增 pane 功能以 Codex、OpenCode 和通用终端操作为交付验收范围.  Claude 接入代码保留, 但新增 pane 的冷恢复连续性按用户要求暂缓处理, 不宣称已通过验收.
+上一轮新增 pane 的 Claude 冷恢复连续性曾暂缓验收.
+当前已补齐 Claude 主/附加 pane 及接任后的恢复, 包括没有 xats 和没有 AoE TUI 的场景.
+已完成真实对话的原生 ID 需要在停止或换代前准确保存,
+不把预分配 UUID、进程就绪或 xats ready 单独当作对话可恢复的证明.
+独立验收使用真实 Claude Code 2.1.299 和隔离的本地模型协议夹具,
+验证了原生对话 ID、实际工具结果、接任后对话连续性及 Fresh 失败后的同 ID 重试.
+Claude 的 HTTP MCP 读信与 Channels 唤醒分别判断.
+本轮离线夹具的 Channels 受 host 可用性门控阻塞, 不宣称通道唤醒端到端通过.
+官方支持 Console API key 或 claude.ai 认证使用 Channels, 还受 rollout、协议和组织策略控制;
+不能仅凭 xats ready 判定 Claude 已接收唤醒并读信.
 
 先列出 pane, 后续使用返回的完整 `pane_id`, 并同时传完整 session ID.  `slot`、tmux `%pane` 和左右位置仅用于观察, 不能作为受限命令的操作 ID.  人工或未知 pane 的 `pane_id` 为 null, 不会因位于自有 session 中而自动获得管理权限.
 
@@ -86,6 +158,17 @@ aoe session set-owner <完整-session-id> --context /absolute/path/other-manager
 创建可能在记录保存后启动或注册失败.  此时 `create_incomplete` 错误携带 `session_id`, 应使用这个 ID 查看和重试, 不要盲目重复创建.  session 进程状态与 xats 注册就绪是两个独立结果, 不应把创建成功当作已经加入协作.  xats 身份冲突会失败, 不自动改名或覆盖已有协作者.
 
 列表中的 `status_source: "stored"` 表示状态来自 AoE 保存的数据, 不是实时进程探测.  xats 就绪由精确身份状态查询确认.  并发修改同一记录可能返回冲突, 应重新读取后再操作, 不要直接覆盖存储文件.
+
+普通 `aoe send` 与两种 managed send 共用具名临时缓冲区传输,
+向准确目标执行显式粘贴后再发送提交键.  应用启用 bracketed paste 时,
+文本作为一次粘贴事件输入, 避免快速逐字输入导致 Enter 被当作粘贴内换行.
+缓冲区在粘贴后删除, 加载或粘贴失败不会继续发送提交键.
+`sent=true` 表示传输和提交键命令成功, 不表示应用已执行任务.
+
+发送修复已在隔离容器中通过真实 Codex 0.164.0 local/remote TUI 的文本、
+`/status`、Unicode 和多行输入验收, 并验证 Bash、准确目标、缓冲区隔离及故障处理.
+AoE 保留传输字节, Codex 提交时会去掉消息尾部换行.  此项验收仅覆盖发送链路,
+不代表 managed Codex 创建、MCP 身份保持或其他 runtime 的完整生命周期验收.
 
 自动 xats Codex 暂不接受配置中的自定义启动命令或额外启动参数, 避免参数覆盖受控 thread 或 profile.  模型使用当前 Codex 默认配置.
 

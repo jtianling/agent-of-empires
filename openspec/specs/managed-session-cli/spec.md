@@ -30,6 +30,68 @@
 - **WHEN** 使用标题、ID 前缀或空 ID 执行目标操作
 - **THEN** 拒绝而不触发任何 session 操作
 
+### Requirement: 接入已有 worktree 时同步 agent 配置
+
+`managed create` 和 `managed pane create` 接入已有 linked worktree 根目录时,
+系统 SHALL 从主仓库复用 TUI 的 agent 配置拷贝规则, 补齐未跟踪的 agent 目录及已知配置文件,
+保留 skills 中的符号链接.  系统 SHALL 保留已有目标目录、文件和符号链接,
+仅允许单独列出的缺失配置文件在已有目录内补齐, 且不得穿过目标符号链接祖先写到外部.
+普通仓库及子目录 SHALL 不触发此同步.  同步 SHALL 不接管外部 worktree 的删除归属,
+Git 识别或单项拷贝失败 SHALL 记录具体警告并继续创建.
+
+#### Scenario: 外部创建 worktree 后接入
+- **WHEN** 管理者先创建 linked worktree, 再通过 managed CLI 创建 session 或 pane
+- **THEN** 缺失的未跟踪 agent 配置和 skills 按现有规则补齐, 外部 worktree 归属保持原状
+
+#### Scenario: 重复接入已有配置的 worktree
+- **WHEN** 目标 worktree 已有 agent 目录、配置文件或符号链接
+- **THEN** 保留已有内容和链接, 不合并覆盖整个目录, 不写入链接指向的外部目录
+
+#### Scenario: Git 库无法识别目录
+- **WHEN** 有效工作目录的 Git 元数据无法由当前 Git 库读取
+- **THEN** 记录具体同步警告并跳过可选同步, managed session 或 pane 仍可创建
+
+### Requirement: 指定 Codex 主 pane 模型
+
+带 xats 的 Codex 主 pane MAY 在 `managed create` 时通过 `--model` 指定模型.  系统 SHALL 在新建及恢复线程时使用该模型并验证 Codex 返回值, 不一致时拒绝启动, 未指定时使用默认配置.
+
+指定模型时 MAY 通过 `--effort` 指定推理强度.  系统 SHALL 在启动及恢复时显式传入并核对返回的强度, 被拒绝或回退时启动失败, 不以可能滞后的模型目录阻挡显式设置.
+
+### Requirement: 默认无人值守模式
+
+`managed create` SHALL 为主 pane 默认保存已有的 YOLO 模式,
+并在 start、restart 与 stop 后 start 时保留保存的模式.
+系统 SHALL 复用对应 runtime 的批准机制, 不修改人工 session 或共享全局默认.
+YOLO SHALL 不改变 owner 检查、xats 身份 fence 或用户指令中的授权边界.
+
+带 xats 的 YOLO Codex pane SHALL 在配置读取进程、托管服务和独立客户端 profile 中,
+显式信任其准确工作目录, 避免 Folder access 确认阻塞.
+系统 SHALL 不修改共享 Codex 配置, 非 YOLO 启动 SHALL 保留原有目录确认流程.
+
+系统 SHALL 提供显式 `managed restart <id> --yolo`, 在 owner 与实际占用检查通过后,
+仅对准确目标主 pane 和全部自有附加 pane 保存 YOLO 模式并停止后恢复整个 session.
+既有保存为 false 的记录 SHALL 不因普通 start 或 restart 被自动升级.
+
+#### Scenario: 新建与恢复 managed agent
+- **WHEN** 管理者创建受支持 runtime 的 managed agent 并恢复该 session
+- **THEN** 主 pane 的 YOLO 配置保持启用, 同 runtime 的人工默认配置保持原值
+
+#### Scenario: 无 xats 的 Claude 对话恢复
+- **WHEN** 无 xats 的受管 Claude 主 pane 已完成真实对话, 随后重启或停止后启动
+- **THEN** 使用原生 resume 延续准确对话, 即使没有 AoE TUI 也不以旧 UUID 执行 fresh 创建
+
+#### Scenario: 主 pane 尚无对话而附加 pane 已有对话
+- **WHEN** 管理者恢复主 Claude pane 尚无可恢复对话的 session, 其附加 pane 已有真实对话
+- **THEN** 主 pane 可以选择 fresh, 附加 pane 独立恢复原有对话, 不继承主 pane 的 fresh 决策
+
+#### Scenario: 显式升级旧 session
+- **WHEN** 原管理者对旧 session 执行带 `--yolo` 的受限 restart
+- **THEN** 主 pane 和自有附加 pane 保存并恢复 YOLO 模式, 逻辑 ID 保留
+
+#### Scenario: 升级目标含外来 pane
+- **WHEN** 目标包含人工、其他 owner 或实际占用无法确认的 pane
+- **THEN** 在修改持久模式或停止进程之前拒绝操作
+
 ### Requirement: 人工管理权
 
 系统 SHALL 保留人工 TUI 和原 CLI 管理所有 session 的能力, 并提供人工显式接管或转移所有权入口.  受限入口 SHALL 不提供任意认领、转移他人 session 的能力.
@@ -57,6 +119,38 @@ managed 删除 SHALL 仅处理准确 session 的运行资源和元数据, 保留
 #### Scenario: 并发删除
 - **WHEN** 一个入口删除 session 后另一个入口保存旧快照
 - **THEN** 被删除的 session 不会复活
+
+### Requirement: Managed Codex 自有服务
+
+启用 xats 的 managed Codex pane SHALL 使用各自的 loopback app-server,
+通过该服务端进程专属配置保持当前代 MCP 凭据、provider 与保存的权限模式.
+TUI high reasoning resume、冷恢复及 xats poke 的无配置 resume SHALL 保持这些设置.
+任务模型 SHALL 继续按工作目录的有效配置解析, 不改共享用户模型或人工默认.
+
+系统 SHALL 记录每个自有服务的准确 pane ID、launch ID、端点、PID 和进程启动身份.
+端点 SHALL 来自该自有进程成功监听后的实际结果, 不猜端口或接管现有监听者.
+停止、删除、重启和失败回滚 SHALL 只回收已验证属于该 pane 的进程组,
+拒绝 PID、进程组或身份复用, 并保留具体失败原因.
+旧代 TUI 退出 SHALL 不回收新代服务, 主 pane 接任 SHALL 保留接任者的服务身份.
+
+#### Scenario: 双 pane 独立任务
+- **WHEN** 主 pane 和附加 pane 分别通过真实 xats poke 收到不同任务
+- **THEN** 两者使用不同端点与 thread, 各自读取准确任务并能继续调用工具,
+  不出现 MCP 人工审批, 不读取邻 pane 的任务
+
+#### Scenario: 原 shared runtime 迁移
+- **WHEN** 原管理者通过受检生命周期恢复旧 shared runtime 记录
+- **THEN** 使用准确 previous fence 准备新代, 检查旧 thread 状态并切到自有端点,
+  保留逻辑身份和收件进度, 不终止 shared app-server 或旁路线程
+
+#### Scenario: 活跃旧 thread
+- **WHEN** 旧 shared thread 仍有活跃任务或其状态无法确认
+- **THEN** 明确拒绝不安全迁移, 不猜测空闲或按其他 thread 替换目标
+
+#### Scenario: 自有服务启动失败
+- **WHEN** 监听、配置、绑定、保存或 TUI 启动失败
+- **THEN** 保留可重试的准确元数据, 回收本次已验证的服务,
+  不遗留未知进程或端口, 不改其他 pane 的服务
 
 ### Requirement: xats 预设身份与恢复
 
