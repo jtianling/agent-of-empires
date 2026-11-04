@@ -382,6 +382,9 @@ fn launch_in_tree(listing: &str, root: u32) -> Result<Option<String>> {
 }
 
 fn commands_in_tree(listing: &str, root: u32) -> Vec<(u32, &str)> {
+    if root == 0 {
+        return Vec::new();
+    }
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut commands = HashMap::new();
     for line in listing.lines() {
@@ -453,6 +456,12 @@ mod tests {
     use super::*;
     const LEFT: &str = "00000000-0000-4000-8000-000000000001";
     const RIGHT: &str = "00000000-0000-4000-8000-000000000002";
+
+    #[test]
+    fn dead_pane_pid_does_not_include_other_processes() {
+        let listing = "1 0 /sbin/launchd\n2 1 codex\n";
+        assert!(commands_in_tree(listing, 0).is_empty());
+    }
 
     #[test]
     fn resume_thread_requires_an_exact_unambiguous_codex_resume() {
