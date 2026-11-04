@@ -243,10 +243,9 @@ pub(crate) async fn current_launch_id_async(pane: &str) -> Result<Option<String>
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let pane_pid = String::from_utf8(output.stdout)?
-        .trim()
-        .parse::<u32>()
-        .context("Invalid Codex name pane PID")?;
+    let Some(pane_pid) = parse_pane_pid(String::from_utf8(output.stdout)?.trim())? else {
+        return Ok(None);
+    };
     let mut ps = Command::new("ps");
     ps.args(["-Ao", "pid=,ppid=,command="]);
     let output = crate::process::output_with_timeout(ps, timeout).await?;
@@ -285,7 +284,9 @@ fn read_launch_checked(pane: &str, require_bound: bool) -> Result<Option<Launch>
     let (session_name, cwd) = location
         .split_once('\t')
         .context("invalid Codex pane location response")?;
-    let pane_pid = pid.parse::<u32>().context("invalid Codex pane pid")?;
+    let Some(pane_pid) = parse_pane_pid(pid)? else {
+        return Ok(None);
+    };
     let output = Command::new("ps")
         .args(["-Ao", "pid=,ppid=,command="])
         .output()
@@ -316,6 +317,14 @@ fn read_launch_checked(pane: &str, require_bound: bool) -> Result<Option<Launch>
         cwd: cwd.to_string(),
         session_name: session_name.to_string(),
     }))
+}
+
+fn parse_pane_pid(value: &str) -> Result<Option<u32>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let pid = value.parse::<u32>().context("Invalid Codex pane PID")?;
+    Ok((pid != 0).then_some(pid))
 }
 
 fn is_codex_command(command: &str) -> bool {
@@ -456,6 +465,14 @@ mod tests {
     use super::*;
     const LEFT: &str = "00000000-0000-4000-8000-000000000001";
     const RIGHT: &str = "00000000-0000-4000-8000-000000000002";
+
+    #[test]
+    fn missing_and_dead_panes_have_no_process() {
+        assert_eq!(parse_pane_pid("").unwrap(), None);
+        assert_eq!(parse_pane_pid("0").unwrap(), None);
+        assert_eq!(parse_pane_pid("42").unwrap(), Some(42));
+        assert!(parse_pane_pid("invalid").is_err());
+    }
 
     #[test]
     fn dead_pane_pid_does_not_include_other_processes() {
