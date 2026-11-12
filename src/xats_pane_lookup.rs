@@ -15,7 +15,7 @@ pub(crate) struct PaneTarget {
 }
 
 impl PaneTarget {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             Path::new(&self.socket_path).is_absolute()
                 && !self.socket_path.chars().any(char::is_control),

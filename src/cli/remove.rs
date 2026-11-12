@@ -192,6 +192,8 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
             found = true;
             removed_title = inst.title.clone();
 
+            crate::xats_release::release_session(profile, &inst)?;
+
             if crate::session::managed_pane::has_managed_state(&inst) {
                 inst.source_profile = profile.to_string();
                 inst.stop()?;

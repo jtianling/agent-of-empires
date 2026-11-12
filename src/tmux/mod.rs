@@ -122,7 +122,11 @@ pub(crate) fn tmux_command() -> Command {
 }
 
 pub(crate) fn profile_command(profile: &str) -> Command {
-    let mut command = build_tmux_command(Some(&socket_name_for_profile(profile)));
+    let mut command = if cfg!(test) {
+        tmux_command()
+    } else {
+        build_tmux_command(Some(&socket_name_for_profile(profile)))
+    };
     command.env_remove("TMUX").env_remove("TMUX_PANE");
     command
 }
@@ -603,6 +607,20 @@ mod tests {
         cmd.get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn profile_inventory_uses_private_test_socket_without_ambient_tmux() {
+        let command = profile_command("default");
+        assert_eq!(
+            cmd_args(&command),
+            ["-L".to_string(), format!("aoe_test_{}", std::process::id())]
+        );
+        for variable in ["TMUX", "TMUX_PANE"] {
+            assert!(command
+                .get_envs()
+                .any(|(key, value)| key == variable && value.is_none()));
+        }
     }
 
     #[test]

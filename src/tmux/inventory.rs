@@ -16,10 +16,35 @@ pub(crate) struct Pane {
 }
 
 pub(crate) async fn observe(profile: &str) -> Result<Vec<Pane>> {
-    let mut command = tokio::process::Command::from(super::profile_command(profile));
-    command
-        .args(["list-panes", "-a", "-F", FORMAT])
-        .kill_on_drop(true);
+    let mut command = super::profile_command(profile);
+    command.args(["list-panes", "-a", "-F", FORMAT]);
+    observe_command(command, false).await
+}
+
+pub(crate) async fn observe_session(profile: &str, session: &str) -> Result<Vec<Pane>> {
+    let mut command = super::profile_command(profile);
+    command.args([
+        "list-panes",
+        "-s",
+        "-t",
+        &format!("={session}"),
+        "-F",
+        FORMAT,
+    ]);
+    let panes = observe_command(command, true).await?;
+    ensure!(
+        panes.iter().all(|pane| pane.session == session),
+        "Tmux pane inventory returned another session"
+    );
+    Ok(panes)
+}
+
+async fn observe_command(
+    command: std::process::Command,
+    allow_missing_session: bool,
+) -> Result<Vec<Pane>> {
+    let mut command = tokio::process::Command::from(command);
+    command.kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(5), command.output())
         .await
         .context("Timed out inspecting tmux panes")?
@@ -29,6 +54,7 @@ pub(crate) async fn observe(profile: &str) -> Result<Vec<Pane>> {
         if detail.contains("no server running on")
             || (detail.contains("error connecting to")
                 && detail.contains("No such file or directory"))
+            || (allow_missing_session && detail.contains("can't find session:"))
         {
             return Ok(Vec::new());
         }

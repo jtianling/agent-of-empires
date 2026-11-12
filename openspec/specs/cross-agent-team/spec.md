@@ -494,3 +494,44 @@ An identity key that no longer corresponds to a known identity SHALL be treated 
 - **WHEN** reconciler 首次 adopt 一个没有 durable pane config 的非 primary pane
 - **THEN**该 pane 的 Cross Agent Team SHALL 初始化为 false
 - **AND** primary pane 的 enabled 值 SHALL 不复制到该 pane
+
+### Requirement: 删除 session 前释放 pane 的 xats 身份
+
+AoE SHALL 在 CLI remove, TUI 单条删除和组删除停止 session 或清理资源之前,
+通过本机 xats 控制面批量反注册该 session 中可核验的非托管 pane 成员,
+释放成员的 name/team.  请求 SHALL 携带精确的 socket 路径, server PID,
+server 启动时间和 pane ID, 并在已知时携带该 pane 自己的 durable identity key
+及精确 OpenCode session ID.  手动启动且没有 key 的 pane SHALL 仍按精确载体核验,
+不得按标题, name/team 猜测成员.  托管身份 SHALL 继续使用原有 fenced release.
+
+所有目标 SHALL 在一个批次中验证并释放, AoE SHALL 校验完整有序的成功响应后
+继续删除.  API 缺失, 服务不可用, 身份移位, 歧义或无效响应 SHALL 明确记录具体
+原因并阻止后续资源删除, 不得静默跳过或改用按 agent ID 删除的接口.
+诊断 SHALL 隐去 identity key 和 bearer token.
+
+#### Scenario: 左右 pane 一次释放后删除
+
+- **WHEN** 用户删除一个左右 pane 都有 xats 身份的 session
+- **THEN** AoE SHALL 在停止进程和清理资源前提交一次批量 release 请求
+- **AND** 每个目标 SHALL 使用自己的 pane 坐标和 identity key
+- **AND** 所有目标释放成功后 SHALL 继续原有 session 删除流程
+
+#### Scenario: 身份冲突保留 session
+
+- **WHEN** xats 拒绝任意目标, 或返回缺少目标的成功响应
+- **THEN** AoE SHALL 保留 session 及其资源
+- **AND** 显示和记录具体错误, 方便用户重试
+
+#### Scenario: 已停止的 pane 仍占用身份
+
+- **WHEN** durable identity key 对应的 pane 已不存在
+- **THEN** AoE SHALL 查询该 key 是否仍有成员占用
+- **AND** 只有明确的业务 not_found SHALL 允许跳过该 key
+- **AND** 仍有成员占用, 查询失败或接口缺失 SHALL 阻止删除
+
+#### Scenario: 未使用 xats 且本机未安装 daemon
+
+- **WHEN** session 没有已知 xats key 或启用标记
+- **AND** 本机 daemon 的 PID 文件不存在
+- **THEN** AoE SHALL 正常执行普通 session 删除
+- **AND** 其他发现或连接错误 SHALL 不视为未安装

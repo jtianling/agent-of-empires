@@ -301,6 +301,7 @@ pub(super) fn remove(
     persist_release_preparation(storage, instances, groups, index)?;
     let instance = &instances[index];
     let id = instance.id.clone();
+    crate::xats_release::release_session(storage.profile(), instance)?;
     instance.stop()?;
     crate::managed_xats::release(instance)?;
     if instance.tool == "codex" {

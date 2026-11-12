@@ -66,6 +66,15 @@ impl DeletionPoller {
         if crate::session::managed_pane::has_managed_state(&request.instance) {
             return Self::perform_managed_deletion(request);
         }
+        if let Err(error) =
+            crate::xats_release::release_session(&request.profile, &request.instance)
+        {
+            return DeletionResult {
+                session_id: request.session_id.clone(),
+                success: false,
+                error: Some(format!("{error:#}")),
+            };
+        }
         Self::perform_resources_deletion(request)
     }
 
@@ -100,6 +109,7 @@ impl DeletionPoller {
         storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))?;
         let mut instance = instances[index].clone();
         instance.source_profile = request.profile.clone();
+        crate::xats_release::release_session(&request.profile, &instance)?;
         instance.stop()?;
         crate::managed_xats::release(&instance)?;
         crate::managed_codex::cleanup(&instance)?;

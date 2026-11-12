@@ -85,7 +85,10 @@ def main():
             bin_dir = root / "bin"
             bin_dir.mkdir()
             sentinel = bin_dir / "tmux"
-            sentinel.write_text('#!/bin/sh\necho "$*" >> "$HOME/tmux.log"\nexit 1\n')
+            sentinel.write_text(
+                '#!/bin/sh\necho "$*" >> "$HOME/tmux.log"\n'
+                'echo "no server running on private smoke socket" >&2\nexit 1\n'
+            )
             sentinel.chmod(0o700)
             context = root / "manager.json"
             env = {"HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
@@ -141,7 +144,7 @@ def main():
             }
             sessions_path.write_text(json.dumps(records))
             failure = call("remove", session_id, success=False)
-            assert "profile path" in failure["error"]["message"]
+            assert "profile path" in failure["error"]["message"], failure
             records = json.loads(sessions_path.read_text())
             record = next(item for item in records if item["id"] == session_id)
             assert record["managed_xats"]["claim"]["fence"]["instance_id"] == pending
