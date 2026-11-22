@@ -379,7 +379,11 @@ impl Session {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            Ok(String::new())
+            bail!(
+                "Failed to capture pane {}: {}",
+                pane_id,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         }
     }
 }

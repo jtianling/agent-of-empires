@@ -35,7 +35,7 @@ impl Store {
         }
         transaction.execute(
             "UPDATE agent_slot SET agent = ?1, native_session_id = '', model = '', \
-             model_fingerprint = '' WHERE instance_id = ?2 AND slot = ?3",
+             model_fingerprint = '', runtime_settings = '' WHERE instance_id = ?2 AND slot = ?3",
             params![target, instance_id, slot],
         )?;
         transaction.execute(

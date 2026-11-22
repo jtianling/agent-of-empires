@@ -10,6 +10,48 @@ use serde_json::Value;
 
 const STATE_DATABASE: &str = "state_5.sqlite";
 
+pub(super) fn indexed_rollout(thread: &str) -> Result<Option<(PathBuf, PathBuf)>> {
+    let home = match std::env::var_os("CODEX_HOME") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        Some(_) => anyhow::bail!("CODEX_HOME must not be empty"),
+        None => dirs::home_dir()
+            .context("Missing home directory")?
+            .join(".codex"),
+    };
+    indexed_in(&home, thread)
+}
+
+pub(super) fn indexed_in(home: &Path, thread: &str) -> Result<Option<(PathBuf, PathBuf)>> {
+    use rusqlite::OptionalExtension;
+    let database = home.join(STATE_DATABASE);
+    if !database.try_exists()? {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .context("Reading Codex history settings")?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT rollout_path, cwd FROM threads WHERE id = ?1",
+            [thread],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(path, cwd)| (path.into(), cwd.into())))
+}
+
+pub(super) fn physical_rollout(path: &Path) -> Result<PathBuf> {
+    if path.extension().is_some_and(|ext| ext == "jsonl") {
+        match fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(path.with_extension("jsonl.zst"));
+            }
+            Err(error) => return Err(error).context("Inspecting Codex rollout"),
+        }
+    }
+    Ok(path.to_owned())
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -198,10 +240,11 @@ fn migrate(
         thread.cwd.canonicalize()? == cwd,
         "Codex history belongs to another directory"
     );
-    let rollout = thread
+    let path = thread
         .path
         .as_ref()
-        .context("Codex history has no local rollout path")?
+        .context("Codex history has no local rollout path")?;
+    let rollout = physical_rollout(path)?
         .canonicalize()
         .context("Resolving Codex rollout")?;
     let home = home
@@ -280,7 +323,7 @@ fn validate_record(
         "Codex database directory mismatch"
     );
     ensure!(
-        Path::new(&path).canonicalize()? == rollout,
+        physical_rollout(Path::new(&path))?.canonicalize()? == rollout,
         "Codex database rollout mismatch"
     );
     Ok(())

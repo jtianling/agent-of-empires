@@ -376,6 +376,13 @@ pub(super) fn verify(instance: &Instance, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn is_live(instance: &Instance) -> Result<bool> {
+    let Some(server) = read_record(instance)? else {
+        return Ok(false);
+    };
+    Ok(crate::process::start_identity(server.pid)?.as_deref() == Some(&server.start_identity))
+}
+
 pub(super) fn stop(instance: &Instance, current_launch_only: bool) -> Result<()> {
     let _lock = lock(instance)?;
     let Some(server) = read_record(instance)? else {

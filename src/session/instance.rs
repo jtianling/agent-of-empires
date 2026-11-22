@@ -25,6 +25,7 @@ mod managed_pane_lifecycle;
 mod managed_panes;
 mod managed_recovery;
 mod relaunch_dir;
+mod runtime_settings;
 
 pub(crate) trait PaneConfigTarget {
     fn resolve_for(self, instance: &Instance) -> PaneConfig;
@@ -122,8 +123,15 @@ mod pane_level_command_tests {
             native_session_id: String::new(),
             identity_key: String::new(),
         };
-        let command =
-            instance.build_pane_command_with_runtime(&pane, None, true, None, None, Some(&runtime));
+        let command = instance.build_pane_command_with_runtime(
+            &pane,
+            None,
+            true,
+            None,
+            None,
+            None,
+            Some(&runtime),
+        );
 
         let error = require_launch_command(SessionLaunch::Agent, command, "opencode").unwrap_err();
         assert!(format!("{error:#}").contains("Could not build opencode launch command"));
@@ -157,6 +165,7 @@ mod pane_level_command_tests {
                 true,
                 Some("left-key"),
                 None,
+                None,
                 Some(&left),
             )
             .unwrap();
@@ -166,6 +175,7 @@ mod pane_level_command_tests {
                 Some("ses_right"),
                 false,
                 Some("right-key"),
+                None,
                 None,
                 Some(&right),
             )
@@ -250,6 +260,7 @@ mod pane_level_command_tests {
                 true,
                 Some("super-secret-key"),
                 None,
+                None,
                 Some(&runtime),
             )
             .unwrap();
@@ -285,6 +296,7 @@ mod pane_level_command_tests {
                 None,
                 true,
                 Some("super-secret-key"),
+                None,
                 None,
                 Some(&runtime),
             )
@@ -325,6 +337,7 @@ mod pane_level_command_tests {
                 RestartMode::Resume,
                 Some("stable-key"),
                 None,
+                None,
                 Some(&resumed_runtime),
             )
             .unwrap();
@@ -337,6 +350,7 @@ mod pane_level_command_tests {
                 true,
                 RestartMode::Fresh,
                 Some("stable-key"),
+                None,
                 None,
                 Some(&fresh_runtime),
             )
@@ -378,6 +392,7 @@ mod pane_level_command_tests {
                 &pane,
                 None,
                 true,
+                None,
                 None,
                 None,
                 Some(&runtime)
@@ -1744,9 +1759,14 @@ impl Instance {
             };
         }
         match codex_app_server_endpoint() {
-            Ok(endpoint) => {
-                self.codex_xats_bootstrap_command_for(cmd, base, working_dir, &endpoint)
-            }
+            Ok(endpoint) => self.codex_xats_bootstrap_command_for_mode(
+                cmd,
+                base,
+                working_dir,
+                &endpoint,
+                !(super::managed_pane::has_managed_state(self)
+                    || is_primary && self.has_command_override()),
+            ),
             Err(diagnostic) => {
                 tracing::warn!("{}", diagnostic);
                 codex_xats_aborted_command(&diagnostic)
@@ -1769,12 +1789,24 @@ impl Instance {
     /// exec-ing it and the leader becomes `sh`, which matches nothing, so xats
     /// finds no leader among the matches and never binds the pane. It reports
     /// nothing: the pane registers, and delivery silently never arrives.
+    #[cfg(test)]
     fn codex_xats_bootstrap_command_for(
         &self,
         cmd: &str,
         base: &str,
         working_dir: &str,
         endpoint: &CodexAppServerEndpoint,
+    ) -> String {
+        self.codex_xats_bootstrap_command_for_mode(cmd, base, working_dir, endpoint, true)
+    }
+
+    fn codex_xats_bootstrap_command_for_mode(
+        &self,
+        cmd: &str,
+        base: &str,
+        working_dir: &str,
+        endpoint: &CodexAppServerEndpoint,
+        durable: bool,
     ) -> String {
         let suffix = cmd.strip_prefix(base).unwrap_or_default();
         let name_monitor =
@@ -1789,6 +1821,15 @@ impl Instance {
              -c \"xats.agent_id=\\\"${{xats_agent_id}}\\\"\" \
              -c \"shell_environment_policy.set.XATS_CODEX_LAUNCH_ID=\\\"${{xats_agent_id}}\\\"\"{suffix}"
         );
+        let (prepare_arguments, launch_command) = if durable {
+            match self.codex_durable_launch_command(&codex_command, working_dir.as_str(), endpoint)
+            {
+                Ok(commands) => commands,
+                Err(error) => return codex_xats_aborted_command(&format!("{error:#}")),
+            }
+        } else {
+            (String::new(), codex_command)
+        };
         // Keep npm project configuration out of pre-registration without changing Codex's cwd.
         let script = format!(
             "if [ -z \"${{TMUX_PANE:-}}\" ]; then \
@@ -1829,6 +1870,7 @@ impl Instance {
                  printf '%s\\n' '{app_server_unavailable}' >&2; \
                  exit 1; \
              fi; \
+             {prepare_arguments} \
              pre_register_failed=; \
              if [ -n \"${{{identity_env}:-}}\" ]; then \
                  (cd / && npx --yes {package} pre-register-codex-pane \
@@ -1846,7 +1888,7 @@ impl Instance {
                  exit 1; \
              fi; \
              {name_monitor} \
-             exec {codex_command}",
+             exec {launch_command}",
             host = shell_escape(&endpoint.host),
             port = endpoint.port,
             package = CODEX_XATS_PACKAGE,
@@ -1861,6 +1903,39 @@ impl Instance {
             app_server_unavailable = codex_xats_app_server_unavailable(&endpoint.url),
         );
         format!("sh -c {}", shell_escape(&script))
+    }
+
+    fn codex_durable_launch_command(
+        &self,
+        command: &str,
+        escaped_dir: &str,
+        endpoint: &CodexAppServerEndpoint,
+    ) -> Result<(String, String)> {
+        let executable = std::env::current_exe().context("Locating Codex launch helper")?;
+        let executable = executable
+            .to_str()
+            .context("Invalid Codex launch helper path")?;
+        let instance = self
+            .managed_pane_target
+            .as_ref()
+            .map(|target| target.session_id.as_str())
+            .unwrap_or(&self.id);
+        let prepare = format!(
+            "command_file=\"$(printf '%s\\000' {command} | {} __codex-arguments)\" || exit 1; \
+             trap 'rm -f \"$command_file\"' EXIT;",
+            shell_escape(executable)
+        );
+        let launch = format!(
+            "{} -p {} __codex-launch --instance-id {} \
+            --launch-id \"$xats_agent_id\" --endpoint {} --working-directory {} \
+            --command-file \"$command_file\"",
+            shell_escape(executable),
+            shell_escape(&self.managed_profile()),
+            shell_escape(instance),
+            shell_escape(&endpoint.url),
+            escaped_dir
+        );
+        Ok((prepare, launch))
     }
 
     fn has_custom_command(&self) -> bool {
@@ -2006,6 +2081,10 @@ impl Instance {
             return Ok(());
         }
 
+        if launch == SessionLaunch::Agent && self.tool == "codex" && !self.has_command_override() {
+            self.capture_primary_runtime_settings()?;
+        }
+
         if launch == SessionLaunch::Agent && self.managed_xats.is_some() {
             crate::managed_codex::prepare(self)?;
             crate::managed_runtimes::prepare(self)?;
@@ -2102,6 +2181,7 @@ impl Instance {
                     .map(|runtime| runtime.identity_key.as_str())
                     .filter(|key| !key.is_empty()),
                 observed_model.as_deref(),
+                None,
                 exact_runtime.as_ref(),
             ),
             SessionLaunch::Placeholder => None,
@@ -2199,7 +2279,25 @@ impl Instance {
                 &pane_id,
                 self.xats_identity_key.as_deref().unwrap_or(""),
                 crate::db::now_unix(),
-            )
+            )?;
+            if self.tool == "codex"
+                && self.primary_pane.cross_agent_team
+                && !self.is_sandboxed()
+                && !self.has_command_override()
+            {
+                let slot = store
+                    .read_slots_for_instance(&self.id)?
+                    .into_iter()
+                    .find(|slot| slot.slot == 0)
+                    .context("Primary Codex slot is unavailable")?;
+                if slot.tmux_pane != pane_id {
+                    anyhow::ensure!(
+                        store.rebind_codex_launch_slot(&slot, &pane_id, &self.project_path)?,
+                        "Primary Codex slot changed before launch binding"
+                    );
+                }
+            }
+            Ok(())
         }
     }
 
@@ -2341,6 +2439,7 @@ impl Instance {
             None,
             false,
             Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
+            None,
             None,
             Some(&runtime),
         );
@@ -2662,6 +2761,7 @@ impl Instance {
             slot_identity_key,
             None,
             None,
+            None,
         )
     }
 
@@ -2676,11 +2776,51 @@ impl Instance {
         is_primary: bool,
         slot_identity_key: Option<&str>,
         observed_model: Option<&str>,
+        runtime_settings: Option<&crate::db::runtime_settings::RuntimeSettings>,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<String> {
         let pane = target.resolve_for(self);
         let agent = crate::agents::get_agent(&pane.tool);
         let is_primary = is_primary && self.pane_runs_instance_tool(&pane.tool);
+        let settings = if is_primary && self.has_command_override() {
+            None
+        } else if let Some(settings) = runtime_settings {
+            Some(settings.clone())
+        } else {
+            match self.pane_runtime_settings(
+                &pane.tool,
+                is_primary,
+                slot_identity_key,
+                resume_token,
+            ) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    tracing::error!("Cannot read pane settings: {error:#}");
+                    return None;
+                }
+            }
+        };
+        let extra_args = if settings.is_some() {
+            match crate::db::runtime_settings::RuntimeSettings::launch_args(&self.extra_args) {
+                Ok(args) => Some(args),
+                Err(error) => {
+                    tracing::error!("Cannot restore Codex launch arguments: {error:#}");
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let decorate = |command| match &settings {
+            Some(settings) => match settings.append_command(command, &pane.tool) {
+                Ok(command) => Some(command),
+                Err(error) => {
+                    tracing::error!("Cannot restore pane settings: {error:#}");
+                    None
+                }
+            },
+            None => Some(command),
+        };
 
         if self.is_sandboxed() {
             // A shared-server agent's conversation is minted on a server that
@@ -2700,8 +2840,13 @@ impl Instance {
             let sandbox = self.sandbox_info.as_ref()?;
             let container = DockerContainer::from_session_id(&self.id);
 
-            let base_cmd =
-                self.build_base_pane_command(agent, resume_token, is_primary, observed_model);
+            let base_cmd = decorate(self.build_base_pane_command(
+                agent,
+                resume_token,
+                is_primary,
+                observed_model,
+                extra_args.as_deref(),
+            ))?;
             let mut tool_cmd = if pane.yolo_mode {
                 if let Some(yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
@@ -2776,8 +2921,10 @@ impl Instance {
                             resume_token,
                             is_primary,
                             observed_model,
+                            extra_args.as_deref(),
                         ),
                     };
+                    cmd = decorate(cmd)?;
                     let mut env_vars: Vec<(&str, &str)> = Vec::new();
                     if needs_instance_id {
                         env_vars.push(("AOE_INSTANCE_ID", &self.id));
@@ -2850,8 +2997,13 @@ impl Instance {
                     Some(wrap_host_agent_command(&cmd, &env_vars, Some(a)))
                 })
             } else {
-                let mut cmd =
-                    self.build_base_pane_command(agent, resume_token, is_primary, observed_model);
+                let mut cmd = decorate(self.build_base_pane_command(
+                    agent,
+                    resume_token,
+                    is_primary,
+                    observed_model,
+                    extra_args.as_deref(),
+                ))?;
                 let mut env_vars: Vec<(&str, &str)> = Vec::new();
                 if needs_instance_id {
                     env_vars.push(("AOE_INSTANCE_ID", &self.id));
@@ -3225,6 +3377,7 @@ impl Instance {
         resume_token: Option<&str>,
         is_primary: bool,
         observed_model: Option<&str>,
+        extra_args: Option<&str>,
     ) -> String {
         if !is_primary {
             let mut cmd = agent.map_or_else(|| "bash".to_string(), |a| a.binary.to_string());
@@ -3284,8 +3437,9 @@ impl Instance {
         if !self.has_command_override() {
             cmd = append_fixed_args(cmd, agent);
         }
-        if !self.extra_args.is_empty() {
-            cmd = format!("{} {}", cmd, self.extra_args);
+        let extra_args = extra_args.unwrap_or(&self.extra_args);
+        if !extra_args.is_empty() {
+            cmd = format!("{} {}", cmd, extra_args);
         }
         append_observed_model(cmd, agent, observed_model)
     }
@@ -3629,6 +3783,7 @@ impl Instance {
         if self.tool == "codex" && self.primary_pane.cross_agent_team {
             return self.respawn_single_codex(mode);
         }
+        self.capture_primary_runtime_settings()?;
         // A fresh restart must not reuse the pre-allocated `--session-id` or re-fork
         // a persisted parent; prepare a new identity, then commit it only if the
         // respawn succeeds (roll back on failure so a phantom id is not persisted).
@@ -3713,6 +3868,7 @@ impl Instance {
                 pane_agent.is_none(),
                 Some(runtime.identity_key.as_str()).filter(|key| !key.is_empty()),
                 observed_model.as_deref(),
+                None,
                 Some(runtime),
             ),
             None => self.build_pane_command_with_runtime(
@@ -3724,6 +3880,7 @@ impl Instance {
                 pane_agent.is_none(),
                 None,
                 observed_model.as_deref(),
+                None,
                 None,
             ),
         }
@@ -3916,6 +4073,7 @@ impl Instance {
                 exact_runtime.as_ref(),
                 slot,
                 true,
+                None,
             );
             // Every Claude pane this fan-out actually relaunched raises its own
             // startup screens, not just the primary one.
@@ -4025,6 +4183,7 @@ impl Instance {
         if slots.is_empty() {
             anyhow::bail!("no persisted slots to recover");
         }
+        let cold_settings = self.preflight_codex_recovery(store, slots, mode)?;
         self.relaunch_notes.clear();
 
         let mut ordered: Vec<crate::db::AgentSlot> = if managed {
@@ -4179,6 +4338,7 @@ impl Instance {
                 exact_runtime.as_ref(),
                 slot,
                 false,
+                cold_settings.get(&slot.slot),
             );
             let outcome = if pane.tool == "codex" && pane.cross_agent_team {
                 match &outcome {
@@ -4376,11 +4536,6 @@ impl Instance {
     fn apply_tmux_options(&self, profile: &str) {
         let name = tmux::Session::generate_name(&self.id, &self.title);
         self.apply_session_tmux_options(&name, &self.title, profile);
-        if self.tool == "codex" {
-            if let Err(e) = tmux::status_bar::ensure_codex_title_monitor(&name, &self.title) {
-                tracing::debug!("Failed to refresh Codex title monitor: {}", e);
-            }
-        }
     }
 
     pub fn refresh_agent_tmux_options(&self, profile: &str) {
@@ -4453,16 +4608,20 @@ impl Instance {
         }
         let session = self.tmux_session()?;
 
-        if session.exists()
-            && self.tool == "codex"
+        if self.tool == "codex"
             && self.primary_pane.cross_agent_team
             && !self.is_sandboxed()
             && !self.has_command_override()
         {
-            return self.resume_recorded_codex_panes();
+            return if session.exists() {
+                self.resume_recorded_codex_panes()
+            } else {
+                self.recover_recorded_codex_panes()
+            };
         }
 
         if session.exists() {
+            self.capture_runtime_settings()?;
             session.kill()?;
         }
 
@@ -4475,6 +4634,9 @@ impl Instance {
     pub fn kill(&self) -> Result<()> {
         crate::managed_codex::verify_stop_scope(self)?;
         self.capture_managed_claude_sessions()?;
+        if let Err(error) = self.capture_runtime_settings() {
+            tracing::warn!("Cannot preserve pane settings before shutdown: {error:#}");
+        }
         let session = self.tmux_session()?;
         if session.exists() {
             session.kill()?;
@@ -4551,6 +4713,26 @@ impl Instance {
             self.status = Status::Error;
             self.last_error_check = Some(std::time::Instant::now());
             return;
+        }
+
+        if self.tool == "codex"
+            && self.primary_pane.cross_agent_team
+            && !self.is_sandboxed()
+            && !super::managed_pane::has_managed_state(self)
+            && (session.is_pane_running_shell() || session.is_pane_dead())
+        {
+            let failure = crate::db::Store::open(&self.managed_profile())
+                .and_then(|store| store.primary_codex_launch_failure(&self.id));
+            match failure {
+                Ok(Some(error)) => {
+                    self.status = Status::Error;
+                    self.last_error = Some(error);
+                    self.last_error_check = Some(Instant::now());
+                    return;
+                }
+                Err(error) => tracing::warn!("Cannot read Codex launch failure: {error:#}"),
+                Ok(None) => {}
+            }
         }
 
         let previous_status = self.status;
@@ -5167,6 +5349,7 @@ impl Instance {
             slot_identity_key,
             None,
             None,
+            None,
         )
     }
 
@@ -5179,6 +5362,7 @@ impl Instance {
         mode: RestartMode,
         slot_identity_key: Option<&str>,
         observed_model: Option<&str>,
+        runtime_settings: Option<&crate::db::runtime_settings::RuntimeSettings>,
         exact_runtime: Option<&ExactSessionRuntimeContext>,
     ) -> Option<(String, bool)> {
         let pane = target.resolve_for(self);
@@ -5201,6 +5385,7 @@ impl Instance {
             is_primary,
             slot_identity_key,
             observed_model,
+            runtime_settings,
             exact_runtime,
         )?;
         Some((command, resumed))
@@ -5231,6 +5416,7 @@ impl Instance {
         exact_runtime: Option<&ExactSessionRuntimeContext>,
         slot: &crate::db::AgentSlot,
         live_source: bool,
+        cold_settings: Option<&crate::db::runtime_settings::RuntimeSettings>,
     ) -> PaneResumeOutcome {
         if let Some(shape) = self.pane_exact_session_runtime(pane) {
             if mode == RestartMode::Resume
@@ -5246,6 +5432,23 @@ impl Instance {
         // entry's binary is the literal `shell`, which names no program, so the
         // launch path builds this pane through `build_extra_shell_pane_command`
         // and the resume path has to do the same.
+        let capture =
+            crate::db::Store::open_with_schema(&self.managed_profile()).and_then(|store| {
+                if let Some(settings) = cold_settings {
+                    store.save_runtime_settings(slot, settings)?;
+                    return Ok(Some(settings.clone()));
+                }
+                self.capture_slot_runtime_settings(&store, slot, live_source)?;
+                if slot.agent == "codex" {
+                    store.runtime_settings(slot)
+                } else {
+                    Ok(None)
+                }
+            });
+        let settings = match capture {
+            Ok(settings) => settings,
+            Err(error) => return PaneResumeOutcome::Error(format!("{error:#}")),
+        };
         let plan = if pane_agent_is_shell(&pane.tool) {
             Some((
                 self.build_extra_shell_pane_command(&pane.working_dir),
@@ -5262,6 +5465,7 @@ impl Instance {
                 mode,
                 slot_identity_key,
                 observed_model,
+                settings.as_ref(),
                 exact_runtime,
             )
         };
@@ -5895,6 +6099,7 @@ mod tests {
             .build_extra_pane_command("codex", &inst.project_path)
             .unwrap()
             .command;
+        assert_durable_codex_dispatch(&cmd);
         assert!(
             cmd.contains("pre-register-codex-pane"),
             "expected pane pre-registration, got {cmd}"
@@ -6411,13 +6616,37 @@ mod tests {
     /// among the matches, and the pane silently never binds. A comment cannot
     /// stop that edit; this can.
     #[test]
-    fn codex_bootstrap_execs_into_codex_rather_than_wrapping_it() {
+    fn codex_bootstrap_execs_its_durable_launcher() {
         let cmd = codex_xats_instance().build_agent_command(None).unwrap();
+        assert_durable_codex_dispatch(&cmd);
+    }
 
-        assert!(
-            cmd.contains("exec codex --remote"),
-            "Codex must replace the bootstrap shell, not run under it: {cmd}"
+    fn assert_durable_codex_dispatch(cmd: &str) {
+        use clap::Parser;
+
+        let login = shell_words::split(cmd).unwrap();
+        let wrapper = shell_words::split(login.last().unwrap()).unwrap();
+        let script = wrapper.last().unwrap();
+        let (preparation, dispatch) = script.rsplit_once(" exec ").unwrap();
+        assert!(preparation.contains("__codex-arguments"));
+        let mut argv = shell_words::split(dispatch).unwrap();
+        assert_eq!(
+            std::path::Path::new(&argv[0]),
+            std::env::current_exe().unwrap()
         );
+        assert_eq!(argv[1], "-p");
+        assert_eq!(argv[3], "__codex-launch");
+        assert!(argv.ends_with(&["--command-file".into(), "$command_file".into()]));
+        let launch = argv
+            .iter_mut()
+            .find(|arg| *arg == "$xats_agent_id")
+            .unwrap();
+        *launch = uuid::Uuid::nil().to_string();
+        let cli = crate::cli::Cli::try_parse_from(argv).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(crate::cli::Commands::CodexLaunch(_))
+        ));
     }
 
     /// The value AoE will not take must stop the pane, not quietly redirect it
@@ -7390,21 +7619,17 @@ mod tests {
         let token = "019d1af9-a899-7df1-8f7d-a244126e5ded";
         let inst = codex_xats_instance();
 
-        let (resume_cmd, resumed) = inst
-            .build_pane_resume_plan("codex", token, true, RestartMode::Resume, None)
-            .expect("Codex resume plan");
-        assert!(resumed);
-        assert!(resume_cmd.contains("pre-register-codex-pane"));
-        assert!(resume_cmd.contains(&format!("resume {token}")));
-        assert_codex_xats_preregister_shape(&resume_cmd);
-
-        let (fresh_cmd, resumed) = inst
-            .build_pane_resume_plan("codex", token, true, RestartMode::Fresh, None)
-            .expect("Codex fresh plan");
-        assert!(!resumed);
-        assert!(fresh_cmd.contains("pre-register-codex-pane"));
-        assert!(!fresh_cmd.contains(&format!("resume {token}")));
-        assert_codex_xats_preregister_shape(&fresh_cmd);
+        for primary in [true, false] {
+            for mode in [RestartMode::Resume, RestartMode::Fresh] {
+                let (cmd, resumed) = inst
+                    .build_pane_resume_plan("codex", token, primary, mode, None)
+                    .expect("Codex restart plan");
+                assert_eq!(resumed, mode == RestartMode::Resume);
+                assert_eq!(cmd.contains(&format!("resume {token}")), resumed);
+                assert!(cmd.contains("pre-register-codex-pane"));
+                assert_codex_xats_preregister_shape(&cmd);
+            }
+        }
     }
 
     #[test]
@@ -7431,6 +7656,7 @@ mod tests {
     /// (`--ttl`, not a guessed spelling -- its parser ignores unknown flags
     /// silently, so a wrong name would "succeed" while changing nothing).
     fn assert_codex_xats_preregister_shape(cmd: &str) {
+        assert_durable_codex_dispatch(cmd);
         assert!(
             cmd.contains("--identity-key-env XATS_IDENTITY_KEY"),
             "missing identity-key env-name flag: {cmd}"
@@ -7552,6 +7778,18 @@ mod tests {
         };
         write_fake("npx", format!("{}\n{npx_fail}", record(&npx_log)));
         write_fake("codex", record(&codex_log));
+        write_fake(
+            "aoe-launch",
+            format!(
+                "case \"$*\" in *__codex-arguments*) \
+                file=$(mktemp {template}); cat >\"$file\"; printf '%s\\n' \"$file\";; \
+                *__codex-launch*) while [ \"$#\" -gt 0 ]; do \
+                    if [ \"$1\" = --command-file ]; then file=$2; break; fi; shift; done; \
+                    xargs -0 sh -c 'exec \"$@\"' sh <\"$file\"; status=$?; \
+                    rm -f \"$file\"; exit $status;; *) exit 0;; esac",
+                template = shell_escape(&tmp.join("launch.XXXXXXXX").display().to_string())
+            ),
+        );
         (npx_log, codex_log)
     }
 
@@ -7589,10 +7827,23 @@ mod tests {
         env: &[(&str, Option<&str>)],
     ) -> std::process::Output {
         let mut cmd = std::process::Command::new("sh");
+        let own = std::env::current_exe().unwrap();
+        let script = script.replace(
+            own.to_str().unwrap(),
+            bin.join("aoe-launch").to_str().unwrap(),
+        );
+        let log = crate::session::get_app_dir_path()
+            .unwrap()
+            .join("debug.log");
+        let script = script.replace(
+            log.to_str().unwrap(),
+            bin.parent().unwrap().join("debug.log").to_str().unwrap(),
+        );
         cmd.arg("-c")
-            .arg(script)
+            .arg(&script)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("TMUX_PANE", "%fake")
+            .env_remove("TMUX")
             .env_remove("SHELLOPTS");
         match identity_key {
             Some(key) => {
@@ -9739,7 +9990,7 @@ mod tests {
         let parent = parent_instance("claude", Some("parent-uuid"));
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let agent = crate::agents::get_agent("claude");
-        let cmd = fork.build_base_pane_command(agent, None, true, None);
+        let cmd = fork.build_base_pane_command(agent, None, true, None, None);
         assert!(
             cmd.contains("claude --resume parent-uuid --fork-session"),
             "expected claude fork command, got: {cmd}"
@@ -9751,7 +10002,7 @@ mod tests {
         let parent = parent_instance("codex", Some("parent-uuid"));
         let fork = parent.create_fork("f".to_string(), None).unwrap();
         let agent = crate::agents::get_agent("codex");
-        let cmd = fork.build_base_pane_command(agent, None, true, None);
+        let cmd = fork.build_base_pane_command(agent, None, true, None, None);
         assert!(
             cmd.contains("codex fork parent-uuid"),
             "expected codex fork command, got: {cmd}"
@@ -9766,7 +10017,7 @@ mod tests {
         let mut fork = parent.create_fork("f".to_string(), None).unwrap();
         fork.resume_token = Some("new-fork-uuid".to_string());
         let agent = crate::agents::get_agent("claude");
-        let cmd = fork.build_base_pane_command(agent, Some("new-fork-uuid"), true, None);
+        let cmd = fork.build_base_pane_command(agent, Some("new-fork-uuid"), true, None, None);
         assert!(
             cmd.contains("--resume new-fork-uuid") && !cmd.contains("--fork-session"),
             "expected plain resume command, got: {cmd}"
@@ -10237,6 +10488,7 @@ mod observed_model_tests {
             mode,
             None,
             Some(model).filter(|m| !m.is_empty()),
+            None,
             None,
         )
         .expect("launch command")

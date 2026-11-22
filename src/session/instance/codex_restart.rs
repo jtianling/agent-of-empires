@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 
 use super::{Instance, PaneResumeOutcome, RestartMode};
 use crate::db::{AgentSlot, Store};
@@ -34,6 +35,11 @@ impl CodexRestart {
         let verified = store.codex_resume_verified(slot)?;
         let resume = if verified && mode == RestartMode::Resume {
             let endpoint = super::codex_app_server_endpoint().map_err(anyhow::Error::msg)?;
+            crate::codex_permissions::preflight_resume(
+                &endpoint.url,
+                &slot.native_session_id,
+                working_dir,
+            )?;
             Some((endpoint.url, working_dir.to_string()))
         } else {
             None
@@ -54,6 +60,7 @@ impl CodexRestart {
                 self.slot.native_session_id.clone(),
                 working_dir.clone(),
                 self.slot.yolo_mode,
+                self.store.runtime_settings(&self.slot)?,
             )?;
         }
         Ok(())
@@ -69,6 +76,77 @@ impl CodexRestart {
 }
 
 impl Instance {
+    pub(super) fn recover_recorded_codex_panes(&mut self) -> Result<()> {
+        let store = Store::open_with_schema(&Self::current_profile())?;
+        let slots = store.read_slots_for_instance(&self.id)?;
+        anyhow::ensure!(
+            !slots.is_empty(),
+            "Codex has no tracked original conversation to recover"
+        );
+        let outcomes = self.recover_from_slots(
+            &store,
+            &slots,
+            RestartMode::Resume,
+            &std::collections::HashMap::new(),
+        )?;
+        let errors = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                PaneResumeOutcome::Error(error) => Some(error.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            errors.is_empty(),
+            "Codex recovery failed: {}",
+            errors.join("; ")
+        );
+        Ok(())
+    }
+
+    pub(super) fn preflight_codex_recovery(
+        &self,
+        store: &Store,
+        slots: &[AgentSlot],
+        mode: RestartMode,
+    ) -> Result<HashMap<i64, crate::db::runtime_settings::RuntimeSettings>> {
+        let mut settings = HashMap::new();
+        if mode != RestartMode::Resume
+            || self.is_sandboxed()
+            || crate::session::managed_pane::has_managed_state(self)
+        {
+            return Ok(settings);
+        }
+        for slot in slots.iter().filter(|slot| slot.agent == "codex") {
+            let snapshot = if slot.cross_agent_team {
+                anyhow::ensure!(
+                    store.codex_resume_verified(slot)?,
+                    "Codex slot {} has no verified original conversation; recover its original UUID first",
+                    slot.slot
+                );
+                let endpoint = super::codex_app_server_endpoint().map_err(anyhow::Error::msg)?;
+                crate::codex_permissions::preflight_settings(
+                    &endpoint.url,
+                    &slot.native_session_id,
+                    &slot.cwd,
+                )
+                .and_then(|value| match value {
+                    Some(settings) => Ok(Some(settings)),
+                    None => store.runtime_settings(slot),
+                })
+            } else if slot.native_session_id.is_empty() {
+                continue;
+            } else {
+                Self::offline_slot_settings(store, slot)
+            };
+            let snapshot = snapshot
+                .with_context(|| format!("Reading settings for Codex slot {}", slot.slot))?
+                .with_context(|| format!("Missing settings for Codex slot {}", slot.slot))?;
+            settings.insert(slot.slot, snapshot);
+        }
+        Ok(settings)
+    }
+
     pub(super) fn resume_recorded_codex_panes(&mut self) -> Result<()> {
         let store = Store::open_with_schema(&Self::current_profile())?;
         let slots = store.read_slots_for_instance(&self.id)?;

@@ -93,10 +93,28 @@ A slot SHALL be relaunched fresh for that pane alone when its `native_session_id
 empty or invalid, or when its agent has no resume support. A per-pane failure SHALL
 NOT abort recovery of the remaining panes.
 
+普通 host xats Codex 的 Resume SHALL 先验证全部目标 slot 的准确原 UUID, 持久化证明
+及只读恢复条件, 再创建 placeholder 或任何 pane.  缺少证明时 SHALL 明确失败,
+保留 slot 和 generation, 不应用上述 fresh 降级.  managed 与 sandbox 的 owner
+恢复流程 SHALL 不受该普通宿主机预检影响.
+
 #### Scenario: Invalid id degrades that pane to fresh
 
-- **WHEN** a recovered slot has an empty or invalid `native_session_id`
+- **WHEN** a recovered slot other than ordinary host xats Codex has an empty or invalid `native_session_id`
 - **THEN** that pane is launched fresh without a resume flag while the other panes still resume
+
+#### Scenario: xats Codex 缺少原 UUID 时没有副作用
+
+- **WHEN** 普通 host xats Codex 的任意目标 slot 缺少准确原 UUID 或有效证明
+- **THEN** Resume SHALL 在创建 session 或 pane 之前失败
+- **AND** 全部 slot 的原 ID 和 generation SHALL 保持不变
+- **AND** CLI restart 与 TUI Resume SHALL 使用同一原线程恢复规则
+
+#### Scenario: 冷恢复读取已压缩的原线程设置
+- **WHEN** 普通宿主机会话冷 Resume, 原 Codex rollout 只剩对应的 `.jsonl.zst`
+- **THEN** AoE SHALL 在创建第一个窗格前流式核对线程 ID、工作目录和设置快照
+- **AND** 有效历史缺少设置快照时 SHALL 允许使用该 slot 已保存的有效设置
+- **AND** 读取失败、压缩流损坏或归属不一致时 SHALL 保留原记录并返回具体原因
 
 #### Scenario: One pane failure does not abort the rest
 

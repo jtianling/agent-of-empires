@@ -3,6 +3,11 @@
 //! Polls session statuses and updates per-session tmux user options so the
 //! status bar can display Waiting/Running/Idle sessions.
 
+mod captures;
+mod inventory;
+mod legacy_owner;
+mod titles;
+
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,13 +21,9 @@ use crate::session::{
     expanded_groups, flatten_tree, Group, GroupTree, Instance, Item, Status, Storage,
 };
 
+use super::get_cached_window_activity;
 use super::status_bar::{
-    get_server_option, list_aoe_sessions, pid_is_running, set_server_option, set_session_option,
-    unset_server_option, unset_session_option,
-};
-use super::{
-    get_cached_pane_info, get_cached_window_activity, refresh_pane_info_cache,
-    refresh_session_cache,
+    get_server_option, pid_is_running, set_server_option, unset_server_option, unset_session_option,
 };
 
 const NOTIFICATION_MONITOR_PID_OPTION_PREFIX: &str = "@aoe_notification_monitor_pid";
@@ -57,6 +58,7 @@ const FULL_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const POLL_INTERVAL_RUNNING: Duration = Duration::from_secs(1);
 const POLL_INTERVAL_WAITING: Duration = Duration::from_secs(2);
 const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(3);
+const MAX_RETRY: Duration = Duration::from_secs(30);
 
 /// Minimum interval between durable-store reconcile passes driven from this
 /// long-lived monitor process. Mirrors the TUI status poller's interval. This
@@ -67,9 +69,12 @@ const RECONCILE_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone)]
 struct MonitorSessionState {
+    title_sample: Option<titles::Sample>,
     last_window_activity: i64,
     last_full_check: Instant,
-    last_status: Status,
+    primary_id: Option<String>,
+    primary_status: Status,
+    extra_statuses: HashMap<String, Status>,
     spike_start: Option<Instant>,
     pre_spike_status: Option<Status>,
     acknowledged: bool,
@@ -78,9 +83,12 @@ struct MonitorSessionState {
 impl MonitorSessionState {
     fn new(now: Instant) -> Self {
         Self {
+            title_sample: None,
             last_window_activity: i64::MIN,
             last_full_check: now - FULL_CHECK_INTERVAL,
-            last_status: Status::Idle,
+            primary_id: None,
+            primary_status: Status::Idle,
+            extra_statuses: HashMap::new(),
             spike_start: None,
             pre_spike_status: None,
             acknowledged: false,
@@ -325,177 +333,202 @@ fn build_notification_session_updates(
     updates
 }
 
-fn build_batched_session_option_args(updates: &[SessionOptionUpdate]) -> Vec<String> {
-    let mut args = Vec::new();
-
-    for (index, update) in updates.iter().enumerate() {
-        if index > 0 {
-            args.push(";".to_string());
-        }
-
-        args.push("set-option".to_string());
-        args.push("-t".to_string());
-        args.push(update.session_name.clone());
-
-        if update.value.is_none() {
-            args.push("-u".to_string());
-        }
-
-        args.push(update.option.clone());
-
-        if let Some(value) = &update.value {
-            args.push(value.clone());
-        }
-    }
-
-    args
+#[derive(Default)]
+struct WriteRetry {
+    next_attempt: Option<Instant>,
+    delay: Duration,
 }
 
-fn apply_session_option_updates(updates: &[SessionOptionUpdate]) -> Result<()> {
-    if updates.is_empty() {
-        return Ok(());
-    }
-
-    let args = build_batched_session_option_args(updates);
-    let output = crate::tmux::tmux_command().args(&args).output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    tracing::debug!(
-        "Batched notification option update failed, falling back to individual writes: {}",
-        stderr
-    );
-
-    for update in updates {
-        if let Some(value) = &update.value {
-            set_session_option(&update.session_name, &update.option, value)?;
-        } else {
-            unset_session_option(&update.session_name, &update.option)?;
+impl WriteRetry {
+    fn apply(&mut self, updates: &[SessionOptionUpdate], now: Instant) {
+        if self.next_attempt.is_some_and(|next| next > now) {
+            return;
+        }
+        match write_options(updates, super::control::output) {
+            Ok(()) => *self = Self::default(),
+            Err(error) => {
+                self.delay = (self.delay * 2).clamp(POLL_INTERVAL_RUNNING, MAX_RETRY);
+                self.next_attempt = Some(now + self.delay);
+                tracing::warn!(
+                    "Notification write failed: {error:#}; retry in {:?}",
+                    self.delay
+                );
+            }
         }
     }
+}
 
+fn write_options(
+    updates: &[SessionOptionUpdate],
+    mut output: impl FnMut(&[&str]) -> std::io::Result<std::process::Output>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for update in updates {
+        let target = format!("={}:", update.session_name);
+        let args: &[&str] = match &update.value {
+            Some(value) => &["set-option", "-t", &target, &update.option, value],
+            None => &["set-option", "-u", "-t", &target, &update.option],
+        };
+        match output(args) {
+            Ok(result) if result.status.success() => {}
+            Ok(result) => failures.push(format!(
+                "{target} ({}): {}",
+                result.status,
+                String::from_utf8_lossy(&result.stderr).trim()
+            )),
+            Err(error) => failures.push(format!("{target}: {error}")),
+        }
+    }
+    anyhow::ensure!(
+        failures.is_empty(),
+        "Writing notification options: {}",
+        failures.join("; ")
+    );
     Ok(())
+}
+
+struct ExtraPane {
+    id: String,
+    tool: &'static str,
+    title_status: Option<Status>,
+}
+
+struct DetectionPlan {
+    primary_hint: Option<Status>,
+    extras: Option<Vec<ExtraPane>>,
+    allow_capture: bool,
+}
+
+impl DetectionPlan {
+    fn prepare(
+        instance: &Instance,
+        infos: Option<Vec<super::PaneInfo>>,
+        primary_id: Option<&str>,
+        allow_capture: bool,
+        requests: &mut captures::CaptureRequests,
+    ) -> Self {
+        let primary_hint = match crate::hooks::read_hook_status_with_freshness(&instance.id) {
+            Some(read) if read.fresh => Some(read.status),
+            Some(read) => {
+                tracing::debug!(
+                    "Notification hook stale for {} (value={:?}, age={}s)",
+                    instance.id,
+                    read.status,
+                    read.age.as_secs()
+                );
+                None
+            }
+            None => None,
+        }
+        .or_else(|| {
+            let id = primary_id?;
+            let primary = infos.as_ref()?.iter().find(|p| p.pane_id == id)?;
+            super::status_detection::detect_status_from_title(&primary.pane_title)
+        });
+        if allow_capture && primary_hint.is_none() {
+            if let Some(id) = primary_id {
+                requests.insert(id);
+            }
+        }
+        let extras = infos.map(|infos| {
+            infos
+                .into_iter()
+                .filter(|p| Some(p.pane_id.as_str()) != primary_id)
+                .filter_map(|info| {
+                    let tool = super::status_detection::detect_agent_type_from_pane(&info)?;
+                    if tool == "shell" {
+                        return None;
+                    }
+                    let title_status =
+                        super::status_detection::detect_status_from_title(&info.pane_title);
+                    if allow_capture && title_status.is_none() {
+                        requests.insert(&info.pane_id);
+                    }
+                    Some(ExtraPane {
+                        id: info.pane_id,
+                        tool,
+                        title_status,
+                    })
+                })
+                .collect()
+        });
+        Self {
+            primary_hint,
+            extras,
+            allow_capture,
+        }
+    }
 }
 
 fn detect_live_status(
     instance: &Instance,
     state: &mut MonitorSessionState,
-    allow_capture: bool,
+    plan: DetectionPlan,
+    screens: &HashMap<String, String>,
+    sampled_primary: Option<Status>,
     now: Instant,
 ) -> Status {
-    let previous_status = state.last_status;
-    let mut primary_status: Option<Status> = None;
-
-    // Only short-circuit on a fresh hook read. A stale `/tmp/aoe-hooks/<id>/status`
-    // (mtime older than the freshness window) indicates the agent missed a
-    // `Stop` event, and we must fall through to content detection in lockstep
-    // with the TUI status poller -- otherwise the monitor could report
-    // Running while the poller reports Idle, or vice versa.
-    match crate::hooks::read_hook_status_with_freshness(&instance.id) {
-        Some(read) if read.fresh => {
-            state.clear_spike_state();
-            primary_status = Some(read.status);
-        }
-        Some(read) => {
-            tracing::debug!(
-                "notification monitor: hook stale for '{}' (id={}, value={:?}, age={}s); falling through",
-                instance.title,
-                instance.id,
-                read.status,
-                read.age.as_secs()
-            );
-        }
-        None => {}
-    }
-
-    let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
-
-    if primary_status.is_none() {
-        if let Some(status) = get_cached_pane_info(&session_name)
-            .and_then(|info| super::status_detection::detect_status_from_title(&info.pane_title))
-        {
-            state.clear_spike_state();
-            primary_status = Some(status);
+    if let Some(status) = plan.primary_hint {
+        state.clear_spike_state();
+        state.primary_status = status;
+    } else if plan.allow_capture {
+        let detected = sampled_primary.or_else(|| {
+            let content = screens.get(state.primary_id.as_ref()?)?;
+            Some(super::status_detection::detect_status_from_content(
+                content,
+                &instance.tool,
+                None,
+            ))
+        });
+        if let Some(status) = detected {
+            state.primary_status = state.apply_spike_detection(status, state.primary_status, now);
         }
     }
 
-    if primary_status.is_none() {
-        let mut detected = if allow_capture {
-            match instance.tmux_session() {
-                Ok(session) => match session.capture_pane_cached(50) {
-                    Ok(content) => super::status_detection::detect_status_from_content(
-                        &content,
-                        &instance.tool,
-                        None,
-                    ),
-                    Err(_) => previous_status,
-                },
-                Err(_) => previous_status,
-            }
-        } else {
-            previous_status
-        };
-
-        if allow_capture {
-            detected = state.apply_spike_detection(detected, previous_status, now);
-        }
-
-        primary_status = Some(detected);
+    if let Some(extras) = plan.extras {
+        detect_extra_pane_statuses_for_monitor(extras, state, screens, plan.allow_capture, now);
     }
-
-    let primary_status = primary_status.unwrap_or(Status::Idle);
-
-    // Detect status for extra (user-split) panes and aggregate
-    let extra_statuses = detect_extra_pane_statuses_for_monitor(&session_name, allow_capture);
-    let aggregated = if extra_statuses.is_empty() {
-        primary_status
+    let aggregated = if state.extra_statuses.is_empty() {
+        state.primary_status
     } else {
-        let mut all = vec![primary_status];
-        all.extend(extra_statuses);
-        super::status_detection::aggregate_pane_statuses(&all)
+        let mut statuses = vec![state.primary_status];
+        statuses.extend(state.extra_statuses.values().copied());
+        super::status_detection::aggregate_pane_statuses(&statuses)
     };
-
-    let result = state.apply_acknowledged_mapping(aggregated);
-    state.last_status = result;
-    result
+    state.apply_acknowledged_mapping(aggregated)
 }
 
-fn detect_extra_pane_statuses_for_monitor(session_name: &str, allow_capture: bool) -> Vec<Status> {
-    let all_panes = match super::get_all_cached_pane_infos(session_name) {
-        Some(panes) if panes.len() > 1 => panes,
-        _ => return Vec::new(),
-    };
-
-    let mut statuses = Vec::new();
-
-    for pane_info in all_panes.iter().skip(1) {
-        let agent_type = match super::status_detection::detect_agent_type_from_pane(pane_info) {
-            Some("shell") | None => continue,
-            Some(agent) => agent,
-        };
-
-        if let Some(status) =
-            super::status_detection::detect_status_from_title(&pane_info.pane_title)
-        {
-            statuses.push(status);
-            continue;
-        }
-
-        if allow_capture {
-            if let Ok(content) = crate::tmux::Session::capture_pane_by_id(&pane_info.pane_id, 50) {
-                let status =
-                    super::status_detection::detect_status_from_content(&content, agent_type, None);
-                statuses.push(status);
-                continue;
+fn detect_extra_pane_statuses_for_monitor(
+    extras: Vec<ExtraPane>,
+    state: &mut MonitorSessionState,
+    screens: &HashMap<String, String>,
+    allow_capture: bool,
+    now: Instant,
+) {
+    let mut statuses = HashMap::new();
+    for pane in extras {
+        let detected = pane.title_status.or_else(|| {
+            if !allow_capture {
+                return None;
             }
-        }
-
-        statuses.push(Status::Idle);
+            if pane.tool == "codex" {
+                let sample = state
+                    .title_sample
+                    .as_ref()
+                    .and_then(|s| s.status_for(&pane.id, now));
+                if sample.is_some() {
+                    return sample;
+                }
+            }
+            let content = screens.get(&pane.id)?;
+            Some(super::status_detection::detect_status_from_content(
+                content, pane.tool, None,
+            ))
+        });
+        let status = detected.or_else(|| state.extra_statuses.get(&pane.id).copied());
+        statuses.insert(pane.id, status.unwrap_or(Status::Idle));
     }
-
-    statuses
+    state.extra_statuses = statuses;
 }
 
 fn decide_activity_gate(
@@ -559,14 +592,16 @@ fn take_ack_signal() -> Option<String> {
 
 fn update_notification_options(
     profile: &str,
-    session_names: &[String],
+    snapshot: &inventory::Snapshot,
     states: &mut HashMap<String, MonitorSessionState>,
     acknowledged_instance_id: Option<&str>,
+    writes: &mut WriteRetry,
 ) -> Result<(Duration, Vec<String>)> {
     let now = Instant::now();
     let storage = Storage::new(profile)?;
     let (mut instances, groups) = storage.load_with_groups()?;
-    let existing_sessions: HashSet<String> = session_names.iter().cloned().collect();
+    let panes = &snapshot.active;
+    let existing_sessions: HashSet<String> = panes.keys().cloned().collect();
     let active_ids: HashSet<String> = instances
         .iter()
         .map(|instance| instance.id.clone())
@@ -581,11 +616,13 @@ fn update_notification_options(
             .acknowledged = true;
     }
 
+    let mut requests = captures::CaptureRequests::default();
+    let mut pending = Vec::new();
     for instance in &mut instances {
         let session_name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
-        if !existing_sessions.contains(&session_name) {
+        let Some(pane) = panes.get(&session_name) else {
             continue;
-        }
+        };
 
         let hook_based = crate::agents::get_agent(&instance.tool)
             .is_some_and(|agent| agent.hook_config.is_some());
@@ -593,19 +630,57 @@ fn update_notification_options(
         let state = states
             .entry(instance.id.clone())
             .or_insert_with(|| MonitorSessionState::new(now));
+        let infos = super::get_all_cached_pane_infos(&session_name);
+        let owns = |id: &str| {
+            infos
+                .as_ref()
+                .is_some_and(|panes| panes.iter().any(|p| p.pane_id == id))
+        };
+        let primary_id = pane
+            .as_ref()
+            .map(titles::ActivePane::primary_id)
+            .filter(|id| owns(id));
+        let pane = pane.as_ref().filter(|pane| owns(pane.id()));
+        if let Some(pane) = pane {
+            pane.request_title_capture(instance, state.title_sample.as_ref(), now, &mut requests);
+        }
         let decision = decide_activity_gate(hook_based, current_activity, state, now);
-
+        let switched = primary_id != state.primary_id.as_deref();
+        let allow_capture = !decision.skip_capture || switched;
+        if switched {
+            state.clear_spike_state();
+            if pane.is_some() && infos.is_some() {
+                state.primary_status = Status::Idle;
+            }
+            state.primary_id = primary_id.map(str::to_owned);
+        }
         if decision.activity_changed {
             state.acknowledged = false;
         }
         if let Some(activity) = current_activity {
             state.last_window_activity = activity;
         }
-        if !hook_based && !decision.skip_capture {
+        if !hook_based && allow_capture {
             state.last_full_check = now;
         }
 
-        instance.status = detect_live_status(instance, state, !decision.skip_capture, now);
+        let plan =
+            DetectionPlan::prepare(instance, infos, primary_id, allow_capture, &mut requests);
+        pending.push((instance, session_name, pane, plan));
+    }
+
+    let screens = requests.capture();
+    for (instance, session_name, pane, plan) in pending {
+        let state = states.get_mut(&instance.id).expect("planned monitor state");
+        if let Some(pane) = pane {
+            if let Err(error) = pane.refresh_title(instance, &mut state.title_sample, now, &screens)
+            {
+                tracing::warn!("Title refresh for {} failed: {error:#}", session_name);
+            }
+        }
+        let sampled_primary =
+            pane.and_then(|pane| pane.fresh_primary_status(state.title_sample.as_ref(), now));
+        instance.status = detect_live_status(instance, state, plan, &screens, sampled_primary, now);
     }
 
     let sort_order = current_home_sort_order();
@@ -615,8 +690,25 @@ fn update_notification_options(
         .map(|inst| crate::tmux::Session::generate_name(&inst.id, &inst.title))
         .filter(|name| existing_sessions.contains(name))
         .collect();
-    let updates = build_notification_session_updates(&profile_sessions, &entries);
-    apply_session_option_updates(&updates)?;
+    let updates: Vec<_> = build_notification_session_updates(&profile_sessions, &entries)
+        .into_iter()
+        .filter(|update| {
+            match inventory::notification_differs(
+                &update.session_name,
+                update.value.as_deref().unwrap_or_default(),
+            ) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::warn!(
+                        "Skipping notification for {}: {error:#}",
+                        update.session_name
+                    );
+                    false
+                }
+            }
+        })
+        .collect();
+    writes.apply(&updates, now);
 
     let interval = poll_interval_for_statuses(instances.iter().map(|instance| instance.status));
     Ok((interval, profile_sessions))
@@ -624,7 +716,7 @@ fn update_notification_options(
 
 fn clear_notification_options(session_names: &[String]) {
     for session_name in session_names {
-        let _ = unset_session_option(session_name, NOTIFICATION_OPTION);
+        let _ = unset_session_option(&format!("={session_name}:"), NOTIFICATION_OPTION);
     }
 }
 
@@ -637,13 +729,13 @@ pub fn ensure_notification_monitor(profile: &str) -> Result<()> {
             let stored_mtime = get_server_option(&mtime_option);
             let current_mtime = current_exe_mtime();
             if stored_mtime == current_mtime {
+                legacy_owner::retire(profile, &pid_option, &existing_pid);
                 return Ok(());
             }
             tracing::debug!(
                 "Binary mtime changed for profile {}, restarting notification monitor",
                 profile
             );
-            kill_process(&existing_pid);
         }
     }
 
@@ -655,24 +747,29 @@ pub fn ensure_notification_monitor(profile: &str) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let monitor = child.spawn()?;
-    set_server_option(&pid_option, &monitor.id().to_string())?;
+    let mut monitor = child.spawn()?;
+    let monitor_pid = monitor.id();
+    thread::Builder::new()
+        .name("aoe-monitor-reaper".into())
+        .spawn(move || {
+            if let Err(error) = monitor.wait() {
+                tracing::warn!("Reaping notification monitor {monitor_pid} failed: {error}");
+            }
+        })?;
+    // Publishing the new owner lets the previous monitor finish its turn and exit.
+    set_server_option(&pid_option, &monitor_pid.to_string())?;
     if let Some(mtime) = current_exe_mtime() {
         set_server_option(&mtime_option, &mtime)?;
     }
+    legacy_owner::retire(profile, &pid_option, &monitor_pid.to_string());
     Ok(())
 }
 
-fn kill_process(pid_str: &str) {
-    if let Ok(pid) = pid_str.parse::<i32>() {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid),
-            nix::sys::signal::Signal::SIGTERM,
-        );
-    }
+pub fn run_notification_monitor(profile: &str) -> Result<()> {
+    super::control::with_monitor(profile, || monitor_loop(profile))
 }
 
-pub fn run_notification_monitor(profile: &str) -> Result<()> {
+fn monitor_loop(profile: &str) -> Result<()> {
     let pid_option = monitor_pid_option(profile);
     let pid = std::process::id().to_string();
     let startup_deadline = Instant::now() + Duration::from_secs(2);
@@ -681,60 +778,81 @@ pub fn run_notification_monitor(profile: &str) -> Result<()> {
     // Start in the past so the first loop iteration reconciles immediately.
     let mut last_reconcile = Instant::now() - RECONCILE_INTERVAL;
 
+    let mut retry = POLL_INTERVAL_RUNNING;
+    let mut writes = WriteRetry::default();
+    let mut server = None;
     loop {
-        match get_server_option(&pid_option) {
-            Some(owner) if owner == pid => {}
-            Some(_) => break,
-            None if Instant::now() <= startup_deadline => {
+        let snapshot = match super::control::ensure_connected(&pid_option, &pid)
+            .and_then(|connected| connected.then(|| inventory::read(&pid_option)).transpose())
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) if server.is_none() && Instant::now() <= startup_deadline => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                if let Some((pid, _)) = server {
+                    if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None)
+                        == Err(nix::errno::Errno::ESRCH)
+                    {
+                        return Ok(());
+                    }
+                } else if Instant::now() > startup_deadline {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    "Notification monitor snapshot failed: {error:#}; retry in {retry:?}"
+                );
+                thread::sleep(retry);
+                retry = (retry * 2).min(MAX_RETRY);
+                continue;
+            }
+        };
+        if server.is_some_and(|previous| previous != snapshot.server) {
+            return Ok(());
+        }
+        if snapshot.owner != pid {
+            if server.is_none() && Instant::now() <= startup_deadline {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            None => break,
-        }
-
-        refresh_session_cache();
-        refresh_pane_info_cache();
-
-        let session_names = list_aoe_sessions()?;
-        if session_names.is_empty() {
             break;
         }
+        if snapshot.release_unattached_server || snapshot.active.is_empty() {
+            break;
+        }
+        server = Some(snapshot.server);
 
         let ack_signal = take_ack_signal();
-        let (poll_interval, profile_sessions) = match update_notification_options(
+        let notification_result = update_notification_options(
             profile,
-            &session_names,
+            &snapshot,
             &mut states,
             ack_signal.as_deref(),
-        ) {
-            Ok(result) => result,
-            Err(err) => {
-                tracing::debug!("Failed to refresh notification options: {}", err);
-                (POLL_INTERVAL_WAITING, Vec::new())
-            }
-        };
-        if !profile_sessions.is_empty() {
-            last_profile_sessions = profile_sessions;
-        }
-
+            &mut writes,
+        );
         // Reconcile durable agent_slot records independently of the TUI status
         // poller. The poller only ticks while the user is on the home view; this
         // long-lived process keeps reconciling while attached to a session.
         // Best-effort and idempotent (the home-view driver may also run it).
         if last_reconcile.elapsed() >= RECONCILE_INTERVAL {
-            match Storage::new(profile).and_then(|storage| storage.load_with_groups()) {
-                Ok((instances, _groups)) => {
-                    crate::db::reconcile::reconcile_all(profile, &instances);
-                }
-                Err(err) => {
-                    tracing::debug!("monitor reconcile: failed to load instances: {}", err);
-                }
-            }
+            crate::db::reconcile::reconcile_profile(profile);
             last_reconcile = Instant::now();
         }
 
-        if get_server_option(&pid_option).as_deref() != Some(pid.as_str()) {
-            break;
+        let (poll_interval, profile_sessions) = match notification_result {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::warn!("Notification refresh failed: {err:#}; retry in {retry:?}");
+                thread::sleep(retry);
+                retry = (retry * 2).min(MAX_RETRY);
+                continue;
+            }
+        };
+        retry = POLL_INTERVAL_RUNNING;
+        if !profile_sessions.is_empty() {
+            last_profile_sessions = profile_sessions;
         }
 
         thread::sleep(poll_interval);
@@ -1124,34 +1242,48 @@ mod tests {
     }
 
     #[test]
-    fn test_build_batched_session_option_args_supports_set_and_unset() {
-        let args = build_batched_session_option_args(&[
+    fn write_options_keeps_values_literal_and_continues_after_a_missing_target() {
+        use std::os::unix::process::ExitStatusExt;
+        let value = "waiting; #{} '$title'\nnext";
+        let updates = [
             SessionOptionUpdate {
-                session_name: "aoe_alpha".to_string(),
-                option: "@aoe_waiting".to_string(),
-                value: Some("[1] waiting".to_string()),
+                session_name: "aoe_alpha".into(),
+                option: NOTIFICATION_OPTION.into(),
+                value: Some(value.into()),
             },
             SessionOptionUpdate {
-                session_name: "aoe_beta".to_string(),
-                option: "@aoe_waiting".to_string(),
+                session_name: "aoe_beta".into(),
+                option: NOTIFICATION_OPTION.into(),
                 value: None,
             },
-        ]);
-
+        ];
+        let mut commands = Vec::new();
+        let error = write_options(&updates, |args| {
+            commands.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            let missing = commands.len() == 1;
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(if missing { 1 << 8 } else { 0 }),
+                stdout: Vec::new(),
+                stderr: if missing {
+                    b"missing target".to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("missing target"));
         assert_eq!(
-            args,
-            vec![
-                "set-option",
-                "-t",
-                "aoe_alpha",
-                "@aoe_waiting",
-                "[1] waiting",
-                ";",
-                "set-option",
-                "-t",
-                "aoe_beta",
-                "-u",
-                "@aoe_waiting",
+            commands,
+            [
+                [
+                    "set-option",
+                    "-t",
+                    "=aoe_alpha:",
+                    NOTIFICATION_OPTION,
+                    value
+                ],
+                ["set-option", "-u", "-t", "=aoe_beta:", NOTIFICATION_OPTION],
             ]
         );
     }

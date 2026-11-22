@@ -582,12 +582,9 @@ fn parse_session_name_for_client(stdout: &str, client_name: &str) -> Option<Stri
 }
 
 fn switch_client_to_session(target_session: &str, client_name: Option<&str>) -> anyhow::Result<()> {
+    let client_name = client_name.ok_or_else(|| anyhow::anyhow!("No interactive tmux client"))?;
     let mut command = crate::tmux::tmux_command();
-    command.arg("switch-client");
-    if let Some(client_name) = client_name {
-        command.args(["-c", client_name]);
-    }
-    command.args(["-t", target_session]);
+    command.args(["switch-client", "-c", client_name, "-t", target_session]);
     let output = command.output()?;
     anyhow::ensure!(
         output.status.success(),

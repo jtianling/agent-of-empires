@@ -97,6 +97,8 @@ fn run_record_pane(
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")
+        .env_remove("TMUX")
+        .env("TMUX_TMPDIR", h.tmux_tmpdir())
         .env("TMUX_PANE", tmux_pane)
         .env("AOE_INSTANCE_ID", instance_id)
         .stdin(Stdio::piped())
@@ -196,6 +198,10 @@ fn attach_client(h: &TuiTestHarness, target: &str) -> Child {
     // `script` forwards the EOF as ^D into the attached pane, which cleanly
     // exits the shell session under test.
     command
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env("TMUX_TMPDIR", h.tmux_tmpdir())
+        .env("TERM", "xterm-256color")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -207,13 +213,14 @@ fn attach_client(h: &TuiTestHarness, target: &str) -> Child {
 /// private socket, and publish its pid into the ownership-guard server option so
 /// the monitor stays alive (mirrors `ensure_notification_monitor`).
 fn spawn_monitor(h: &TuiTestHarness) -> Child {
-    let tmux_env = format!("{},1,0", h.tmux_socket_path().display());
     let child = Command::new(h.binary_path())
         .args(["tmux", "monitor-notifications", "--profile", "default"])
         .env("HOME", h.home_path())
         .env("XDG_CONFIG_HOME", h.home_path().join(".config"))
         .env("AGENT_OF_EMPIRES_PROFILE", "default")
-        .env("TMUX", &tmux_env)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env("TMUX_TMPDIR", h.tmux_tmpdir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -222,7 +229,7 @@ fn spawn_monitor(h: &TuiTestHarness) -> Child {
 
     // The monitor's loop exits unless `@aoe_notification_monitor_pid` equals its
     // own pid within a 2s startup deadline. Publish it immediately on the same
-    // private socket the monitor queries via $TMUX.
+    // private socket the monitor queries via its profile and TMUX_TMPDIR.
     let _ = Command::new("tmux")
         .arg("-S")
         .arg(h.tmux_socket_path())
@@ -306,6 +313,11 @@ fn reconcile_advances_agent_slot_from_monitor_while_poller_idle() {
     // running, so the status-poller reconcile driver is absent: this is the
     // "poller is not ticking" state the bug occurs in.
     cleanup.attach = Some(attach_client(&h, &session_name));
+    h.wait_for_client_count(1);
+    assert_eq!(
+        h.tmux_client_session(&h.tmux_single_client_name()),
+        session_name
+    );
 
     // A capture lands in pane_live while no reconcile driver is active yet.
     assert!(

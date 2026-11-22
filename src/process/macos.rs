@@ -3,17 +3,24 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+use anyhow::{ensure, Context};
 use nix::errno::Errno;
+use nix::libc;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use tracing::debug;
 
 pub(super) fn arguments(pid: u32) -> anyhow::Result<Vec<String>> {
-    use anyhow::{ensure, Context};
-    use nix::libc;
+    read_arguments(pid, &mut argument_buffer()?)
+}
+
+fn argument_buffer() -> anyhow::Result<Vec<u8>> {
     let capacity = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
     ensure!(capacity > 0, "Cannot determine process argument size");
-    let mut bytes = vec![0u8; usize::try_from(capacity)?];
+    Ok(vec![0u8; usize::try_from(capacity)?])
+}
+
+fn read_arguments(pid: u32, bytes: &mut [u8]) -> anyhow::Result<Vec<String>> {
     let mut size = bytes.len();
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, i32::try_from(pid)?];
     let result = unsafe {
@@ -34,7 +41,6 @@ pub(super) fn arguments(pid: u32) -> anyhow::Result<Vec<String>> {
 }
 
 fn parse_arguments(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
-    use anyhow::{ensure, Context};
     let count = i32::from_ne_bytes(
         bytes
             .get(..4)
@@ -59,10 +65,7 @@ fn parse_arguments(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
             .iter()
             .position(|byte| *byte == 0)
             .context("Missing process argument terminator")?;
-        args.push(
-            String::from_utf8(remaining[..end].to_vec())
-                .context("Invalid process argument encoding")?,
-        );
+        args.push(String::from_utf8_lossy(&remaining[..end]).into_owned());
         remaining = &remaining[end + 1..];
     }
     Ok(args)
@@ -153,85 +156,114 @@ fn process_exists(pid: u32) -> bool {
 
 /// Get the foreground process group leader for a shell PID
 pub fn get_foreground_pid(shell_pid: u32) -> Option<u32> {
-    // Use ps to get the foreground process group
-    // ps -o tpgid= -p <pid> gives us the terminal foreground process group ID
-    let output = Command::new("ps")
-        .args(["-o", "tpgid=", "-p", &shell_pid.to_string()])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
+    let Some(info) = bsd_info(shell_pid).ok()? else {
+        return Some(shell_pid);
+    };
+    let group = info.e_tpgid;
+    if group == 0 || group > i32::MAX as u32 || info.pbi_pgid == group && shell_pid == group {
         return Some(shell_pid);
     }
-
-    let tpgid: i32 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .ok()?;
-
-    if tpgid <= 0 {
-        return Some(shell_pid);
+    if bsd_info(group)
+        .ok()
+        .flatten()
+        .is_some_and(|p| p.pbi_pgid == group)
+    {
+        return Some(group);
     }
-
-    // Find a process in the foreground group
-    find_process_in_group(tpgid as u32).or(Some(shell_pid))
+    // A pipeline can outlive its group leader.
+    list_pids(PROC_PGRP_ONLY, group)
+        .ok()?
+        .into_iter()
+        .filter(|&pid| {
+            bsd_info(pid)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.pbi_pgid == group)
+        })
+        .min()
+        .or(Some(shell_pid))
 }
 
-/// Find a process belonging to the given process group
-fn find_process_in_group(pgrp: u32) -> Option<u32> {
-    // Use ps to find processes in this group
-    // ps -o pid=,pgid= -A lists all processes with their PIDs and PGIDs
-    let output = Command::new("ps")
-        .args(["-o", "pid=,pgid=", "-A"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let (Ok(pid), Ok(proc_pgrp)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                if proc_pgrp == pgrp {
-                    return Some(pid);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Get the comm name (binary name) of a process by PID
 pub fn get_process_comm(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .args(["-o", "comm=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let comm = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if comm.is_empty() {
-        return None;
-    }
-
-    // Extract just the binary name (last path component)
-    comm.rsplit('/').next().map(|s| s.to_string())
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let len = unsafe {
+        libc::proc_pidpath(
+            i32::try_from(pid).ok()?,
+            path.as_mut_ptr().cast(),
+            path.len() as u32,
+        )
+    };
+    let path = path
+        .get(..usize::try_from(len).ok()?)?
+        .split(|&b| b == 0)
+        .next()?;
+    let name = path.rsplit(|&b| b == b'/').next()?;
+    (!name.is_empty()).then(|| String::from_utf8_lossy(name).into_owned())
 }
 
-pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
-    use anyhow::{ensure, Context};
-    use nix::libc;
+// libproc.h exposes these sys/proc_info.h filters via proc_listpids.
+const PROC_PGRP_ONLY: u32 = 2;
+const PROC_PPID_ONLY: u32 = 6;
+
+fn list_pids(filter: u32, target: u32) -> anyhow::Result<Vec<u32>> {
+    let mut pids = vec![0u32; 64];
+    loop {
+        let bytes = i32::try_from(std::mem::size_of_val(pids.as_slice()))?;
+        Errno::clear();
+        let read = unsafe { libc::proc_listpids(filter, target, pids.as_mut_ptr().cast(), bytes) };
+        if read < 0 || (read == 0 && Errno::last_raw() != 0) {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("Listing processes for filter {filter}, target {target}")
+            });
+        }
+        ensure!(read <= bytes && read % 4 == 0, "Invalid process list size");
+        if read < bytes {
+            pids.truncate(read as usize / 4);
+            return Ok(pids);
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
+}
+
+pub(crate) fn pane_sample_time() -> anyhow::Result<u64> {
+    Ok(u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_micros(),
+    )?)
+}
+
+pub(crate) fn pane_processes(
+    root: u32,
+    sampled_before: u64,
+) -> anyhow::Result<Vec<super::PaneProcess>> {
+    let mut buffer = argument_buffer()?;
+    super::pane::collect(
+        root,
+        sampled_before,
+        |pid| {
+            Ok(bsd_info(pid)?.map(|info| {
+                (
+                    info.pbi_ppid,
+                    info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+                )
+            }))
+        },
+        |pid| read_arguments(pid, &mut buffer),
+        |pid| list_pids(PROC_PPID_ONLY, pid),
+    )
+}
+
+pub(crate) fn start_unix(start: super::pane::Start) -> anyhow::Result<i64> {
+    Ok(i64::try_from(start / 1_000_000)?)
+}
+
+fn bsd_info(pid: u32) -> anyhow::Result<Option<libc::proc_bsdinfo>> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
     let read = unsafe {
         libc::proc_pidinfo(
-            pid as i32,
+            i32::try_from(pid)?,
             libc::PROC_PIDTBSDINFO,
             0,
             info.as_mut_ptr().cast(),
@@ -243,17 +275,23 @@ pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
         if error.raw_os_error() == Some(libc::ESRCH) {
             return Ok(None);
         }
-        return Err(error).context("Reading process start identity");
+        return Err(error).with_context(|| format!("Reading BSD information for PID {pid}"));
     }
-    ensure!(read as usize == size, "Incomplete process start identity");
+    ensure!(
+        read as usize == size,
+        "Incomplete BSD information for PID {pid}"
+    );
     let info = unsafe { info.assume_init() };
     if info.pbi_status == libc::SZOMB {
         return Ok(None);
     }
-    Ok(Some(format!(
-        "macos:{}:{}",
-        info.pbi_start_tvsec, info.pbi_start_tvusec
-    )))
+    ensure!(info.pbi_pid == pid, "Unexpected PID in BSD information");
+    Ok(Some(info))
+}
+
+pub(super) fn start_identity(pid: u32) -> anyhow::Result<Option<String>> {
+    Ok(bsd_info(pid)?
+        .map(|info| format!("macos:{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec)))
 }
 
 #[cfg(test)]
@@ -264,11 +302,11 @@ mod tests {
     fn arguments_preserve_boundaries_and_exclude_environment() {
         let mut bytes = 4i32.to_ne_bytes().to_vec();
         bytes.extend_from_slice(
-            b"/bin/codex\0\0codex\0resume\0\0prompt with spaces\0TOKEN=private\0",
+            b"/bin/codex\0\0codex\0resume\0\0prompt with spaces\xff\0TOKEN=private\0",
         );
         assert_eq!(
             parse_arguments(&bytes).unwrap(),
-            ["codex", "resume", "", "prompt with spaces"]
+            ["codex", "resume", "", "prompt with spaces�"]
         );
         assert!(parse_arguments(&[]).is_err());
         assert!(parse_arguments(&bytes[..8]).is_err());

@@ -32,6 +32,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::db::Store;
@@ -90,23 +91,23 @@ const CODEX_NON_INTERACTIVE_ORIGINATORS: &[&str] = &["codex_exec"];
 /// override names what AoE launches for the instance, not what is running
 /// there. Every pane is still judged by the positive evidence below: a process
 /// in its tree invoking Codex.
-pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_primary: bool) {
+pub fn maybe_claim_for_pane(
+    store: &Store,
+    inst: &Instance,
+    pane_id: &str,
+    is_primary: bool,
+    observed: &crate::db::reconcile::ObservedPane<'_>,
+) {
     if !instance_permits_claim(inst, is_primary) {
         return;
     }
-    let Some(pane_pid) = pane_root_pid(pane_id) else {
-        return;
-    };
-    // A conversation is only claimed for a pane that is actually running
-    // Codex. Without this, a pane whose Codex has exited (or a shell pane
-    // that merely belongs to a codex-tool instance) would be bound to
-    // whatever conversation happened to start in the same directory.
-    if !process_tree_runs_codex(pane_pid) {
+    let pane_pid = observed.root_pid;
+    if pane_pid <= 1
+        || observed.pane_id != pane_id
+        || observed.session_name != crate::tmux::Session::generate_name(&inst.id, &inst.title)
+    {
         return;
     }
-    let Some(launched_at) = process_start_unix(pane_pid) else {
-        return;
-    };
     let existing = match store.read_pane_live(pane_id) {
         Ok(existing) => existing,
         Err(e) => {
@@ -114,9 +115,19 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_pr
             return;
         }
     };
+    let thread = existing.as_ref().map(|row| row.native_session_id.as_str());
+    let observation = match rollout_process(pane_pid, thread, observed.sampled_before) {
+        Ok(Some(observation)) => observation,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::debug!("codex rollout: cannot inspect pane {pane_id}: {error:#}");
+            return;
+        }
+    };
+    let launched_at = observation.launched_at;
     if let Some(existing) = &existing {
         let superseded = capture_is_superseded(existing.updated_at, launched_at, || {
-            process_tree_mentions(pane_pid, &existing.native_session_id)
+            observation.mentions_thread
         });
         if !superseded {
             return;
@@ -133,6 +144,26 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_pr
     let Some(found) = find_rollout(&root, &inst.project_path, launched_at, &claimed) else {
         return;
     };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        match super::codex_capture::live_location(pane_id) {
+            Ok(Some((pid, name, cwd)))
+                if pid == pane_pid && name == observed.session_name && cwd == observed.cwd => {}
+            Err(error) => {
+                tracing::debug!("codex rollout: cannot recheck pane location {pane_id}: {error:#}");
+                return;
+            }
+            _ => return,
+        }
+        match rollout_process(pane_pid, thread, observed.sampled_before) {
+            Ok(current) if current.as_ref() == Some(&observation) => {}
+            Err(error) => {
+                tracing::debug!("codex rollout: cannot recheck pane {pane_id}: {error:#}");
+                return;
+            }
+            _ => return,
+        }
+    }
     match store.upsert_pane_live(
         pane_id,
         "codex",
@@ -160,22 +191,8 @@ pub fn maybe_claim_for_pane(store: &Store, inst: &Instance, pane_id: &str, is_pr
 /// Whether a pane's existing capture has been left behind by the process now in
 /// that pane, so the pane should be claimed for again.
 ///
-/// Two conditions, in order of cost. The capture must predate the process: a
-/// near-tie resolves to "not superseded", because `process_start_unix` derives
-/// from `ps` elapsed seconds against the current clock and is good to about a
-/// second, and the two errors are not symmetric -- calling a live capture
-/// superseded sends a correctly bound pane looking for another conversation,
-/// while calling a superseded one live only defers the correction to the next
-/// reconcile tick. In practice the two times are tens of seconds apart either
-/// way, so the margin is a guard rather than a working part.
-///
-/// And the pane must not still be running that same conversation.
-/// `pane_runs_that_conversation` is deferred because it costs a process listing
-/// and only matters once the timestamps say otherwise. It is what keeps a
-/// resumed pane bound: `R` respawns it, so its capture necessarily predates the
-/// new process, but `codex resume <token>` carries the conversation's own id on
-/// the command line, and that is direct evidence where the timestamps are only
-/// circumstantial.
+/// Keep near-ties bound to allow for second-resolution timestamps. A resumed
+/// pane can have a newer process but still name the captured thread in argv.
 fn capture_is_superseded(
     captured_at: i64,
     launched_at: i64,
@@ -201,75 +218,76 @@ fn codex_sessions_root() -> PathBuf {
         .join("sessions")
 }
 
-/// Root process id of a tmux pane.
-fn pane_root_pid(pane_id: &str) -> Option<u32> {
-    let output = crate::tmux::tmux_command()
-        .args(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+#[derive(PartialEq, Eq)]
+struct RolloutProcess {
+    launched_at: i64,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    root_start: u64,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    codex_processes: Vec<(u32, u64)>,
+    mentions_thread: bool,
+}
+
+fn mentions_thread(command: &str, thread: Option<&str>) -> bool {
+    thread.is_some_and(|id| !id.is_empty() && command.contains(id))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rollout_process(
+    pid: u32,
+    thread: Option<&str>,
+    sampled_before: u64,
+) -> anyhow::Result<Option<RolloutProcess>> {
+    let processes = crate::process::pane_processes(pid, sampled_before)?;
+    let root = processes.first().context("Missing pane root")?;
+    let mut codex_processes: Vec<_> = processes
+        .iter()
+        .filter(|p| p.args.iter().any(|arg| arg.contains("codex")))
+        .map(|p| (p.pid, p.start))
+        .collect();
+    if codex_processes.is_empty() {
+        return Ok(None);
     }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    codex_processes.sort_unstable();
+    Ok(Some(RolloutProcess {
+        launched_at: crate::process::start_unix(root.start)?,
+        root_start: root.start,
+        codex_processes,
+        mentions_thread: processes
+            .iter()
+            .flat_map(|p| &p.args)
+            .any(|arg| mentions_thread(arg, thread)),
+    }))
 }
 
-/// Whether a process or any of its descendants is invoking Codex.
-///
-/// Matched on the command line rather than the process name: Codex installed
-/// through npm runs behind a `node` shim, so the kernel reports `node`, but
-/// the argv still names the `codex` entry point.
-fn process_tree_runs_codex(root_pid: u32) -> bool {
-    process_tree_any(root_pid, |cmd| cmd.contains("codex"))
-}
-
-/// Whether any process in the pane's tree names `needle` on its command line.
-///
-/// Used to recognize a resumed pane: `codex resume <thread>` carries the
-/// conversation's own id, so a pane still running the conversation its capture
-/// records is not superseded, however old that capture is.
-fn process_tree_mentions(root_pid: u32, needle: &str) -> bool {
-    !needle.is_empty() && process_tree_any(root_pid, |cmd| cmd.contains(needle))
-}
-
-/// Whether any process in `root_pid`'s tree has a command line satisfying
-/// `matches`.
-fn process_tree_any(root_pid: u32, matches: impl Fn(&str) -> bool) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn rollout_process(
+    pid: u32,
+    thread: Option<&str>,
+    _sampled_before: u64,
+) -> anyhow::Result<Option<RolloutProcess>> {
+    let output = std::process::Command::new("ps")
         .args(["-Ao", "pid=,ppid=,command="])
         .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
+        .context("Reading rollout process tree")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Reading rollout process tree: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let listing = String::from_utf8_lossy(&output.stdout);
-    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
-    let mut commands: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
-    for line in listing.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(pid), Some(ppid)) = (
-            parts.next().and_then(|p| p.parse::<u32>().ok()),
-            parts.next().and_then(|p| p.parse::<u32>().ok()),
-        ) else {
-            continue;
-        };
-        children.entry(ppid).or_default().push(pid);
-        commands.insert(pid, line);
+    let commands = crate::process::commands_in_tree(&listing, pid);
+    if !commands.iter().any(|(_, cmd)| cmd.contains("codex")) {
+        return Ok(None);
     }
-    let mut queue = vec![root_pid];
-    while let Some(pid) = queue.pop() {
-        if commands.get(&pid).is_some_and(|cmd| matches(cmd)) {
-            return true;
-        }
-        if let Some(kids) = children.get(&pid) {
-            queue.extend(kids);
-        }
-    }
-    false
+    Ok(process_start_unix(pid).map(|launched_at| RolloutProcess {
+        launched_at,
+        mentions_thread: commands.iter().any(|(_, cmd)| mentions_thread(cmd, thread)),
+    }))
 }
 
 /// Unix start time of a process, from `ps` elapsed time.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_start_unix(pid: u32) -> Option<i64> {
     let output = std::process::Command::new("ps")
         .args(["-o", "etime=", "-p", &pid.to_string()])
@@ -283,6 +301,7 @@ fn process_start_unix(pid: u32) -> Option<i64> {
 }
 
 /// Parse `ps` etime (`[[dd-]hh:]mm:ss`) into seconds.
+#[cfg(any(test, not(any(target_os = "macos", target_os = "linux"))))]
 fn parse_etime(s: &str) -> Option<i64> {
     let (days, rest) = match s.split_once('-') {
         Some((d, rest)) => (d.parse::<i64>().ok()?, rest),
@@ -653,7 +672,7 @@ mod tests {
     #[test]
     fn an_empty_conversation_id_never_matches_a_process_tree() {
         assert!(
-            !process_tree_mentions(std::process::id(), ""),
+            !mentions_thread("codex resume", Some("")),
             "an empty needle would otherwise match every command line"
         );
     }

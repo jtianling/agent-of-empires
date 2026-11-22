@@ -1,6 +1,11 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_on_path(binary: &str) -> Option<PathBuf> {
+    resolve_in(binary, &std::env::var_os("PATH")?, None)
+}
+
 pub(crate) fn resolve(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let nvm_dir = std::env::var_os("NVM_DIR")

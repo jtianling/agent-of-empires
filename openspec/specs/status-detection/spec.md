@@ -243,17 +243,21 @@ The notification monitor SHALL adjust its poll interval based on the aggregate s
 - **WHEN** all sessions are Idle (or Error/Stopped)
 - **THEN** the monitor SHALL sleep for 3 seconds before the next cycle
 
-### Requirement: Batched tmux option writes
-The notification monitor SHALL write all per-session `@aoe_waiting` options in a single tmux invocation using `\;` command separators.
+### Requirement: 通知监视器复用 tmux 控制连接
+每个 profile 的通知监视器 SHALL 将控制客户端附着在专用观察会话上, 通过同一连接查询业务会话、采集窗格内容、更新标题和通知以及维护恢复记录.
 
-#### Scenario: Multiple sessions updated in one call
-- **WHEN** the monitor has computed notification text for N sessions
-- **THEN** it SHALL execute a single `tmux` command with N `set-option` subcommands joined by `\;`
-- **AND** SHALL NOT spawn N separate `tmux set-option` subprocesses
+#### Scenario: 空闲和活动期间复用已建立的连接
+- **WHEN** 控制连接已建立且健康, 监视器处理一个或多个业务会话
+- **THEN** 监视器 SHALL 在稳态产生零个子进程, 包括状态改变、窗格采样和写入 `@aoe_waiting` 的周期
+- **AND** 普通客户端离开后, 业务会话的附着数 SHALL 正常归零
 
-#### Scenario: Batched write failure falls back to individual writes
-- **WHEN** the batched tmux command fails
-- **THEN** the monitor SHALL fall back to individual `set-option` calls per session
+#### Scenario: 控制连接中断或监视器退出
+- **WHEN** 控制连接中断且当前监视器仍拥有该 profile
+- **THEN** 监视器 SHALL 退避重连, 重新采集状态后继续工作
+- **WHEN** 最后一个业务会话结束或监视器退出
+- **THEN** 该监视器的观察会话和控制客户端 SHALL 一并回收
+- **WHEN** server 配置了 `exit-unattached` 且最后一个普通客户端离开
+- **THEN** 观察客户端 SHALL 退出, 让 server 按原配置结束
 
 ### Requirement: Hook status freshness check
 Hook-based status SHALL be trusted for short-circuiting only when the hook status file has been written recently. The "freshness window" is the maximum age (measured from the file's mtime to the current time) within which the hook result is considered authoritative. When the file is older than the freshness window, it is "stale" and MUST be treated as absent for the purpose of status detection.

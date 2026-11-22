@@ -285,7 +285,7 @@ impl StatusPoller {
 
                 // For agents that don't set their own title, keep the pane
                 // title aligned with the session title. Codex is handled by
-                // its dedicated tmux monitor so the dashboard poller does
+                // the profile notification monitor so the dashboard poller does
                 // not race the live waiting indicator.
                 let agent_manages_title =
                     crate::agents::get_agent(&inst.tool).is_some_and(|a| a.sets_own_title);

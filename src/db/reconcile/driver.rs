@@ -1,8 +1,7 @@
-use std::collections::HashSet;
+use anyhow::{Context, Result};
 
-use anyhow::Result;
-
-use crate::db::Store;
+use super::topology::{self, Window};
+use crate::db::{AgentSlot, Store};
 use crate::session::{Instance, Storage};
 
 pub(super) fn run(profile: &str) -> Result<()> {
@@ -12,15 +11,25 @@ pub(super) fn run(profile: &str) -> Result<()> {
     };
     let instances = storage.load()?;
     let revision = serde_json::to_value(&instances)?;
-    drop(operation);
-
     let store = Store::open_with_schema(profile)?;
     store.conn.busy_timeout(std::time::Duration::ZERO)?;
 
     let listed_at = crate::db::now_unix();
-    let mut live_panes = HashSet::new();
+    let snapshot = topology::read(profile, None)?;
+    let mut work = Vec::new();
+    for instance in &instances {
+        let name = crate::tmux::Session::generate_name(&instance.id, &instance.title);
+        if let Some(window) = snapshot.windows.get(&name) {
+            if !pending(instance) {
+                let slots = store.read_slots_for_instance(&instance.id)?;
+                work.push((instance, name, window, slots));
+            }
+        }
+    }
+    drop(operation);
+
     let mut gc_safe = true;
-    for original in &instances {
+    for (instance, name, window, slots) in work {
         let Some(operation) = storage.try_operation_lock()? else {
             return Ok(());
         };
@@ -28,8 +37,30 @@ pub(super) fn run(profile: &str) -> Result<()> {
         if gc_safe && serde_json::to_value(&current)? != revision {
             gc_safe = false;
         }
-        if let Some(instance) = current.iter().find(|instance| instance.id == original.id) {
-            reconcile_instance(&store, instance, &mut live_panes);
+        if !gc_safe {
+            let Some(latest) = current.iter().find(|latest| latest.id == instance.id) else {
+                continue;
+            };
+            if serde_json::to_value(latest)? != serde_json::to_value(instance)? {
+                continue;
+            }
+        }
+        // A completed operation may have replaced only the durable slot.
+        if store.read_slots_for_instance(&instance.id)? != slots {
+            gc_safe = false;
+            continue;
+        }
+        if let Err(error) = reconcile_instance(
+            &store,
+            instance,
+            &name,
+            window,
+            &slots,
+            snapshot.sampled_before,
+            profile,
+        ) {
+            gc_safe = false;
+            tracing::debug!("Reconcile for {} deferred: {error:#}", instance.id);
         }
         drop(operation);
         std::thread::yield_now();
@@ -38,34 +69,66 @@ pub(super) fn run(profile: &str) -> Result<()> {
     let Some(_operation) = storage.try_operation_lock()? else {
         return Ok(());
     };
-    // A concurrent edit can create unobserved panes; retry GC on a stable pass.
     if gc_safe && serde_json::to_value(storage.load()?)? == revision {
-        super::gc_orphan_pane_live(&store, &live_panes, listed_at);
+        if let Some(live) = &snapshot.live {
+            super::gc_orphan_pane_live(&store, live, listed_at, || {
+                let current = topology::read(profile, None)?;
+                anyhow::ensure!(
+                    current.server == snapshot.server,
+                    "Tmux server changed before GC"
+                );
+                current.live.context("Incomplete tmux inventory before GC")
+            })?;
+        }
     }
     Ok(())
 }
 
-fn reconcile_instance(store: &Store, inst: &Instance, live_panes: &mut HashSet<String>) {
-    let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
-    let panes = super::list_session_panes(&session_name);
-    if panes.is_empty() {
-        return;
-    }
-    live_panes.extend(panes.iter().map(|(_, id)| id.clone()));
-    if inst.managed_primary_replacement.is_some()
+fn pending(inst: &Instance) -> bool {
+    inst.managed_primary_replacement.is_some()
         || inst
             .managed_panes
             .iter()
             .any(|pane| pane.pending_slot_transition.is_some())
+}
+
+fn reconcile_instance(
+    store: &Store,
+    inst: &Instance,
+    name: &str,
+    window: &Window,
+    slots: &[AgentSlot],
+    sampled_before: u64,
+    profile: &str,
+) -> Result<()> {
+    if let Err(error) =
+        super::capture_codex_bindings(store, inst, name, window, slots, sampled_before, profile)
     {
-        return;
-    }
-    let primary = crate::tmux::get_agent_pane_id(&session_name);
-    if let Err(error) = super::capture_codex_bindings(store, inst, &panes, primary.as_deref()) {
         tracing::debug!("Codex bindings for {} unavailable: {error:#}", inst.id);
     }
-    if let Err(error) = super::reconcile_session(store, inst, &panes, primary.as_deref()) {
-        tracing::debug!("reconcile: session {} failed: {error:#}", inst.id);
-    }
-    super::capture_coherent_layout(store, &inst.id, &session_name, &panes);
+    // All slot and capture reads use the same SQLite version, established before
+    // the first ownership check. A competing write prevents snapshot promotion.
+    let tx = store.conn.unchecked_transaction()?;
+    let mut confirmed = false;
+    let mut confirm = || -> Result<()> {
+        if !confirmed {
+            anyhow::ensure!(
+                window.still_owned(profile, name)?,
+                "Tmux window changed during reconcile"
+            );
+            confirmed = true;
+        }
+        Ok(())
+    };
+    super::apply_captures(
+        store,
+        inst,
+        &window.panes,
+        window.primary.as_deref(),
+        window.server_started(),
+        &mut confirm,
+    )?;
+    super::capture_coherent_layout(store, &inst.id, window, &mut confirm)?;
+    tx.commit()?;
+    Ok(())
 }

@@ -420,9 +420,14 @@ When a session is created with the Shell tool as the left (main) pane, the shell
 
 系统 SHALL 提供仅限非托管 host xats Codex 的显式恢复入口,
 要求完整 session ID、slot 和原 thread UUID, 不猜测历史归属.
-系统 SHALL 验证当前 pane 启动、原线程 UUID、规范化目录和 notLoaded 状态,
+系统 SHALL 验证原线程 UUID, 规范化目录和 notLoaded 状态.
+存在活 Codex launch 时 SHALL 继续验证当前启动和 xats 证据.
+pane 已退出或只剩 shell 时 SHALL 验证其归属及恢复前后没有活 Codex 启动,
+以 slot, pane, generation, key 和原 ID 做事务 CAS, 保存空 launch ID 的显式恢复来源及审计,
 拒绝与当前 argv、xats 或其他 slot 的已知线程冲突.
-系统 SHALL 在验证前后核对启动与 xats 证据, 通过事务和 CAS 持久化恢复证明及审计记录.
+活 Codex 分支 SHALL 在验证前后核对启动与 xats 证据;
+离线分支 SHALL 在验证前后确认 pane 归属及没有新 Codex 启动.
+两条分支 SHALL 通过事务和 CAS 持久化恢复证明及审计记录.
 该入口 SHALL 不重启进程或创建新对话, 用户随后执行普通 Resume.
 
 存活的普通 host xats Codex 的 CLI restart SHALL 复用逐 pane Resume,

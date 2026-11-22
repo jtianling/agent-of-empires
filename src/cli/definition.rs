@@ -122,6 +122,12 @@ pub enum Commands {
     #[command(name = "__codex-name", hide = true)]
     CodexName(super::codex_name::CodexNameArgs),
 
+    #[command(name = "__codex-launch", hide = true)]
+    CodexLaunch(crate::codex_launch::CodexLaunchArgs),
+
+    #[command(name = "__codex-arguments", hide = true)]
+    CodexArguments,
+
     /// Internal: own one exact OpenCode server/session runtime (hidden).
     #[command(name = "__opencode-runtime", hide = true)]
     OpenCodeRuntime(OpenCodeRuntimeArgs),

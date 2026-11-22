@@ -106,6 +106,7 @@ fn server_header_override_is_valid_without_exposing_token_or_runtime_profile_fla
         yolo: true,
         model: None,
         effort: None,
+        service_tier: None,
         error: None,
     };
     let command = server_command(

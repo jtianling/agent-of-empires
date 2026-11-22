@@ -1,20 +1,31 @@
-use std::collections::{HashMap, HashSet};
+#[cfg(any(test, not(any(target_os = "macos", target_os = "linux"))))]
+use crate::process::commands_in_tree;
+use std::collections::HashSet;
 use std::path::Path;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
 use crate::codex_xats::{self, BindingRequest};
-use crate::db::{reconcile::AssignedPane, AgentSlot, Store};
+use crate::db::reconcile::{AssignedPane, ObservedPane};
+use crate::db::{AgentSlot, Store};
 use crate::session::Instance;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Launch {
     pane_pid: u32,
-    launch_id: String,
-    codex_pids: Vec<u32>,
+    tree: LaunchTree,
     cwd: String,
     session_name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LaunchTree {
+    launch_id: String,
+    codex_pids: Vec<u32>,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    starts: Vec<(u32, u64)>,
 }
 
 pub fn maybe_claim_for_pane(
@@ -23,11 +34,21 @@ pub fn maybe_claim_for_pane(
     pane: &AssignedPane,
     is_primary: bool,
     expected: Option<&AgentSlot>,
+    observed: &ObservedPane<'_>,
+    owns_window: impl Fn() -> Result<bool>,
 ) {
     if is_primary && (inst.tool != "codex" || inst.has_command_override()) {
         return;
     }
-    if let Err(error) = claim_for_pane(store, inst, pane, is_primary, expected) {
+    if let Err(error) = claim_for_pane(
+        store,
+        inst,
+        pane,
+        is_primary,
+        expected,
+        observed,
+        owns_window,
+    ) {
         tracing::debug!("Codex binding for {} unavailable: {error:#}", pane.pane_id);
     }
 }
@@ -38,26 +59,81 @@ fn claim_for_pane(
     pane: &AssignedPane,
     is_primary: bool,
     expected: Option<&AgentSlot>,
+    observed: &ObservedPane<'_>,
+    owns_window: impl Fn() -> Result<bool>,
 ) -> Result<()> {
-    let Some(before) = read_launch(&pane.pane_id)? else {
+    if observed.pane_id != pane.pane_id
+        || observed.session_name != crate::tmux::Session::generate_name(&inst.id, &inst.title)
+        || observed.root_pid <= 1
+    {
+        return Ok(());
+    }
+    let Some(before) = launch_at(observed, false)? else {
         return Ok(());
     };
-    if before.session_name != crate::tmux::Session::generate_name(&inst.id, &inst.title) {
+    // A new or reassigned slot is itself a write based on the worker's inventory.
+    if !expected.is_some_and(|slot| slot.agent == "codex" && slot.tmux_pane == pane.pane_id)
+        && (read_launch(&pane.pane_id)?.as_ref() != Some(&before) || !owns_window()?)
+    {
         return Ok(());
     }
     let Some(slot) = capture_slot(store, inst, pane, is_primary, expected, &before.cwd)? else {
         return Ok(());
     };
-    let Some(thread_id) = resolve_thread(&pane.pane_id, &before)? else {
-        return Ok(());
-    };
-    if read_launch(&pane.pane_id)?.as_ref() != Some(&before) {
+    if already_captured(store, &slot, &before.tree.launch_id)? {
         return Ok(());
     }
-    if !store.capture_codex_binding(&slot, &before.launch_id, &thread_id)? {
+    let request = BindingRequest {
+        protocol_version: 1,
+        pane_id: pane.pane_id.clone(),
+        launch_id: before.tree.launch_id.clone(),
+    };
+    let Some(thread_id) = codex_xats::lookup(request)? else {
+        return Ok(());
+    };
+    if read_launch(&pane.pane_id)?.as_ref() != Some(&before) || !owns_window()? {
+        return Ok(());
+    }
+    if !store.capture_codex_binding(&slot, &before.tree.launch_id, &thread_id)? {
         tracing::debug!("Codex binding for {} superseded by restart", pane.pane_id);
     }
     Ok(())
+}
+
+// A live launch can switch threads without changing PID or launch UUID.
+const BINDING_RECHECK_SECS: i64 = 15;
+
+fn already_captured(store: &Store, slot: &AgentSlot, launch: &str) -> Result<bool> {
+    if slot.xats_identity_key.is_empty() || uuid::Uuid::try_parse(&slot.native_session_id).is_err()
+    {
+        return Ok(false);
+    }
+    let now = crate::db::now_unix();
+    Ok(store.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_slot s
+         JOIN codex_binding b USING(instance_id, slot)
+         JOIN pane_live p ON p.tmux_pane = s.tmux_pane
+         WHERE s.instance_id = ?1 AND s.slot = ?2 AND s.tmux_pane = ?3
+         AND s.agent = 'codex' AND s.cross_agent_team = 1
+         AND s.xats_runtime_generation = ?4 AND b.generation = s.xats_runtime_generation
+         AND s.xats_identity_key = ?5 AND b.identity_key = s.xats_identity_key
+         AND s.native_session_id = ?6 AND b.thread_id = s.native_session_id
+         AND b.state = 'verified' AND b.launch_id = ?7
+         AND p.agent = s.agent AND p.native_session_id = b.thread_id AND p.cwd = s.cwd
+         AND p.updated_at = s.last_seen_at AND p.updated_at > ?8 AND p.updated_at <= ?9)",
+        rusqlite::params![
+            slot.instance_id,
+            slot.slot,
+            slot.tmux_pane,
+            slot.xats_runtime_generation,
+            slot.xats_identity_key,
+            slot.native_session_id,
+            launch,
+            now - BINDING_RECHECK_SECS,
+            now
+        ],
+        |row| row.get(0),
+    )?)
 }
 
 fn capture_slot(
@@ -112,14 +188,6 @@ fn capture_slot(
     }))
 }
 
-fn resolve_thread(pane: &str, launch: &Launch) -> Result<Option<String>> {
-    codex_xats::lookup(BindingRequest {
-        protocol_version: 1,
-        pane_id: pane.to_string(),
-        launch_id: launch.launch_id.clone(),
-    })
-}
-
 pub(crate) fn recover_explicit_binding(
     store: &Store,
     slot: &AgentSlot,
@@ -136,8 +204,9 @@ pub(crate) fn recover_explicit_binding(
         slot.native_session_id.is_empty() || slot.native_session_id == thread,
         "Slot already records a different conversation"
     );
-    let before = read_launch_checked(&slot.tmux_pane, true)?
-        .context("Codex launch is unavailable; no binding was changed")?;
+    let Some(before) = read_launch_checked(&slot.tmux_pane, true)? else {
+        return recover_offline_binding(store, slot, session, endpoint, thread);
+    };
     anyhow::ensure!(
         before.session_name == session,
         "Codex pane belongs to another session"
@@ -150,7 +219,7 @@ pub(crate) fn recover_explicit_binding(
         "Codex launch changed during recovery"
     );
     anyhow::ensure!(
-        store.recover_codex_binding(slot, &before.launch_id, thread)?,
+        store.recover_codex_binding(slot, &before.tree.launch_id, thread)?,
         "Codex slot changed during recovery; no binding was changed"
     );
     tracing::info!(
@@ -162,11 +231,48 @@ pub(crate) fn recover_explicit_binding(
     Ok(())
 }
 
+fn recover_offline_binding(
+    store: &Store,
+    slot: &AgentSlot,
+    session: &str,
+    endpoint: &str,
+    thread: &str,
+) -> Result<()> {
+    verify_offline_location(&slot.tmux_pane, session)?;
+    crate::codex_permissions::verify_recovery_thread(endpoint, thread, &slot.cwd)?;
+    anyhow::ensure!(
+        read_launch_checked(&slot.tmux_pane, true)?.is_none(),
+        "Codex launched during recovery; no binding was changed"
+    );
+    verify_offline_location(&slot.tmux_pane, session)?;
+    anyhow::ensure!(
+        store.recover_offline_codex_binding(slot, thread)?,
+        "Codex slot changed during recovery; no binding was changed"
+    );
+    tracing::info!(
+        instance_id = slot.instance_id,
+        slot = slot.slot,
+        thread_id = thread,
+        "Recovered explicitly selected offline Codex thread"
+    );
+    Ok(())
+}
+
+fn verify_offline_location(pane: &str, session: &str) -> Result<()> {
+    if let Some(location) = crate::tmux::managed_pane::locate(pane)? {
+        anyhow::ensure!(
+            location.session == session && location.marker.is_none(),
+            "Offline Codex pane moved or is controlled by another owner"
+        );
+    }
+    Ok(())
+}
+
 fn verify_selected_thread(pane: &str, launch: &Launch, thread: &str) -> Result<()> {
-    for pid in &launch.codex_pids {
+    for pid in &launch.tree.codex_pids {
         let args = crate::process::arguments(*pid)?;
         anyhow::ensure!(
-            launch_from_args(&args).as_deref() == Some(&launch.launch_id),
+            launch_from_args(&args).as_deref() == Some(&launch.tree.launch_id),
             "Live Codex launch arguments changed during recovery"
         );
         if let Some(resuming) = resume_thread_from_args(&args) {
@@ -179,7 +285,7 @@ fn verify_selected_thread(pane: &str, launch: &Launch, thread: &str) -> Result<(
     if let Some(bound) = codex_xats::lookup_for_resume(BindingRequest {
         protocol_version: 1,
         pane_id: pane.into(),
-        launch_id: launch.launch_id.clone(),
+        launch_id: launch.tree.launch_id.clone(),
     })? {
         anyhow::ensure!(
             bound == thread,
@@ -203,7 +309,7 @@ pub(crate) fn verify_live_resume(
     let thread = codex_xats::lookup_for_resume(BindingRequest {
         protocol_version: 1,
         pane_id: slot.tmux_pane.clone(),
-        launch_id: before.launch_id.clone(),
+        launch_id: before.tree.launch_id.clone(),
     })?;
     match thread {
         Some(thread) if thread == slot.native_session_id => {}
@@ -211,7 +317,7 @@ pub(crate) fn verify_live_resume(
         None => {
             if !store.codex_resume_launch_verified(
                 slot,
-                &before.launch_id,
+                &before.tree.launch_id,
                 resume_thread_in_processes(&before)?.as_deref(),
             )? {
                 bail!("live Codex conversation is not yet verified; wait before resuming");
@@ -229,11 +335,12 @@ pub(crate) fn verify_live_resume(
 }
 
 pub(crate) fn current_launch_id(pane: &str) -> Result<Option<String>> {
-    Ok(read_launch(pane)?.map(|launch| launch.launch_id))
+    Ok(read_launch(pane)?.map(|launch| launch.tree.launch_id))
 }
 
 pub(crate) async fn current_launch_id_async(pane: &str) -> Result<Option<String>> {
     let timeout = std::time::Duration::from_secs(5);
+    let sampled_before = crate::process::pane_sample_time()?;
     let mut tmux = crate::tmux::tmux_command();
     tmux.args(["display-message", "-p", "-t", pane, "#{pane_pid}"]);
     let output = crate::process::output_with_timeout(tmux, timeout).await?;
@@ -246,16 +353,32 @@ pub(crate) async fn current_launch_id_async(pane: &str) -> Result<Option<String>
     let Some(pane_pid) = parse_pane_pid(String::from_utf8(output.stdout)?.trim())? else {
         return Ok(None);
     };
-    let mut ps = Command::new("ps");
-    ps.args(["-Ao", "pid=,ppid=,command="]);
-    let output = crate::process::output_with_timeout(ps, timeout).await?;
-    if !output.status.success() {
-        bail!(
-            "Reading Codex name process tree failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let read =
+            tokio::task::spawn_blocking(move || read_launch_tree(pane_pid, false, sampled_before));
+        let tree = tokio::time::timeout(timeout, read)
+            .await
+            .context("Timed out reading Codex process tree")?
+            .context("Joining Codex process query")??;
+        Ok(tree.map(|t| t.launch_id))
     }
-    launch_in_tree(&String::from_utf8(output.stdout)?, pane_pid)
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let mut ps = Command::new("ps");
+        ps.args(["-Ao", "pid=,ppid=,command="]);
+        let output = crate::process::output_with_timeout(ps, timeout).await?;
+        if !output.status.success() {
+            bail!(
+                "Reading Codex name process tree failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        launch_in_tree(&commands_in_tree(
+            &String::from_utf8(output.stdout)?,
+            pane_pid,
+        ))
+    }
 }
 
 fn read_launch(pane: &str) -> Result<Option<Launch>> {
@@ -263,17 +386,37 @@ fn read_launch(pane: &str) -> Result<Option<Launch>> {
 }
 
 fn read_launch_checked(pane: &str, require_bound: bool) -> Result<Option<Launch>> {
-    let output = crate::tmux::tmux_command()
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{pane_pid}\t#{session_name}\t#{pane_current_path}",
-        ])
-        .output()
-        .context("reading Codex pane process")?;
+    let sampled_before = crate::process::pane_sample_time()?;
+    let Some((root_pid, session_name, cwd)) = live_location(pane)? else {
+        return Ok(None);
+    };
+    launch_at(
+        &ObservedPane {
+            pane_id: pane,
+            root_pid,
+            sampled_before,
+            session_name: &session_name,
+            cwd: &cwd,
+        },
+        require_bound,
+    )
+}
+
+pub(super) fn live_location(pane: &str) -> Result<Option<(u32, String, String)>> {
+    let output = crate::tmux::control::output(&[
+        "display-message",
+        "-p",
+        "-t",
+        pane,
+        "#{pane_pid}\t#{session_name}\t#{pane_current_path}",
+    ])
+    .context("reading Codex pane process")?;
     if !output.status.success() {
+        tracing::debug!(
+            "Reading Codex pane location for {pane} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
         return Ok(None);
     }
     let text = String::from_utf8(output.stdout)?;
@@ -287,36 +430,95 @@ fn read_launch_checked(pane: &str, require_bound: bool) -> Result<Option<Launch>
     let Some(pane_pid) = parse_pane_pid(pid)? else {
         return Ok(None);
     };
+    Ok(Some((pane_pid, session_name.to_owned(), cwd.to_owned())))
+}
+
+fn launch_at(observed: &ObservedPane<'_>, require_bound: bool) -> Result<Option<Launch>> {
+    let tree = read_launch_tree(observed.root_pid, require_bound, observed.sampled_before)?;
+    Ok(tree.map(|tree| Launch {
+        pane_pid: observed.root_pid,
+        tree,
+        cwd: observed.cwd.to_string(),
+        session_name: observed.session_name.to_string(),
+    }))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn read_launch_tree(
+    pane_pid: u32,
+    require_bound: bool,
+    sampled_before: u64,
+) -> Result<Option<LaunchTree>> {
+    let processes = crate::process::pane_processes(pane_pid, sampled_before)?;
+    native_launch_tree(pane_pid, require_bound, &processes)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn native_launch_tree(
+    pane_pid: u32,
+    require_bound: bool,
+    processes: &[crate::process::PaneProcess],
+) -> Result<Option<LaunchTree>> {
+    let mut launches = HashSet::new();
+    let mut codex_pids = Vec::new();
+    let mut starts = Vec::new();
+    for process in processes {
+        let codex = codex_args_start(&process.args).is_some();
+        if process.pid == pane_pid || codex {
+            starts.push((process.pid, process.start));
+        }
+        if codex {
+            codex_pids.push(process.pid);
+            launches.extend(launch_from_args(&process.args));
+        }
+    }
+    starts.sort_unstable();
+    codex_pids.sort_unstable();
+    let launch_id = unique_launch(launches)?;
+    check_bound(require_bound, &launch_id, &codex_pids)?;
+    Ok(launch_id.map(|launch_id| LaunchTree {
+        launch_id,
+        codex_pids,
+        starts,
+    }))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_launch_tree(
+    pane_pid: u32,
+    require_bound: bool,
+    _sampled_before: u64,
+) -> Result<Option<LaunchTree>> {
     let output = Command::new("ps")
         .args(["-Ao", "pid=,ppid=,command="])
         .output()
         .context("reading Codex process tree")?;
-    if !output.status.success() {
-        bail!("cannot read Codex process tree");
-    }
+    anyhow::ensure!(
+        output.status.success(),
+        "Reading Codex process tree: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let listing = String::from_utf8(output.stdout)?;
-    let launch_id = launch_in_tree(&listing, pane_pid)?;
-    if require_bound
-        && launch_id.is_none()
-        && commands_in_tree(&listing, pane_pid)
-            .iter()
-            .any(|(_, command)| is_codex_command(command))
-    {
-        bail!("live Codex has no verified launch identity; cannot resume stored history");
-    }
-    let mut codex_pids: Vec<_> = commands_in_tree(&listing, pane_pid)
+    let commands = commands_in_tree(&listing, pane_pid);
+    let launch_id = launch_in_tree(&commands)?;
+    let mut codex_pids: Vec<_> = commands
         .into_iter()
         .filter(|(_, command)| is_codex_command(command))
         .map(|(pid, _)| pid)
         .collect();
     codex_pids.sort_unstable();
-    Ok(launch_id.map(|launch_id| Launch {
-        pane_pid,
+    check_bound(require_bound, &launch_id, &codex_pids)?;
+    Ok(launch_id.map(|launch_id| LaunchTree {
         launch_id,
         codex_pids,
-        cwd: cwd.to_string(),
-        session_name: session_name.to_string(),
     }))
+}
+
+fn check_bound(required: bool, launch: &Option<String>, pids: &[u32]) -> Result<()> {
+    if required && launch.is_none() && !pids.is_empty() {
+        bail!("live Codex has no verified launch identity; cannot resume stored history");
+    }
+    Ok(())
 }
 
 fn parse_pane_pid(value: &str) -> Result<Option<u32>> {
@@ -324,9 +526,14 @@ fn parse_pane_pid(value: &str) -> Result<Option<u32>> {
         return Ok(None);
     }
     let pid = value.parse::<u32>().context("Invalid Codex pane PID")?;
+    anyhow::ensure!(
+        pid != 1 && pid <= i32::MAX as u32,
+        "Invalid Codex pane PID {pid}"
+    );
     Ok((pid != 0).then_some(pid))
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn is_codex_command(command: &str) -> bool {
     let mut words = command.split_whitespace();
     let name = words.next().and_then(|word| Path::new(word).file_name());
@@ -340,9 +547,9 @@ fn is_codex_command(command: &str) -> bool {
 
 fn resume_thread_in_processes(launch: &Launch) -> Result<Option<String>> {
     let mut threads = HashSet::new();
-    for pid in &launch.codex_pids {
+    for pid in &launch.tree.codex_pids {
         let args = crate::process::arguments(*pid)?;
-        if launch_from_args(&args).as_deref() != Some(&launch.launch_id) {
+        if launch_from_args(&args).as_deref() != Some(&launch.tree.launch_id) {
             bail!("live Codex launch arguments changed; cannot resume stored history");
         }
         let Some(thread) = resume_thread_from_args(&args) else {
@@ -379,54 +586,23 @@ fn resume_thread_from_args(words: &[String]) -> Option<String> {
     Some(thread.clone())
 }
 
-fn launch_in_tree(listing: &str, root: u32) -> Result<Option<String>> {
-    let launches = commands_in_tree(listing, root)
-        .into_iter()
+#[cfg(any(test, not(any(target_os = "macos", target_os = "linux"))))]
+fn launch_in_tree(commands: &[(u32, &str)]) -> Result<Option<String>> {
+    let launches = commands
+        .iter()
         .filter_map(|(_, command)| launch_from_command(command))
         .collect::<HashSet<_>>();
+    unique_launch(launches)
+}
+
+fn unique_launch(launches: HashSet<String>) -> Result<Option<String>> {
     if launches.len() > 1 {
         bail!("multiple Codex launches in one pane");
     }
     Ok(launches.into_iter().next())
 }
 
-fn commands_in_tree(listing: &str, root: u32) -> Vec<(u32, &str)> {
-    if root == 0 {
-        return Vec::new();
-    }
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut commands = HashMap::new();
-    for line in listing.lines() {
-        let mut fields = line.trim().splitn(2, char::is_whitespace);
-        let Some(pid) = fields.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
-        let mut fields = fields
-            .next()
-            .unwrap_or_default()
-            .trim_start()
-            .splitn(2, char::is_whitespace);
-        let Some(parent) = fields.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
-        children.entry(parent).or_default().push(pid);
-        commands.insert(pid, fields.next().unwrap_or_default().trim_start());
-    }
-    let mut queue = vec![root];
-    let mut seen = HashSet::new();
-    let mut found = Vec::new();
-    while let Some(pid) = queue.pop() {
-        if !seen.insert(pid) {
-            continue;
-        }
-        if let Some(command) = commands.get(&pid) {
-            found.push((pid, *command));
-        }
-        queue.extend(children.get(&pid).into_iter().flatten());
-    }
-    found
-}
-
+#[cfg(any(test, not(any(target_os = "macos", target_os = "linux"))))]
 fn launch_from_command(command: &str) -> Option<String> {
     let words = shell_words::split(command).ok()?;
     launch_from_args(&words)
@@ -453,11 +629,13 @@ fn launch_from_args(words: &[String]) -> Option<String> {
         if !matches!(pair[0].as_str(), "-c" | "--config") {
             return None;
         }
-        let value = pair[1].strip_prefix("xats.agent_id=")?.trim_matches('"');
-        uuid::Uuid::try_parse(value).ok().map(|_| value.to_string())
+        pair[1]
+            .strip_prefix("xats.agent_id=")
+            .map(|value| value.trim_matches('"'))
     });
     let first = launches.next()?;
-    launches.next().is_none().then_some(first)
+    uuid::Uuid::try_parse(first).ok()?;
+    launches.next().is_none().then(|| first.to_owned())
 }
 
 #[cfg(test)]
@@ -468,16 +646,12 @@ mod tests {
 
     #[test]
     fn missing_and_dead_panes_have_no_process() {
+        for invalid in ["invalid", "1", "4294967295"] {
+            assert!(parse_pane_pid(invalid).is_err());
+        }
         assert_eq!(parse_pane_pid("").unwrap(), None);
         assert_eq!(parse_pane_pid("0").unwrap(), None);
         assert_eq!(parse_pane_pid("42").unwrap(), Some(42));
-        assert!(parse_pane_pid("invalid").is_err());
-    }
-
-    #[test]
-    fn dead_pane_pid_does_not_include_other_processes() {
-        let listing = "1 0 /sbin/launchd\n2 1 codex\n";
-        assert!(commands_in_tree(listing, 0).is_empty());
     }
 
     #[test]
@@ -516,16 +690,109 @@ mod tests {
     }
 
     #[test]
-    fn siblings_in_same_directory_do_not_share_launches() {
-        let listing = format!(
-            "10 1 zsh\n11 10 codex -C /same -c xats.agent_id=\"{LEFT}\"\n\
-             20 1 zsh\n21 20 codex -C /same -c xats.agent_id=\"{RIGHT}\""
-        );
-        assert_eq!(launch_in_tree(&listing, 10).unwrap().as_deref(), Some(LEFT));
-        assert_eq!(
-            launch_in_tree(&listing, 20).unwrap().as_deref(),
-            Some(RIGHT)
-        );
+    fn reconcile_only_skips_an_exact_verified_capture() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::ensure_schema(&conn).unwrap();
+        let store = Store {
+            conn,
+            _inventory_snapshot: None,
+        };
+        let config = crate::session::PaneConfig::new("codex", "/project", true, true);
+        store
+            .record_launched_slot_config_if_absent("i", 0, &config, "%1", "key", 1)
+            .unwrap();
+        let slot = || store.read_slots_for_instance("i").unwrap().remove(0);
+        assert!(!already_captured(&store, &slot(), LEFT).unwrap());
+        assert!(store.capture_codex_binding(&slot(), LEFT, RIGHT).unwrap());
+        let verified = slot();
+        assert!(already_captured(&store, &verified, LEFT).unwrap());
+        assert!(!already_captured(&store, &verified, RIGHT).unwrap());
+        for stale in [
+            AgentSlot {
+                tmux_pane: "%2".into(),
+                ..verified.clone()
+            },
+            AgentSlot {
+                xats_identity_key: "other".into(),
+                ..verified.clone()
+            },
+            AgentSlot {
+                xats_runtime_generation: verified.xats_runtime_generation + 1,
+                ..verified.clone()
+            },
+            AgentSlot {
+                native_session_id: LEFT.into(),
+                ..verified.clone()
+            },
+        ] {
+            assert!(!already_captured(&store, &stale, LEFT).unwrap());
+        }
+        for state in ["awaiting_launch", "restarting"] {
+            store
+                .conn
+                .execute("UPDATE codex_binding SET state = ?1", [state])
+                .unwrap();
+            assert!(!already_captured(&store, &verified, LEFT).unwrap());
+            assert!(!already_captured(&store, &verified, RIGHT).unwrap());
+        }
+        store
+            .conn
+            .execute("UPDATE codex_binding SET state = 'verified'", [])
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE pane_live SET updated_at = 1", [])
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE agent_slot SET last_seen_at = 1", [])
+            .unwrap();
+        assert!(!already_captured(&store, &verified, LEFT).unwrap());
+        assert!(store.capture_codex_binding(&verified, LEFT, RIGHT).unwrap());
+        store.delete_pane_live("%1").unwrap();
+        assert!(!already_captured(&store, &verified, LEFT).unwrap());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn native_launch_rechecks_pid_incarnations_and_preserves_argv() {
+        use crate::process::PaneProcess;
+        let shell = PaneProcess {
+            pid: 10,
+            parent: 2,
+            start: 12,
+            args: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("codex -c xats.agent_id={RIGHT}"),
+            ],
+        };
+        let codex = PaneProcess {
+            pid: 11,
+            parent: 10,
+            start: 34,
+            args: vec![
+                "node".into(),
+                "/with spaces/codex.js".into(),
+                "-c".into(),
+                format!("xats.agent_id={LEFT}"),
+            ],
+        };
+        let mut invalid = codex.args.clone();
+        invalid.extend(["-c".into(), format!("xats.agent_id={LEFT}�")]);
+        assert_eq!(launch_from_args(&invalid), None);
+        let mut tree = [shell, codex];
+        let observe =
+            |processes: &[PaneProcess]| native_launch_tree(10, true, processes).unwrap().unwrap();
+        let before = observe(&tree);
+        assert_eq!(before.launch_id, LEFT);
+        assert_eq!(before.codex_pids, [11]);
+        tree.reverse();
+        assert_eq!(before, observe(&tree));
+        tree[0].start += 1;
+        assert_ne!(before, observe(&tree));
+        tree[0].args.truncate(2);
+        assert!(native_launch_tree(10, true, &tree).is_err());
     }
 
     #[test]
@@ -537,9 +804,9 @@ mod tests {
             "10 1 codex -c xats.agent_id={LEFT}\n\
              11 10 codex -c xats.agent_id={RIGHT}"
         );
-        assert!(launch_in_tree(&listing, 10).is_err());
+        assert!(launch_in_tree(&commands_in_tree(&listing, 10)).is_err());
         assert_eq!(
-            launch_in_tree("10 1 codex resume old-thread", 10).unwrap(),
+            launch_in_tree(&commands_in_tree("10 1 codex resume old-thread", 10)).unwrap(),
             None
         );
     }

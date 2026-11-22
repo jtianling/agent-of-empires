@@ -461,6 +461,18 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(pane_title, "Codex Wait Title");
+    let owner_option = "@aoe_codex_title_monitor_pid";
+    assert!(h
+        .tmux_display_message(&tmux_name, "#{@aoe_codex_title_monitor_pid}")
+        .is_empty());
+    let seeded = h
+        .tmux_command(&["set-option", "-t", &tmux_name, owner_option, "legacy-owner"])
+        .unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
 
     // Drive Codex into a real Waiting state. A bare `› ` input prompt is Codex's
     // IDLE prompt (see detect_codex_status / test_detect_codex_status_idle_at_prompt),
@@ -481,6 +493,37 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(waiting_title, "✋ Codex Wait Title");
+    let observer_pid = || {
+        let clients = h
+            .tmux_command(&[
+                "list-clients",
+                "-f",
+                "#{?@aoe_control_observer,#{client_control_mode},0}",
+                "-F",
+                "#{client_pid}",
+            ])
+            .unwrap();
+        assert!(
+            clients.status.success(),
+            "{}",
+            String::from_utf8_lossy(&clients.stderr)
+        );
+        String::from_utf8(clients.stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .expect("one observer client")
+    };
+    let initial_observer = observer_pid();
+    assert_eq!(
+        h.tmux_display_message(&tmux_name, "#{session_attached}"),
+        "0"
+    );
+    assert!(
+        h.tmux_display_message(&tmux_name, "#{@aoe_codex_title_monitor_pid}")
+            .is_empty(),
+        "The shared monitor must retire the old owner and keep updating titles"
+    );
 
     h.type_text_to_target(
         &tmux_name,
@@ -497,6 +540,7 @@ fn test_codex_session_waiting_title_uses_hand_icon() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(resumed_title, "Codex Wait Title");
+    assert_eq!(observer_pid(), initial_observer);
 
     h.kill_tmux_target(&tmux_name);
 }

@@ -19,13 +19,14 @@ mod v008_xats_identity_key;
 mod v009_pane_launch_config;
 mod v010_xats_runtime_generation;
 mod v011_codex_binding;
+mod v012_pane_runtime_settings;
 
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 11;
+const CURRENT_VERSION: u32 = 12;
 const VERSION_FILE: &str = ".schema_version";
 
 struct Migration {
@@ -89,6 +90,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 11,
         name: "codex_binding",
         run: v011_codex_binding::run,
+    },
+    Migration {
+        version: 12,
+        name: "pane_runtime_settings",
+        run: v012_pane_runtime_settings::run,
     },
 ];
 

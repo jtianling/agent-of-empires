@@ -4,6 +4,10 @@ use rusqlite::{params, TransactionBehavior};
 use super::{AgentSlot, Store, MAX_XATS_RUNTIME_GENERATION};
 use crate::session::RestartMode;
 
+mod failure;
+mod launch;
+mod recovery;
+
 impl Store {
     pub(crate) fn codex_resume_launch_verified(
         &self,

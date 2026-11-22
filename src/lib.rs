@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod cli;
+pub mod codex_launch;
 mod codex_name;
 mod codex_permissions;
 mod codex_xats;

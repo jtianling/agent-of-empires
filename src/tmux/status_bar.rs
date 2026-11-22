@@ -3,16 +3,11 @@
 use anyhow::Result;
 #[cfg(test)]
 use ratatui::style::Color;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 use crate::session::Status;
 
 const ACTIVE_PANE_TITLE_FORMAT: &str = "#T";
-const CODEX_TITLE_MONITOR_PID_OPTION: &str = "@aoe_codex_title_monitor_pid";
-const CODEX_TITLE_MONITOR_TITLE_OPTION: &str = "@aoe_codex_title_monitor_title";
-const CODEX_TITLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_WAITING_TITLE_PREFIX: &str = "\u{270b} ";
 const STATUS_LEFT_FORMAT: &str = concat!(
     " #[fg=#22c55e,bold]#{@aoe_index}",
@@ -132,49 +127,45 @@ fn set_initial_pane_title(session_name: &str, title: &str) -> Result<()> {
     set_pane_title(session_name, title)
 }
 
-fn set_pane_title(target: &str, title: &str) -> Result<()> {
-    let output = crate::tmux::tmux_command()
-        .args(["select-pane", "-t", target, "-T", title])
-        .output()?;
+pub(super) fn set_pane_title(target: &str, title: &str) -> Result<()> {
+    let output = crate::tmux::control::output(&["select-pane", "-t", target, "-T", title])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::debug!("Failed to set pane title for {}: {}", target, stderr);
+        anyhow::bail!("Failed to set pane title for {}: {}", target, stderr.trim());
     }
 
     Ok(())
 }
 
 pub(super) fn unset_session_option(session_name: &str, option: &str) -> Result<()> {
-    let output = crate::tmux::tmux_command()
-        .args(["set-option", "-t", session_name, "-u", option])
-        .output()?;
+    let output = crate::tmux::control::output(&["set-option", "-t", session_name, "-u", option])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::debug!("Failed to unset tmux option {}: {}", option, stderr);
+        anyhow::bail!("Failed to unset tmux option {}: {}", option, stderr.trim());
     }
 
     Ok(())
 }
 
 pub(super) fn set_server_option(option: &str, value: &str) -> Result<()> {
-    let output = crate::tmux::tmux_command()
-        .args(["set-option", "-gq", option, value])
-        .output()?;
+    let output = crate::tmux::control::output(&["set-option", "-gq", option, value])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::debug!("Failed to set tmux server option {}: {}", option, stderr);
+        anyhow::bail!(
+            "Failed to set tmux server option {}: {}",
+            option,
+            stderr.trim()
+        );
     }
 
     Ok(())
 }
 
 pub(super) fn unset_server_option(option: &str) -> Result<()> {
-    let output = crate::tmux::tmux_command()
-        .args(["set-option", "-gqu", option])
-        .output()?;
+    let output = crate::tmux::control::output(&["set-option", "-gqu", option])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -185,9 +176,8 @@ pub(super) fn unset_server_option(option: &str) -> Result<()> {
 }
 
 pub(super) fn get_server_option(option: &str) -> Option<String> {
-    let output = crate::tmux::tmux_command()
-        .args(["show-option", "-gv", option])
-        .output()
+    let output = crate::tmux::control::output(&["show-option", "-gv", option])
+        .map_err(|error| tracing::debug!("Reading tmux option {option} failed: {error}"))
         .ok()?;
 
     if output.status.success() {
@@ -195,36 +185,15 @@ pub(super) fn get_server_option(option: &str) -> Option<String> {
         if !value.is_empty() {
             return Some(value);
         }
+    } else {
+        tracing::debug!(
+            "Reading tmux option {option} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     None
-}
-
-fn session_exists(session_name: &str) -> bool {
-    crate::tmux::tmux_command()
-        .args(["has-session", "-t", session_name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn capture_pane(target: &str, lines: usize) -> Result<String> {
-    let output = crate::tmux::tmux_command()
-        .args([
-            "capture-pane",
-            "-t",
-            target,
-            "-p",
-            "-S",
-            &format!("-{}", lines),
-        ])
-        .output()?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Ok(String::new())
-    }
 }
 
 pub(super) fn pid_is_running(pid: &str) -> bool {
@@ -237,85 +206,6 @@ pub(super) fn pid_is_running(pid: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-pub(super) fn list_aoe_sessions() -> Result<Vec<String>> {
-    let output = crate::tmux::tmux_command()
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()?;
-
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|name| name.starts_with(crate::tmux::SESSION_PREFIX))
-        .map(str::to_string)
-        .collect())
-}
-
-pub fn ensure_codex_title_monitor(session_name: &str, title: &str) -> Result<()> {
-    set_session_option(session_name, CODEX_TITLE_MONITOR_TITLE_OPTION, title)?;
-
-    if get_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION)
-        .as_deref()
-        .is_some_and(pid_is_running)
-    {
-        return Ok(());
-    }
-
-    let current_exe = std::env::current_exe()?;
-    let mut child = Command::new(current_exe);
-    child
-        .args(["tmux", "monitor-codex-title", "--session", session_name])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    let monitor = child.spawn()?;
-    set_session_option(
-        session_name,
-        CODEX_TITLE_MONITOR_PID_OPTION,
-        &monitor.id().to_string(),
-    )?;
-    Ok(())
-}
-
-pub fn run_codex_title_monitor(session_name: &str) -> Result<()> {
-    let pid = std::process::id().to_string();
-    let startup_deadline = Instant::now() + Duration::from_secs(2);
-    let mut last_title: Option<String> = None;
-
-    while session_exists(session_name) {
-        match get_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION) {
-            Some(owner) if owner == pid => {}
-            Some(_) => break,
-            None if Instant::now() <= startup_deadline => {
-                thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            None => break,
-        }
-
-        let Some(title) = get_session_option(session_name, CODEX_TITLE_MONITOR_TITLE_OPTION) else {
-            break;
-        };
-        let pane_content = capture_pane(session_name, 50)?;
-        let status = crate::tmux::status_detection::detect_codex_status(&pane_content);
-        let desired = managed_agent_pane_title("codex", &title, status);
-        if last_title.as_deref() != Some(desired.as_str()) {
-            set_pane_title(session_name, &desired)?;
-            last_title = Some(desired);
-        }
-        thread::sleep(CODEX_TITLE_MONITOR_POLL_INTERVAL);
-    }
-
-    if get_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION).as_deref() == Some(&pid) {
-        let _ = unset_session_option(session_name, CODEX_TITLE_MONITOR_PID_OPTION);
-    }
-
-    Ok(())
 }
 
 /// Apply all configured tmux options to a session.

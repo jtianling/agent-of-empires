@@ -54,6 +54,21 @@ The system SHALL support restarting only the AoE-managed agent pane within a tmu
 ### Requirement: Agent launch command is reusable
 The agent launch command construction (binary, extra_args, yolo flags, env vars, custom instruction, model flag) SHALL be extracted into a reusable method so both initial session creation and pane respawn can share the same command-building logic.
 
+### Requirement: Codex 长会话的配置恢复
+
+恢复 Codex pane 时, 若原 thread 已卸载, SHALL 从该精确 thread 的持久化历史取得最后一份完整且归属匹配的配置快照.  快照不得仅因后续会话记录超过固定 tail 窗口而被忽略.  文件 SHALL 流式读取, 保留快照中的 model, effort 和 service tier, 不从其他 pane 或共享配置猜测缺失值.
+
+#### Scenario: 快照位于大型历史文件的较早位置
+
+- **WHEN** 右 pane 的 Codex thread 已卸载, 最后配置快照之后累计超过 4 MB 会话记录
+- **THEN** 恢复流程仍能取得该 thread 的最后完整快照, 并使用原会话 ID 与配置恢复
+- **AND** 不因末尾窗口内缺少快照而仅恢复左 pane
+
+#### Scenario: 忽略其他 thread 的配置
+
+- **WHEN** 历史中存在归属于其他 thread 的更新快照
+- **THEN** 只使用与目标 thread ID 精确匹配的最后配置
+
 The model flag is the pane's observed model, appended after `extra_args`, and applies only to `claude` panes as specified in `claude-model-continuity`. It SHALL be produced by this same reusable method rather than by any per-keybinding or per-restart-path special case, so every caller of the builder gets identical composition.
 
 #### Scenario: Respawn uses same command as initial start

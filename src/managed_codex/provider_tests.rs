@@ -115,6 +115,54 @@ fn exchanges(previous: Option<&str>, fresh: bool, provider: &str) -> Vec<Exchang
 }
 
 #[tokio::test]
+async fn pane_settings_override_shared_defaults_for_resume_and_fresh_threads() {
+    let previous = "019d1af9-a899-7df1-8f7d-a244126e5def";
+    for (stored, fresh) in [(Some(previous), false), (Some(previous), true)] {
+        for tier in [None, Some("priority"), Some("ultrafast")] {
+            let settings = crate::db::runtime_settings::RuntimeSettings {
+                model: "gpt-6.1-sol".into(),
+                effort: Some("xhigh".into()),
+                service_tier: tier.map(str::to_string),
+            };
+            let mut calls = exchanges(stored, fresh, "current-provider");
+            let (_, params, response) = calls
+                .iter_mut()
+                .find(|(method, _, _)| matches!(*method, "thread/start" | "thread/resume"))
+                .unwrap();
+            params["model"] = json!(settings.model);
+            params["serviceTier"] = json!(tier.unwrap_or("default"));
+            params["config"]["model_reasoning_effort"] = json!("xhigh");
+            params["config"]["service_tier"] = json!(tier.unwrap_or("default"));
+            response["model"] = json!(settings.model);
+            response["reasoningEffort"] = json!("xhigh");
+            response["serviceTier"] = json!(tier);
+            let (endpoint, server) = serve(calls).await;
+            let prepared = prepare_thread(
+                &endpoint,
+                &url::Url::parse("http://127.0.0.1:1234/mcp").unwrap(),
+                "/project",
+                "worker",
+                "test-token",
+                stored,
+                fresh,
+                false,
+                Some(&settings.model),
+                settings.effort.as_deref(),
+                Some(&settings),
+            )
+            .await
+            .unwrap();
+            assert!(prepared.error.is_none());
+            assert_eq!(
+                prepared.service_tier.as_deref(),
+                Some(tier.unwrap_or("default"))
+            );
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn uses_current_provider_for_resume_start_and_fresh_restart() {
     let previous = "019d1af9-a899-7df1-8f7d-a244126e5def";
     for (stored, fresh) in [
@@ -132,6 +180,7 @@ async fn uses_current_provider_for_resume_start_and_fresh_restart() {
             stored,
             fresh,
             false,
+            None,
             None,
             None,
         )
@@ -162,6 +211,7 @@ async fn rejects_loaded_thread_that_keeps_the_old_provider() {
         Some(previous),
         false,
         false,
+        None,
         None,
         None,
     )
@@ -195,6 +245,7 @@ fn generated_profile_keeps_the_selected_provider_for_the_remote_tui() {
         yolo: true,
         model: Some("gpt-6.1-sol".into()),
         effort: Some("xhigh".into()),
+        service_tier: None,
         error: None,
     };
     let cwd = "/project/with spaces.and\"quotes";
@@ -249,6 +300,7 @@ async fn requested_model_is_checked_for_new_and_resumed_threads() {
                 false,
                 Some("gpt-6.1-terra"),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -292,6 +344,7 @@ async fn verifies_explicit_effort_for_sol_and_terra_on_start_and_resume() {
                     false,
                     Some(model),
                     Some("xhigh"),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -327,6 +380,7 @@ async fn prepares_and_verifies_yolo_on_start_and_resume() {
             true,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -353,6 +407,7 @@ async fn retains_created_thread_when_yolo_is_rejected() {
         None,
         false,
         true,
+        None,
         None,
         None,
     )

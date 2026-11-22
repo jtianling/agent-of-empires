@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
         //
         // Append (not truncate): a single AoE action spawns several processes
         // that all enable debug logging (the TUI, `add`, `session start`, the
-        // notification/codex-title monitors, and `__record-pane` on every hook).
+        // notification monitors, and `__record-pane` on every hook).
         // `File::create` truncates, so concurrent processes would clobber each
         // other's log and leave it useless. Appending keeps one interleaved
         // timeline; POSIX O_APPEND makes per-line writes atomic across processes.
@@ -105,7 +105,6 @@ async fn main() -> Result<()> {
             use cli::tmux::TmuxCommands;
             return match command {
                 TmuxCommands::Status(args) => cli::tmux::run_status(args),
-                TmuxCommands::CodexTitleMonitor(args) => cli::tmux::run_codex_title_monitor(args),
                 TmuxCommands::MonitorNotifications(args) => {
                     cli::tmux::run_monitor_notifications(args)
                 }
@@ -132,6 +131,15 @@ async fn main() -> Result<()> {
         }
         Some(Commands::CodexProvider(args)) => return cli::codex_provider::run(args),
         Some(Commands::CodexName(args)) => return cli::codex_name::run(args).await,
+        Some(Commands::CodexArguments) => return agent_of_empires::codex_launch::write_arguments(),
+        Some(Commands::CodexLaunch(args)) => {
+            let profile = session::resolve_profile(cli.profile);
+            std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);
+            agent_of_empires::tmux::init_tmux_socket_name(Some(
+                agent_of_empires::tmux::socket_name_for_profile(&profile),
+            ));
+            return agent_of_empires::codex_launch::run(&profile, args).await;
+        }
         Some(Commands::OpenCodeRuntime(args)) => {
             let profile = session::resolve_profile(cli.profile);
             std::env::set_var("AGENT_OF_EMPIRES_PROFILE", &profile);

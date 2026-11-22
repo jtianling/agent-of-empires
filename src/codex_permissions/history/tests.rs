@@ -273,3 +273,25 @@ fn failed_backup_never_changes_metadata_and_cancellation_never_blindly_rolls_bac
     drop(fixture.migrate(fixture.history()).unwrap());
     assert_eq!(fixture.provider(THREAD), "current");
 }
+
+#[test]
+fn compressed_migration_matches_the_same_physical_rollout_and_enforces_containment() {
+    let fixture = Fixture::new();
+    let packed = fixture.rollout.with_extension("jsonl.zst");
+    let compressed = zstd::encode_all(fs::File::open(&fixture.rollout).unwrap(), 1).unwrap();
+    fs::write(&packed, &compressed).unwrap();
+    fs::remove_file(&fixture.rollout).unwrap();
+    for path in [&packed, &fixture.rollout] {
+        let mut thread = fixture.history();
+        thread.path = Some(path.clone());
+        fixture.migrate(thread).unwrap().rollback().unwrap();
+    }
+    assert_eq!(fs::read(&packed).unwrap(), compressed);
+    assert!(!fixture.rollout.exists());
+
+    let foreign = fixture.root.path().join("foreign.jsonl.zst");
+    fs::rename(&packed, &foreign).unwrap();
+    std::os::unix::fs::symlink(foreign, &packed).unwrap();
+    assert!(fixture.migrate(fixture.history()).is_err());
+    assert_eq!(fixture.provider(THREAD), "old");
+}

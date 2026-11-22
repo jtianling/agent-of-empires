@@ -10,10 +10,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 mod history;
 mod local;
+mod preflight;
 mod recovery;
+pub(crate) mod settings;
 pub(crate) use local::current_local_config;
 pub(crate) use local::current_local_provider;
 pub(crate) use local::current_local_resume_provider;
+pub(crate) use preflight::{preflight_resume, preflight_settings};
 pub(crate) use recovery::verify_recovery_thread;
 
 pub(crate) fn project_trust_override(working_dir: &str) -> String {
@@ -89,6 +92,7 @@ pub(crate) fn prepare_resume(
     thread_id: String,
     working_dir: String,
     yolo: bool,
+    settings: Option<crate::db::runtime_settings::RuntimeSettings>,
 ) -> Result<()> {
     uuid::Uuid::try_parse(&thread_id).context("invalid Codex resume thread ID")?;
     let url = url::Url::parse(&endpoint).context("invalid Codex app-server URL")?;
@@ -97,14 +101,23 @@ pub(crate) fn prepare_resume(
     }
     crate::xats_control::block_on_control("codex-permissions", move || {
         Box::pin(async move {
-            tokio::time::timeout(TIMEOUT, restore(&endpoint, &thread_id, &working_dir, yolo))
-                .await
-                .context("timed out preparing Codex resume")?
+            tokio::time::timeout(
+                TIMEOUT,
+                restore(&endpoint, &thread_id, &working_dir, yolo, settings),
+            )
+            .await
+            .context("timed out preparing Codex resume")?
         })
     })
 }
 
-async fn restore(endpoint: &str, thread_id: &str, working_dir: &str, yolo: bool) -> Result<()> {
+async fn restore(
+    endpoint: &str,
+    thread_id: &str,
+    working_dir: &str,
+    yolo: bool,
+    settings: Option<crate::db::runtime_settings::RuntimeSettings>,
+) -> Result<()> {
     let (mut socket, _) = connect_async(endpoint)
         .await
         .context("connecting to Codex to prepare resume")?;
@@ -124,7 +137,15 @@ async fn restore(endpoint: &str, thread_id: &str, working_dir: &str, yolo: bool)
         ))
         .await
         .context("initializing Codex permissions client")?;
-    restore_thread(&mut socket, thread_id, working_dir, yolo, endpoint).await?;
+    restore_thread(
+        &mut socket,
+        thread_id,
+        working_dir,
+        yolo,
+        endpoint,
+        settings,
+    )
+    .await?;
     socket
         .close(None)
         .await
@@ -137,6 +158,7 @@ async fn restore_thread(
     working_dir: &str,
     yolo: bool,
     endpoint: &str,
+    settings: Option<crate::db::runtime_settings::RuntimeSettings>,
 ) -> Result<()> {
     let config = request(
         socket,
@@ -146,14 +168,23 @@ async fn restore_thread(
     )
     .await?;
     let provider = current_provider(config.clone())?;
-    let params = json!({
+    let mut params = json!({
         "threadId": thread_id,
         "cwd": working_dir,
         "excludeTurns": true,
         "modelProvider": provider
     });
+    if let Some(settings) = &settings {
+        settings.validate("codex")?;
+        params["model"] = json!(settings.model);
+        params["serviceTier"] = json!(settings.service_tier.as_deref().unwrap_or("default"));
+        params["config"] = settings.codex_config();
+    }
     let resumed =
         resume_current_provider(socket, 3, params.clone(), &config, is_local(endpoint)).await?;
+    if let Some(settings) = &settings {
+        settings.verify_codex_response(&resumed)?;
+    }
     validate_resume(resumed, thread_id, &provider, false)?;
     if !yolo {
         return Ok(());
@@ -170,6 +201,9 @@ async fn restore_thread(
     )
     .await?;
     let verified = request(socket, 5, "thread/resume", params).await?;
+    if let Some(settings) = &settings {
+        settings.verify_codex_response(&verified)?;
+    }
     validate_resume(verified, thread_id, &provider, true)
 }
 

@@ -101,6 +101,7 @@ impl Instance {
         skip_on_launch: bool,
     ) -> Result<()> {
         let mode = self.managed_primary_launch_mode(restart)?;
+        self.capture_primary_runtime_settings()?;
         crate::managed_xats::stage_restart(self)?;
         persist(storage, instances, groups, self)?;
         crate::managed_xats::prepare(self)?;

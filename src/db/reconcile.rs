@@ -16,6 +16,9 @@ use crate::db::{Store, MAX_SLOT};
 use crate::session::Instance;
 
 mod driver;
+mod topology;
+
+pub use topology::ObservedPane;
 
 /// One pane of a managed session, after slot assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +298,10 @@ fn try_list_session_panes(session_name: &str) -> Result<Vec<(u32, String)>> {
 ///
 /// Best-effort: store/tmux failures for one session do not abort the others.
 pub fn reconcile_all(profile: &str, _instances: &[Instance]) {
+    reconcile_profile(profile);
+}
+
+pub fn reconcile_profile(profile: &str) {
     if let Err(error) = driver::run(profile) {
         tracing::warn!("reconcile failed: {error:#}");
     }
@@ -303,32 +310,47 @@ pub fn reconcile_all(profile: &str, _instances: &[Instance]) {
 fn capture_codex_bindings(
     store: &Store,
     inst: &Instance,
-    panes: &[(u32, String)],
-    primary: Option<&str>,
+    session_name: &str,
+    window: &topology::Window,
+    existing: &[crate::db::AgentSlot],
+    sampled_before: u64,
+    profile: &str,
 ) -> Result<()> {
-    let existing = store.read_slots_for_instance(&inst.id)?;
     let existing_map = existing
         .iter()
         .map(|slot| (slot.slot, slot.tmux_pane.clone()))
         .collect::<Vec<_>>();
-    for pane in assign_slots(panes, primary, &existing_map) {
+    let primary = window.primary.as_deref();
+    for pane in assign_slots(&window.panes, primary, &existing_map) {
+        let Some(observed) = window.observe(session_name, &pane.pane_id, sampled_before) else {
+            continue;
+        };
+        if observed.root_pid == 0 {
+            continue;
+        }
         let is_primary = primary == Some(pane.pane_id.as_str());
-        let cross_agent_team = existing
-            .iter()
-            .find(|slot| slot.slot == pane.slot)
-            .map_or(inst.primary_pane_config().cross_agent_team, |slot| {
-                slot.cross_agent_team
-            });
+        let slot = existing.iter().find(|slot| slot.slot == pane.slot);
+        let cross_agent_team = slot.map_or(inst.primary_pane_config().cross_agent_team, |slot| {
+            slot.cross_agent_team
+        });
         if cross_agent_team {
             crate::db::codex_capture::maybe_claim_for_pane(
                 store,
                 inst,
                 &pane,
                 is_primary,
-                existing.iter().find(|slot| slot.slot == pane.slot),
+                slot,
+                &observed,
+                || window.still_owned(profile, session_name),
             );
         } else {
-            crate::db::codex_rollout::maybe_claim_for_pane(store, inst, &pane.pane_id, is_primary);
+            crate::db::codex_rollout::maybe_claim_for_pane(
+                store,
+                inst,
+                &pane.pane_id,
+                is_primary,
+                &observed,
+            );
         }
     }
     Ok(())
@@ -337,120 +359,70 @@ fn capture_codex_bindings(
 fn capture_coherent_layout(
     store: &Store,
     instance_id: &str,
-    session_name: &str,
-    panes: &[(u32, String)],
-) {
-    let Ok(slots) = store.read_slots_for_instance(instance_id) else {
-        return;
-    };
-    let live: HashSet<&str> = panes.iter().map(|(_, id)| id.as_str()).collect();
-    let durable: HashSet<&str> = slots.iter().map(|slot| slot.tmux_pane.as_str()).collect();
-    if live != durable || live.is_empty() {
-        return;
+    window: &topology::Window,
+    confirm: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let slots = store.read_slots_for_instance(instance_id)?;
+    let live: HashSet<&str> = window.panes.iter().map(|(_, id)| id.as_str()).collect();
+    let durable: HashSet<&str> = slots.iter().map(|s| s.tmux_pane.as_str()).collect();
+    if slots.len() == live.len()
+        && durable == live
+        && !store
+            .read_layout_snapshot(instance_id)?
+            .is_some_and(|old| old.window_layout == window.layout)
+    {
+        confirm()?;
+        store.upsert_layout_snapshot(instance_id, &window.layout, crate::db::now_unix())?;
     }
-    let Ok(layout) = crate::tmux::session_window_layout(session_name) else {
-        return;
-    };
-    let Ok(layout_ids) = crate::tmux::layout::pane_ids(&layout) else {
-        return;
-    };
-    let layout_set: HashSet<&str> = layout_ids.iter().map(String::as_str).collect();
-    if layout_ids.len() != live.len() || layout_set != live {
-        return;
-    }
-    if let Err(e) = store.upsert_layout_snapshot(instance_id, &layout, crate::db::now_unix()) {
-        tracing::debug!(
-            "reconcile: persist layout for {} failed: {}",
-            instance_id,
-            e
-        );
-    }
+    Ok(())
 }
 
-/// Reconcile a single session's panes into durable slots.
+#[cfg(test)]
 fn reconcile_session(
     store: &Store,
     inst: &Instance,
     panes: &[(u32, String)],
     primary_pane: Option<&str>,
 ) -> Result<()> {
+    apply_captures(store, inst, panes, primary_pane, 0, &mut || Ok(()))
+}
+
+fn apply_captures(
+    store: &Store,
+    inst: &Instance,
+    panes: &[(u32, String)],
+    primary_pane: Option<&str>,
+    server_started: i64,
+    confirm: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
     let existing_rows = store.read_slots_for_instance(&inst.id)?;
     let existing_map: Vec<(i64, String)> = existing_rows
         .iter()
         .map(|s| (s.slot, s.tmux_pane.clone()))
         .collect();
-    // A pane capture carries no identity key, so the upsert below would blank it.
-    // Carry the slot's current key forward instead. This read is advisory: the
-    // write keeps a key already stored over the one passed here, so a launch that
-    // mints one between this read and that write is not undone by it.
-    let existing_keys: HashMap<i64, String> = existing_rows
-        .iter()
-        .map(|s| (s.slot, s.xats_identity_key.clone()))
-        .collect();
-    let existing_configs: HashMap<i64, crate::session::PaneConfig> = existing_rows
-        .iter()
-        .map(|slot| (slot.slot, slot.pane_config()))
-        .collect();
-    // Slots already tracked for this instance: used to detect first-time
-    // adoption (a slot that did not exist before) for event logging.
-    let existing: HashSet<i64> = existing_rows.iter().map(|s| s.slot).collect();
-    // What each slot last captured, so a `capture` event is appended on change
-    // rather than on every poll tick. Reconcile runs on the poller cadence, so a
-    // per-tick append records that polling happened, not that anything occurred.
-    let existing_natives: HashMap<i64, String> = existing_rows
-        .iter()
-        .map(|s| (s.slot, s.native_session_id.clone()))
-        .collect();
-    // The transcript state each slot's model was last read from, so an
-    // unchanged transcript costs a `stat` instead of a megabyte of tail read.
-    let existing_model_fingerprints: HashMap<i64, String> = existing_rows
-        .iter()
-        .map(|s| (s.slot, s.model_fingerprint.clone()))
-        .collect();
-
     let assigned = assign_slots(panes, primary_pane, &existing_map);
 
     for pane in &assigned {
         let Some(capture) = store.read_pane_live(&pane.pane_id)? else {
             continue;
         };
-        // Codex writes its capture and proof atomically under the launch generation.
-        if capture.agent == "codex"
-            && existing_configs
-                .get(&pane.slot)
-                .is_some_and(|config| config.cross_agent_team)
+        let slot = existing_rows.iter().find(|slot| slot.slot == pane.slot);
+        if capture.native_session_id.is_empty()
+            || capture.updated_at < server_started
+            || (capture.agent == "codex" && slot.is_some_and(|s| s.cross_agent_team))
         {
             continue;
         }
-        if capture.native_session_id.is_empty() {
-            continue;
-        }
-        let now = crate::db::now_unix();
-        let mut pane_config = existing_configs
-            .get(&pane.slot)
-            .cloned()
-            .unwrap_or_else(|| {
-                if pane.slot == 0 {
-                    inst.primary_pane_config().clone()
-                } else {
-                    crate::session::PaneConfig::new(
-                        capture.agent.clone(),
-                        capture.cwd.clone(),
-                        false,
-                        false,
-                    )
-                }
-            });
+        let mut pane_config = slot.map(|s| s.pane_config()).unwrap_or_else(|| {
+            if pane.slot == 0 {
+                inst.primary_pane_config().clone()
+            } else {
+                crate::session::PaneConfig::new(&capture.agent, &capture.cwd, false, false)
+            }
+        });
         pane_config.tool = capture.agent.clone();
         pane_config.working_dir = capture.cwd.clone();
-        let normalized = crate::session::PaneConfig::new(
-            pane_config.tool.clone(),
-            pane_config.working_dir.clone(),
-            pane_config.yolo_mode,
-            pane_config.cross_agent_team,
-        );
-        pane_config.yolo_mode = normalized.yolo_mode;
-        pane_config.cross_agent_team = normalized.cross_agent_team;
+        let pane_config = pane_config.normalized();
         if let Err(error) = pane_config.validate() {
             tracing::warn!(
                 "reconcile: skipping invalid capture for {} slot {}: {}",
@@ -460,32 +432,39 @@ fn reconcile_session(
             );
             continue;
         }
-        let identity_key = existing_keys
-            .get(&pane.slot)
-            .map(String::as_str)
+        let identity_key = slot
+            .map(|s| s.xats_identity_key.as_str())
             .filter(|key| !key.is_empty())
             .or_else(|| {
                 (pane.slot == 0)
                     .then_some(inst.xats_identity_key.as_deref())
                     .flatten()
             })
-            .unwrap_or("");
-        if let Err(error) = store.upsert_agent_slot_capture_config(
-            &inst.id,
-            pane.slot,
-            &pane_config,
-            &capture.native_session_id,
-            &pane.pane_id,
-            identity_key,
-            now,
-        ) {
-            tracing::warn!(
-                "reconcile: failed to persist {} slot {}: {}",
-                inst.id,
+            .unwrap_or_default();
+        let same = slot.is_some_and(|s| {
+            s.tmux_pane == pane.pane_id
+                && s.native_session_id == capture.native_session_id
+                && s.pane_config() == pane_config
+                && s.xats_identity_key == identity_key
+        });
+        let now = crate::db::now_unix();
+        if same {
+            store.conn.execute(
+                "UPDATE agent_slot SET last_seen_at = ?1
+                WHERE instance_id = ?2 AND slot = ?3",
+                rusqlite::params![now, inst.id, pane.slot],
+            )?;
+        } else {
+            confirm()?;
+            store.upsert_agent_slot_capture_config(
+                &inst.id,
                 pane.slot,
-                error
-            );
-            continue;
+                &pane_config,
+                &capture.native_session_id,
+                &pane.pane_id,
+                identity_key,
+                now,
+            )?;
         }
         refresh_slot_model(
             store,
@@ -493,27 +472,19 @@ fn reconcile_session(
             pane.slot,
             &pane_config,
             &capture,
-            existing_model_fingerprints
-                .get(&pane.slot)
-                .map(String::as_str)
-                .unwrap_or_default(),
-        );
-        if !existing.contains(&pane.slot) {
-            // First time this slot is recorded for the session: adoption.
+            slot,
+            confirm,
+        )?;
+        let event = match slot {
+            None => Some("adopt"),
+            Some(s) if s.native_session_id != capture.native_session_id => Some("capture"),
+            _ => None,
+        };
+        if let Some(event) = event {
             store.append_event(
                 &inst.id,
                 Some(pane.slot),
-                "adopt",
-                Some(&capture.native_session_id),
-                now,
-            )?;
-        } else if existing_natives.get(&pane.slot).map(String::as_str)
-            != Some(capture.native_session_id.as_str())
-        {
-            store.append_event(
-                &inst.id,
-                Some(pane.slot),
-                "capture",
+                event,
                 Some(&capture.native_session_id),
                 now,
             )?;
@@ -523,71 +494,60 @@ fn reconcile_session(
     Ok(())
 }
 
-/// Refresh a slot's observed model from its agent's own transcript.
-///
-/// Only Claude records a usable model on disk, and only for its own panes, so
-/// nothing is read for any other agent: a Claude-shaped transcript sitting at
-/// the path another agent's cwd and session id resolve to belongs to a
-/// conversation that pane never had.
-///
-/// A transcript whose fingerprint matches what the slot was last probed against
-/// is not opened at all. `last_fingerprint` comes from the slot's own row rather
-/// than from memory: the home-view poller and the notification monitor both run
-/// this pass, in different processes.
-///
-/// Purely additive to the pass: a probe that observes nothing leaves the slot's
-/// model as it was, and no failure here can affect the capture that was just
-/// persisted.
 fn refresh_slot_model(
     store: &Store,
     instance_id: &str,
     slot: i64,
     pane: &crate::session::PaneConfig,
     capture: &crate::db::PaneLive,
-    last_fingerprint: &str,
-) {
+    previous: Option<&crate::db::AgentSlot>,
+    confirm: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
     if pane.tool != "claude" {
-        return;
+        return Ok(());
     }
     let Some(path) = crate::db::claude_transcript::transcript_path(
         &pane.working_dir,
         &capture.native_session_id,
     ) else {
-        return;
+        return Ok(());
     };
     let Some(fingerprint) = crate::db::claude_transcript::fingerprint(&path) else {
-        return;
+        return Ok(());
     };
-    if fingerprint == last_fingerprint {
-        return;
+    if previous.is_some_and(|slot| slot.model_fingerprint == fingerprint) {
+        return Ok(());
     }
     let model = crate::db::claude_transcript::detect_model(&path).unwrap_or_default();
-    if let Err(error) = store.record_slot_model_probe(instance_id, slot, &fingerprint, &model) {
-        tracing::debug!(
-            "reconcile: persisting model for {} slot {} failed: {}",
-            instance_id,
-            slot,
-            error
-        );
+    if !model.is_empty() && !previous.is_some_and(|slot| slot.model == model) {
+        confirm()?;
     }
+    store.record_slot_model_probe(instance_id, slot, &fingerprint, &model)
 }
 
 /// Delete `pane_live` rows whose pane is not in any managed session.
-fn gc_orphan_pane_live(store: &Store, live_panes: &HashSet<String>, listed_at: i64) {
-    let keys = match store.pane_live_keys_before(listed_at) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!("reconcile gc: cannot list pane_live: {}", e);
-            return;
-        }
-    };
-    for key in keys {
-        if !live_panes.contains(&key) {
-            if let Err(e) = store.delete_pane_live(&key) {
-                tracing::debug!("reconcile gc: delete {} failed: {}", key, e);
-            }
-        }
+fn gc_orphan_pane_live(
+    store: &Store,
+    live_panes: &HashSet<String>,
+    listed_at: i64,
+    recheck: impl FnOnce() -> Result<HashSet<String>>,
+) -> Result<()> {
+    let candidates: Vec<_> = store
+        .pane_live_keys_before(listed_at)?
+        .into_iter()
+        .filter(|pane| !live_panes.contains(pane))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
     }
+    let live = recheck()?;
+    for pane in candidates.into_iter().filter(|p| !live.contains(p)) {
+        store.conn.execute(
+            "DELETE FROM pane_live WHERE tmux_pane = ?1 AND updated_at < ?2",
+            rusqlite::params![pane, listed_at],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -786,6 +746,45 @@ mod identity_key_tests {
         (tmp, store)
     }
 
+    #[test]
+    fn changed_capture_requires_current_ownership_and_server_generation() {
+        let (_tmp, store) = store();
+        let inst = Instance::new("owner", "/tmp");
+        let panes = [(0, "%1".into())];
+        store
+            .upsert_agent_slot(&inst.id, 0, "claude", "old", "/tmp", "%1", "", 1)
+            .unwrap();
+        store
+            .upsert_pane_live("%1", "claude", "new", "/tmp", 11)
+            .unwrap();
+        apply_captures(&store, &inst, &panes, Some("%1"), 12, &mut || {
+            panic!("capture predates current server")
+        })
+        .unwrap();
+        assert!(apply_captures(
+            &store,
+            &inst,
+            &panes,
+            Some("%1"),
+            11,
+            &mut || anyhow::bail!("moved to another session")
+        )
+        .is_err());
+        assert_eq!(
+            store.read_slots_for_instance(&inst.id).unwrap()[0].native_session_id,
+            "old"
+        );
+        apply_captures(&store, &inst, &panes, Some("%1"), 11, &mut || Ok(())).unwrap();
+        apply_captures(&store, &inst, &panes, Some("%1"), 11, &mut || {
+            panic!("unchanged capture queried tmux")
+        })
+        .unwrap();
+        assert_eq!(
+            store.read_slots_for_instance(&inst.id).unwrap()[0].native_session_id,
+            "new"
+        );
+    }
+
     /// Orphan collection judges captures against a pane list read before the
     /// slow part of a reconcile pass. A pane created in that span is missing
     /// from the list through no fault of its own, and deleting its capture
@@ -810,7 +809,7 @@ mod identity_key_tests {
             .unwrap();
 
         let live: HashSet<String> = ["%1".to_string()].into_iter().collect();
-        gc_orphan_pane_live(&store, &live, listed_at);
+        gc_orphan_pane_live(&store, &live, listed_at, || Ok(live.clone())).unwrap();
 
         let mut left = store.all_pane_live_keys().unwrap();
         left.sort();
@@ -827,7 +826,7 @@ mod identity_key_tests {
             .upsert_pane_live("%4", "claude", "sess-4", "/tmp", 100)
             .unwrap();
 
-        gc_orphan_pane_live(&store, &HashSet::new(), 100);
+        gc_orphan_pane_live(&store, &HashSet::new(), 100, || Ok(HashSet::new())).unwrap();
 
         assert_eq!(store.all_pane_live_keys().unwrap(), vec!["%4".to_string()]);
     }

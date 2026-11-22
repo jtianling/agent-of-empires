@@ -1,5 +1,6 @@
 //! tmux integration module
 
+pub(crate) mod control;
 mod input;
 pub(crate) mod inventory;
 pub mod layout;
@@ -135,7 +136,12 @@ pub(crate) fn profile_command(profile: &str) -> Command {
 /// Split out from [`tmux_command`] so the flag logic is unit-testable without
 /// the process-global socket name.
 fn build_tmux_command(socket_name: Option<&str>) -> Command {
-    let mut cmd = Command::new("tmux");
+    #[cfg(target_os = "macos")]
+    let program =
+        crate::agents::executable::resolve_on_path("tmux").unwrap_or_else(|| "tmux".into());
+    #[cfg(not(target_os = "macos"))]
+    let program = "tmux";
+    let mut cmd = Command::new(program);
     if let Some(name) = socket_name {
         cmd.arg("-L").arg(name);
     }
@@ -227,13 +233,12 @@ pub struct PaneInfo {
     pub start_command: String,
 }
 
+const SESSION_FORMAT: &str = "#{session_name}\t#{session_activity}\t#{window_activity}";
+const PANE_FORMAT: &str = "#{session_name}\t#{pane_index}\t#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_start_command}";
+
 pub fn refresh_session_cache() {
     let output = tmux_command()
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{session_activity}\t#{window_activity}",
-        ])
+        .args(["list-sessions", "-F", SESSION_FORMAT])
         .output();
 
     let new_data = match output {
@@ -249,12 +254,7 @@ pub fn refresh_session_cache() {
 
 pub fn refresh_pane_info_cache() {
     let output = tmux_command()
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_index}\t#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_start_command}",
-        ])
+        .args(["list-panes", "-a", "-F", PANE_FORMAT])
         .output();
 
     let new_data = match output {
@@ -436,7 +436,11 @@ fn host_matches(host: Option<&str>, session_name: &str) -> bool {
 
 pub fn get_current_client_name() -> Option<String> {
     let output = tmux_command()
-        .args(["display-message", "-p", "#{client_name}"])
+        .args([
+            "display-message",
+            "-p",
+            "#{?@aoe_control_observer,,#{client_name}}",
+        ])
         .output()
         .ok()?;
 
@@ -628,7 +632,10 @@ mod tests {
         // Profile-derived name (explicit init or AGENT_OF_EMPIRES_PROFILE env)
         // resolves to `-L <profile>`.
         let cmd = build_tmux_command(Some("auto-myproj-3f2a"));
-        assert_eq!(cmd.get_program().to_string_lossy(), "tmux");
+        assert_eq!(
+            std::path::Path::new(cmd.get_program()).file_name().unwrap(),
+            "tmux"
+        );
         // `-L <name>` must come first so it precedes any subcommand appended later.
         assert_eq!(
             cmd_args(&cmd),

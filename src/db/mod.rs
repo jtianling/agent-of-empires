@@ -22,6 +22,7 @@ mod managed_claude;
 mod managed_pane;
 pub mod reconcile;
 mod recovery;
+pub(crate) mod runtime_settings;
 
 use std::path::{Path, PathBuf};
 
@@ -1602,6 +1603,7 @@ fn backfill_agent_slot_columns(conn: &Connection) -> Result<()> {
         ("pane_config_version", "INTEGER NOT NULL DEFAULT 0"),
         ("model", "TEXT NOT NULL DEFAULT ''"),
         ("model_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("runtime_settings", "TEXT NOT NULL DEFAULT ''"),
         ("launch_cwd", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let has_column: bool = conn.query_row(

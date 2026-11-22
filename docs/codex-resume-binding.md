@@ -12,6 +12,34 @@
 
 ## 修复
 
+普通宿主机 xats Codex 的标准启动命令先进入 AoE launcher.  launcher 在自己的 pane
+内核对进程归属, session, 工作目录和 durable slot identity key, 等待创建方写入 slot
+后取得操作锁.  新会话及 fork 通过同一 app-server 的原生接口取得准确 thread UUID,
+在界面启动前以事务 CAS 保存 UUID, generation, 模型, effort 和 service tier.
+随后完成权限与持久历史校验, 再以 `resume <准确 UUID>` 执行 Codex 界面.
+这个 resume 指向刚创建的新会话或 fork 子会话, 不复用其他 pane 的上下文.
+
+原始参数先经 NUL 分隔流写入当前用户独占的一次性文件, 保留空参数和换行.
+launcher 仅携带文件路径, 读取并删除文件后完成准备, 最后以同一 PID 执行 Codex.
+准备进程不会因为命令行包含转发的 `codex --remote` 而被 xats 误判为运行中的界面.
+参数目录权限为 `0700`, 文件权限为 `0600`, 读取时拒绝符号链接和其他用户的文件.
+
+原 UUID 的保存不依赖模型何时注册 xats.  本地创建回执使用空 launch ID 与审计事件,
+表示准确的原生线程来源; xats 完成实际启动绑定后仍由采集逻辑写入 launch 证明.
+无 xats 绑定时, 活 pane 的备用恢复仍要求 argv 明确 resume 同一 UUID.
+接口, 模型或命名校验在取得 UUID 后失败时, 已保存的 UUID 保留.
+失败原因脱敏写入 debug.log 与当前 slot 代次的事件, 不能污染后来的 slot.
+
+新线程的 CLI 权限参数由 launcher 转交原生创建接口, 不传给最终 remote resume.
+启用 YOLO 时, launcher 在界面接入前对刚创建的 thread 调用 `thread/settings/update`.
+Codex 0.169.0 的创建回执可以显示完整权限, 而实际界面首轮仍使用工作区权限.
+回归测试通过真实界面的首个 `turn_context` 核对开启及关闭 YOLO 的结果.
+标准 extra_args 的 model, 配置覆盖, search, image, profile 和 add-dir 保持对应作用,
+显式 `--` 后的内容作为原样 prompt.  本轮共享服务恢复仍不支持
+`--remote-auth-token-env`; launcher 在创建线程前明确拒绝, 避免只支持创建却无法恢复.
+无法确认原生接口等价语义的参数也在创建前报错.  完整自定义命令, 非 xats Codex,
+sandbox 和 owner-controlled managed 启动沿用现有流程.
+
 启用 xats 的 pane 使用每次启动产生的 `xats.agent_id` 作为 launch ID.
 AoE 从该 pane 的 Codex 进程树读取 launch ID, 调用本机
 `POST /api/codex/binding/lookup`, 严格校验协议版本, pane ID, launch ID 和
@@ -108,6 +136,22 @@ aoe -p <profile> session recover-codex <完整session-id> --slot 0 --thread <原
 该命令只恢复绑定, 不重启 pane, 不创建对话.  必须提供完整 session ID 和准确 slot,
 不按 cwd、标题或最近活动猜选 thread.  服务端 `thread/read` 必须确认原 UUID、相同规范化目录
 和 notLoaded 状态; 当前 argv 或 xats 指向其他线程时拒绝, 歧义和接口失败也拒绝.
+
+pane 已退出或只剩 shell 时, 显式恢复允许写入经过上述原 UUID 与目录校验的离线来源.
+恢复前后核对 pane 归属, 期间出现新的 Codex 进程就拒绝.  slot, pane, generation,
+identity key 和原 native ID 共同参与 CAS, 审计记录明确是离线人工选择的来源.
+该证明不带当前 xats launch ID, 活进程后续仍须明确 resume 同一原 UUID 才能使用.
+
+普通 host xats Codex 的冷 Resume 和 CLI restart 在创建 placeholder 或任何 pane 前,
+先校验全部目标原 UUID, 持久化证明与只读恢复条件.  缺少来源时直接报错并保留 slot
+及 generation, 不留下新 shell 或静默改成 fresh.  活 pane 重启也先做不修改线程的预检,
+旧订阅退出后再执行需要 notLoaded 的 provider 迁移及权限恢复.
+
+冷 Resume 在建窗格前检查需要恢复的 Codex 设置.  本地 app-server 提供历史路径时,
+AoE 按原线程 UUID 和目标工作目录核验文件头.  同一条 rollout 的原始
+`.jsonl` 被压缩时, AoE 流式读取对应的 `.jsonl.zst`, 保留最后一份有效设置.
+历史有效但没有设置快照时可使用该 slot 已保存的设置.  损坏的压缩流、线程或目录
+不匹配会使预检失败.  冷启动不通过旧 tmux pane 编号推断在线设置.
 验证前后核对当前启动, 写入事务再次检查 slot 代次和其他 slot 的重复 thread,
 并持久保存显式恢复审计事件.  managed session 和 sandbox 不使用此入口.
 每个需要恢复的 slot 完成后, 再执行普通 `session restart` 或 TUI Resume,

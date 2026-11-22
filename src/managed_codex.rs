@@ -56,8 +56,15 @@ pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
         .as_ref()
         .context("Missing managed identity")?;
     let title = crate::codex_name::session_name(&identity.name, &identity.team)?;
-    let model = identity.model.clone();
-    let effort = identity.effort.clone();
+    let settings = instance.pane_runtime_settings("codex", true, None, None)?;
+    let model = settings
+        .as_ref()
+        .map(|settings| settings.model.clone())
+        .or_else(|| identity.model.clone());
+    let effort = settings
+        .as_ref()
+        .map(|settings| settings.effort.clone())
+        .unwrap_or_else(|| identity.effort.clone());
     let previous_thread = previous
         .as_ref()
         .map(|config| config.thread_id.clone())
@@ -72,6 +79,12 @@ pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
         yolo,
         model: model.clone(),
         effort: effort.clone(),
+        service_tier: settings.as_ref().map(|settings| {
+            settings
+                .service_tier
+                .clone()
+                .unwrap_or_else(|| "default".into())
+        }),
         error: None,
     };
     server::stop(instance, false)?;
@@ -99,6 +112,7 @@ pub(crate) fn prepare(instance: &mut Instance) -> Result<()> {
                     yolo,
                     model.as_deref(),
                     effort.as_deref(),
+                    settings.as_ref(),
                 ),
             )
             .await
@@ -148,6 +162,10 @@ pub(crate) fn stop(instance: &Instance) -> Result<()> {
         server::stop(instance, false)?;
     }
     Ok(())
+}
+
+pub(crate) fn has_live_server(instance: &Instance) -> Result<bool> {
+    server::is_live(instance)
 }
 
 pub(crate) fn verify_stop_scope(instance: &Instance) -> Result<()> {
@@ -211,6 +229,7 @@ struct PreparedThread {
     yolo: bool,
     model: Option<String>,
     effort: Option<String>,
+    service_tier: Option<String>,
     error: Option<anyhow::Error>,
 }
 
@@ -226,6 +245,7 @@ async fn prepare_thread(
     yolo: bool,
     model: Option<&str>,
     effort: Option<&str>,
+    settings: Option<&crate::db::runtime_settings::RuntimeSettings>,
 ) -> Result<PreparedThread> {
     let (mut socket, _) = connect_async(endpoint)
         .await
@@ -257,6 +277,19 @@ async fn prepare_thread(
     let override_key = format!("mcp_servers.{server_name}.http_headers");
     let url_key = format!("mcp_servers.{server_name}.url");
     let mut config = json!({(override_key): headers, (url_key): mcp_url.as_str()});
+    if let Some(settings) = settings {
+        settings.validate("codex")?;
+        config
+            .as_object_mut()
+            .context("Invalid Codex configuration")?
+            .extend(
+                settings
+                    .codex_config()
+                    .as_object()
+                    .context("Invalid pane configuration")?
+                    .clone(),
+            );
+    }
     if let Some(effort) = effort {
         ensure!(model.is_some(), "Reasoning effort requires a model");
         config["model_reasoning_effort"] = json!(effort);
@@ -279,6 +312,9 @@ async fn prepare_thread(
     };
     if let Some(model) = model {
         params["model"] = json!(model);
+    }
+    if let Some(settings) = settings {
+        params["serviceTier"] = json!(settings.service_tier.as_deref().unwrap_or("default"));
     }
     if yolo {
         params["approvalPolicy"] = json!("never");
@@ -312,7 +348,11 @@ async fn prepare_thread(
     let effort_valid = effort.map_or(true, |requested| {
         response.get("reasoningEffort").and_then(Value::as_str) == Some(requested)
     });
+    let settings_valid = settings
+        .map(|settings| settings.verify_codex_response(&response))
+        .transpose();
     let validated = validate_resume(response, &thread_id, &provider, yolo).and_then(|()| {
+        settings_valid?;
         ensure!(
             model_valid,
             "Codex returned a different model than requested"
@@ -351,6 +391,12 @@ async fn prepare_thread(
         yolo,
         model: model.map(str::to_string),
         effort: effort.map(str::to_string),
+        service_tier: settings.map(|settings| {
+            settings
+                .service_tier
+                .clone()
+                .unwrap_or_else(|| "default".into())
+        }),
         error,
     })
 }
@@ -472,6 +518,9 @@ fn write_profile(config: &ClientConfig, prepared: &PreparedThread, cwd: &str) ->
     }
     if let Some(effort) = &prepared.effort {
         value["model_reasoning_effort"] = json!(effort);
+    }
+    if let Some(tier) = &prepared.service_tier {
+        value["service_tier"] = json!(tier);
     }
     if prepared.yolo {
         value["projects"] = json!({(cwd): {"trust_level": "trusted"}});

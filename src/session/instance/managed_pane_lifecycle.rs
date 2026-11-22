@@ -143,6 +143,7 @@ impl Instance {
             .find(|row| Some(row.slot) == record.slot)
             .context("Managed pane slot disappeared")?;
         let mode = resume_mode(&record, &row.native_session_id, requested);
+        self.capture_slot_runtime_settings(&store, &row, true)?;
         self.validate_managed_relaunch(storage.profile(), &record, replacement)?;
         let mut projection = record.project(self)?;
         crate::managed_codex::preflight(&projection)?;

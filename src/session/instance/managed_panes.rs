@@ -86,6 +86,7 @@ impl Instance {
                 true,
                 Some(&record.identity_key),
                 Some(row.model.as_str()).filter(|value| !value.is_empty()),
+                None,
                 exact.as_ref(),
             )
             .context("Could not build managed pane command")

@@ -495,6 +495,43 @@ An identity key that no longer corresponds to a known identity SHALL be treated 
 - **THEN**该 pane 的 Cross Agent Team SHALL 初始化为 false
 - **AND** primary pane 的 enabled 值 SHALL 不复制到该 pane
 
+### Requirement: 普通 Codex 启动前持久保存原线程
+
+普通非 sandbox, 非 owner-controlled managed 的 host xats Codex 标准 launcher SHALL
+在执行 Codex 界面前, 通过同一 app-server 精确创建 thread 或 fork 子 thread,
+以 slot, pane, generation 和 identity key 的事务 CAS 保存 UUID 及实际模型配置.
+该保存 SHALL 不依赖模型完成 xats 注册, 不从目录, 文件时间或最近会话猜测归属.
+launcher SHALL 校验权限与持久历史, 再以准确 UUID 执行 remote resume,
+不将已应用的 CLI 权限覆盖参数传给该 resume.
+
+本地创建来源 SHALL 使用空 launch ID 及专门审计事件, 不冒充已完成的 xats 启动绑定.
+后续实际绑定仍须通过原有 launcher 和 xats 验证.  新 UUID 已保存后的模型校验,
+命名或执行失败 SHALL 保留该 UUID, 记录具体脱敏错误且不污染其他启动代次.
+
+#### Scenario: 模型未注册 xats 仍有恢复来源
+
+- **WHEN** Codex 标准 launcher 成功创建一个新 thread, 但模型尚未注册 xats
+- **THEN** Codex 界面启动前 SHALL 已保存准确 UUID 和模型配置
+- **AND** 后续 Resume SHALL 使用该 UUID, 不等待过期的注册 challenge
+
+#### Scenario: 同目录双 pane 相互独立
+
+- **WHEN** 两个 xats Codex pane 在同一目录创建 thread
+- **THEN** 每个 slot SHALL 保存各自创建接口返回的不同 UUID
+- **AND** 任意 slot SHALL 不覆盖另一个 slot 的 UUID 或配置
+
+#### Scenario: 创建后的校验失败保留 UUID
+
+- **WHEN** 已取得并保存 UUID 后的校验或命名接口失败
+- **THEN** launcher SHALL 拒绝启动界面并保留已保存 UUID
+- **AND** 错误 SHALL 关联当前 slot 代次并隐去 key 和 token
+
+#### Scenario: Fork 保存准确的子线程
+
+- **WHEN** 用户 fork 一个原线程
+- **THEN** launcher SHALL 保存原生 fork 接口返回的子 UUID
+- **AND** 该 UUID SHALL 不同于父线程 UUID
+
 ### Requirement: 删除 session 前释放 pane 的 xats 身份
 
 AoE SHALL 在 CLI remove, TUI 单条删除和组删除停止 session 或清理资源之前,

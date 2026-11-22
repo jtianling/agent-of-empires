@@ -472,7 +472,13 @@ last_seen_version = "{}"
         let start = Instant::now();
         while start.elapsed() <= Duration::from_secs(10) {
             if self
-                .tmux_command(&["list-clients", "-F", "#{client_name}"])
+                .tmux_command(&[
+                    "list-clients",
+                    "-f",
+                    "#{?@aoe_control_observer,0,1}",
+                    "-F",
+                    "#{client_name}",
+                ])
                 .ok()
                 .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
             {
@@ -929,7 +935,13 @@ last_seen_version = "{}"
 
     pub fn tmux_client_names(&self) -> Vec<String> {
         let output = self
-            .tmux_command(&["list-clients", "-F", "#{client_name}"])
+            .tmux_command(&[
+                "list-clients",
+                "-f",
+                "#{?@aoe_control_observer,0,1}",
+                "-F",
+                "#{client_name}",
+            ])
             .expect("failed to list tmux clients");
         assert!(
             output.status.success(),
@@ -1052,7 +1064,13 @@ last_seen_version = "{}"
 
     pub fn current_client_session(&self) -> String {
         let output = self
-            .tmux_command(&["list-clients", "-F", "#{session_name}"])
+            .tmux_command(&[
+                "list-clients",
+                "-f",
+                "#{?@aoe_control_observer,0,1}",
+                "-F",
+                "#{session_name}",
+            ])
             .expect("failed to list tmux clients");
         assert!(
             output.status.success(),
@@ -1170,7 +1188,7 @@ last_seen_version = "{}"
         );
     }
 
-    fn tmux_command(&self, args: &[&str]) -> std::io::Result<Output> {
+    pub(super) fn tmux_command(&self, args: &[&str]) -> std::io::Result<Output> {
         let mut cmd = Command::new("tmux");
         cmd.arg("-S").arg(&self.socket_path);
         cmd.args(args);
