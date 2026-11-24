@@ -89,7 +89,11 @@ pub(super) fn row(line: &[u8]) -> Result<Row<'_>> {
         pid: server.parse()?,
         started: started.parse()?,
     };
-    let pid = pid.parse::<u32>()?;
+    let pid = if pid.is_empty() {
+        0
+    } else {
+        pid.parse::<u32>()?
+    };
     ensure!(
         server.pid > 1 && server.started > 0 && pid != 1 && pid <= i32::MAX as u32,
         "Invalid tmux process identity"

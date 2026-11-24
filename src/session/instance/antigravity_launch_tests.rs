@@ -144,3 +144,57 @@ fn later_slot_preflight_failure_preserves_keys_and_reports_the_entry() {
     assert_eq!(store.read_slots_for_instance(&inst.id).unwrap(), before);
     assert!(!root.path().join(".gemini/config/hooks.json").exists());
 }
+
+#[test]
+#[serial_test::serial]
+fn antigravity_launch_enables_agentapi_channel_when_supported() {
+    let root = tempfile::tempdir().unwrap();
+    let _home = crate::session::scoped_test_home(root.path());
+    let dir = root.path().canonicalize().unwrap();
+    let _path = SearchPath(std::env::var_os("PATH"));
+    let caps = r#"#!/bin/sh
+[ "$1" = --capabilities-json ] || exit 1
+echo '{"defer_registration":1,"agentapi_channel":1}'
+"#;
+    for (name, body) in [
+        ("agy", "#!/bin/sh\nexit 0\n"),
+        ("xats-agy", caps),
+        ("xats-agy-mcp", caps),
+        ("xats-agy-channel-bind", "#!/bin/sh\nexit 0\n"),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var("PATH", &dir);
+    let settings_path = root.path().join(".gemini/antigravity-cli/settings.json");
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings_path,
+        r#"{"permissions":{"allow":["command(git status)"]}}"#,
+    )
+    .unwrap();
+
+    let cwd = dir.to_str().unwrap();
+    let mut inst = Instance::new("test", cwd);
+    let pane = PaneConfig::new("antigravity", cwd, false, true);
+    inst.set_primary_pane_config(pane.clone());
+    inst.command = shell_escape(dir.join("agy").to_str().unwrap());
+    let key = Uuid::new_v4().to_string();
+    let cmd = inst
+        .prepare_controlled_antigravity(
+            &pane,
+            true,
+            None,
+            &key,
+            IdentityKeyOrigin::Minted,
+            "default",
+        )
+        .unwrap()
+        .unwrap();
+    assert!(cmd.contains(" --agentapi --defer-registration -- "));
+    assert!(cmd.contains("--settings "));
+    assert!(cmd.contains("command(git status)"));
+    assert!(cmd.contains("command(regex:^xats-agy-channel-bind$)"));
+    assert!(!cmd.contains(" -i "));
+}

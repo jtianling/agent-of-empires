@@ -9,6 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::agentapi::{self, AGENTAPI_FLAG};
 use crate::agents::executable;
 use crate::session::environment::shell_escape;
 use crate::xats_control::{self, ControlPlane, CONTROL_TIMEOUT};
@@ -20,6 +21,7 @@ pub(crate) const DEFER_FLAG: &str = "--defer-registration";
 
 pub(crate) struct ControlledLauncher {
     prefix: String,
+    agy_extra_args: String,
     pub(crate) deferred: bool,
 }
 
@@ -37,42 +39,78 @@ impl ControlledLauncher {
         let agy_dir = agy_directory(binary)?;
         crate::hooks::antigravity_xats::check_named_mcp(cwd)?;
         let launcher_arg = shell_escape(launcher.to_str().context("Invalid xats-agy path")?);
-        let command = match &identity {
+        let (command, agentapi) = match &identity {
             Some(agent) => {
                 check_launcher(&launcher, &agy_dir)?;
                 crate::antigravity_mcp::check_named_support(key)?;
-                format!(
-                    "{EXPECTED_AGENT_ENV}={} {launcher_arg} {} {} --",
-                    agent.id,
-                    label_arg("--name", &agent.name),
-                    label_arg("--team", &agent.team)
+                let agentapi = agentapi::probe_agentapi_channel(&launcher);
+                let mode_flag = if agentapi {
+                    format!(" {AGENTAPI_FLAG}")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        "{EXPECTED_AGENT_ENV}={} {launcher_arg}{mode_flag} {} {} --",
+                        agent.id,
+                        label_arg("--name", &agent.name),
+                        label_arg("--team", &agent.team)
+                    ),
+                    agentapi,
                 )
             }
             None => {
-                crate::antigravity_mcp::require_deferred_capability(&launcher)?;
+                let caps = crate::antigravity_mcp::probe_capabilities(&launcher)?;
+                ensure!(
+                    caps.defer_registration,
+                    "Upgrade xats: expected defer_registration capability 1"
+                );
+                let agentapi = caps.agentapi_channel && agentapi::channel_bind_available();
                 let bridge = crate::antigravity_mcp::require_deferred_bridge()?
                     .canonicalize()
                     .context("Resolving verified xats-agy-mcp")?;
                 let helper =
                     std::env::current_exe().context("Locating AoE Antigravity launcher")?;
-                format!(
-                    "AOE_ANTIGRAVITY_SLOT_DIGEST={:x} AOE_ANTIGRAVITY_MCP_BINARY={} \
-                     AOE_ANTIGRAVITY_MCP_PATH={} {} __antigravity-launch -- {launcher_arg} {DEFER_FLAG} --",
-                    Sha256::digest(key.as_bytes()),
-                    shell_escape(bridge.to_str().context("Invalid xats-agy-mcp path")?),
-                    shell_escape(&std::env::var("PATH").context("Invalid Antigravity MCP search path")?),
-                    shell_escape(helper.to_str().context("Invalid AoE executable path")?)
+                let mode_flag = if agentapi {
+                    format!(" {AGENTAPI_FLAG}")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        "AOE_ANTIGRAVITY_SLOT_DIGEST={:x} AOE_ANTIGRAVITY_MCP_BINARY={} \
+                         AOE_ANTIGRAVITY_MCP_PATH={} {} __antigravity-launch -- {launcher_arg}{mode_flag} {DEFER_FLAG} --",
+                        Sha256::digest(key.as_bytes()),
+                        shell_escape(bridge.to_str().context("Invalid xats-agy-mcp path")?),
+                        shell_escape(
+                            &std::env::var("PATH")
+                                .context("Invalid Antigravity MCP search path")?
+                        ),
+                        shell_escape(helper.to_str().context("Invalid AoE executable path")?)
+                    ),
+                    agentapi,
                 )
             }
         };
+        let deferred = identity.is_none();
+        let agy_extra_args = if agentapi {
+            agentapi::agy_channel_args(!deferred)?
+        } else {
+            String::new()
+        };
         Ok(Self {
             prefix: format!("PATH={}:\"$PATH\" {command}", shell_escape(&agy_dir)),
-            deferred: identity.is_none(),
+            agy_extra_args,
+            deferred,
         })
     }
 
     pub(crate) fn prefix(&self) -> &str {
         &self.prefix
+    }
+
+    pub(crate) fn agy_extra_args(&self) -> &str {
+        &self.agy_extra_args
     }
 }
 

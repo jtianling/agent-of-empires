@@ -1,6 +1,7 @@
 use anyhow::{ensure, Context, Result};
 use std::path::Path;
 
+pub(crate) mod agentapi;
 pub(crate) mod launcher;
 mod pane;
 pub(crate) use pane::launcher_key;

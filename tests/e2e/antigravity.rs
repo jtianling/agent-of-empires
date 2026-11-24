@@ -47,18 +47,23 @@ fn wait_for_slot_conversation(db: &Path, expected: &str) {
     }
 }
 
-fn install_xats_agy_stub(h: &TuiTestHarness, launch_log: &Path) {
+fn install_xats_agy_stub(h: &TuiTestHarness, launch_log: &Path, bind_log: &Path) {
     h.install_stub_script(
         "xats-agy-mcp",
-        "#!/bin/sh\n[ \"$1\" = --capabilities-json ] && printf '{\"defer_registration\":1}\\n' && exit 0\nexit 0\n",
+        "#!/bin/sh\n[ \"$1\" = --capabilities-json ] && printf '{\"defer_registration\":1,\"agentapi_channel\":1}\\n' && exit 0\nexit 0\n",
     );
+    let bind_stub = format!(
+        "#!/usr/bin/env python3\nimport json, os, sys\nwith open({bind_log:?}, 'a', encoding='utf-8') as f:\n    f.write(json.dumps({{'args': sys.argv[1:], 'conv': os.environ.get('ANTIGRAVITY_CONVERSATION_ID'), 'launch_id': os.environ.get('XATS_AGY_LAUNCH_ID')}}) + '\\n')\n",
+        bind_log = bind_log.to_str().unwrap()
+    );
+    h.install_stub_script("xats-agy-channel-bind", &bind_stub);
     let xats_agy = format!(
         r#"#!/usr/bin/env python3
 import json, os, signal, subprocess, sys, uuid
 
 args = sys.argv[1:]
 if args == ["--capabilities-json"]:
-    print(json.dumps({{"defer_registration": 1}}))
+    print(json.dumps({{"defer_registration": 1, "agentapi_channel": 1}}))
     sys.exit(0)
 if args == ["--help"]:
     print("usage: xats-agy")
@@ -70,6 +75,9 @@ launch_id = str(uuid.uuid4())
 env = dict(os.environ)
 key = env.pop("XATS_AGY_IDENTITY_KEY", None)
 env["XATS_AGY_LAUNCH_ID"] = launch_id
+if "--agentapi" in head:
+    env["XATS_AGY_AGENTAPI"] = "1"
+    env["XATS_AGY_BIND_TOKEN"] = "deadbeef"
 if "--defer-registration" in head:
     mode = "deferred"
     env["XATS_AGY_DEFER_REGISTRATION"] = "1"
@@ -192,6 +200,14 @@ while True:
     true
 }
 
+fn assert_cli_ok(output: &std::process::Output, label: &str) {
+    assert!(
+        output.status.success(),
+        "{label}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn launch_deferred_session(
     h: &TuiTestHarness,
     title: &str,
@@ -200,29 +216,39 @@ fn launch_deferred_session(
 ) -> (String, PathBuf) {
     std::fs::write(next_conv, CONV_1).expect("seed conv 1");
     let project = h.project_path();
-    let add = h.run_cli(&[
-        "add",
-        project.to_str().unwrap(),
-        "-t",
-        title,
-        "-c",
-        "agy",
-        "--cross-agent-team",
-    ]);
-    assert!(
-        add.status.success(),
-        "{}",
-        String::from_utf8_lossy(&add.stderr)
+    assert_cli_ok(
+        &h.run_cli(&[
+            "add",
+            project.to_str().unwrap(),
+            "-t",
+            title,
+            "-c",
+            "agy",
+            "--cross-agent-team",
+        ]),
+        "aoe add",
     );
-    let start = h.run_cli_in_tmux(&["session", "start", title]);
-    assert!(
-        start.status.success(),
-        "{}",
-        String::from_utf8_lossy(&start.stderr)
+    assert_cli_ok(
+        &h.run_cli_in_tmux(&["session", "start", title]),
+        "aoe session start",
     );
     let launches = wait_for_jsonl_count(launch_log, 1, "launch");
     assert_eq!(launches[0]["mode"], "deferred");
     let slot_key = launches[0]["key"].as_str().unwrap().to_string();
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(h.home_path().join(".gemini/antigravity-cli/settings.json"))
+            .expect("read antigravity settings"),
+    )
+    .expect("parse antigravity settings");
+    let expected_workspace = project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        str_vec(&settings["trustedWorkspaces"]).contains(&expected_workspace.as_str()),
+        "expected {expected_workspace} in trustedWorkspaces: {settings}"
+    );
     let db = db_path(h);
     wait_for_slot_conversation(&db, CONV_1);
     assert_eq!(
@@ -250,15 +276,49 @@ fn assert_named_mcp_run(run: &Value) {
     assert!(!names.contains(&"register_agent"));
 }
 
+fn str_vec(value: &Value) -> Vec<&str> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+fn assert_agentapi_launch(launch: &Value, expect_prompt: bool, expected_conv: Option<&str>) {
+    let head = str_vec(&launch["head"]);
+    let tail = str_vec(&launch["tail"]);
+    assert!(head.contains(&"--agentapi"), "head={head:?}");
+    let idx = tail
+        .iter()
+        .position(|a| *a == "--settings")
+        .expect("missing --settings");
+    let settings: Value = serde_json::from_str(tail[idx + 1]).expect("valid settings json");
+    assert!(str_vec(&settings["permissions"]["allow"])
+        .contains(&"command(regex:^xats-agy-channel-bind$)"));
+    assert_eq!(tail.contains(&"-i"), expect_prompt, "tail={tail:?}");
+    match expected_conv {
+        Some(conv) => {
+            let cidx = tail
+                .iter()
+                .position(|a| *a == "--conversation")
+                .expect("missing --conversation");
+            assert_eq!(tail[cidx + 1], conv);
+        }
+        None => assert!(!tail.contains(&"--conversation"), "tail={tail:?}"),
+    }
+}
+
 #[test]
 #[serial]
 fn antigravity_launch_resume_and_fresh_preserve_xats_identity() {
     require_tmux!();
     let mut h = TuiTestHarness::new("antigravity_lifecycle");
     let launch_log = h.home_path().join("launches.jsonl");
+    let bind_log = h.home_path().join("bind_updates.jsonl");
     let mcp_log = h.home_path().join("mcp.jsonl");
     let next_conv = h.home_path().join("next_conv.txt");
-    install_xats_agy_stub(&h, &launch_log);
+    install_xats_agy_stub(&h, &launch_log, &bind_log);
     if !install_agy_driver(&h, &mcp_log, &next_conv) {
         eprintln!("Skipping test: C compiler unavailable for native agy stub");
         return;
@@ -267,6 +327,14 @@ fn antigravity_launch_resume_and_fresh_preserve_xats_identity() {
     let daemon = MockXatsDaemon::start(AGENT_ID, "aoe-agy", "aoe");
     daemon.write_pid_file(h.home_path());
     let (slot_key, db) = launch_deferred_session(&h, "agy-e2e", &launch_log, &next_conv);
+    let initial = wait_for_jsonl_count(&launch_log, 1, "initial deferred");
+    assert_agentapi_launch(&initial[0], false, None);
+    let updates = wait_for_jsonl_count(&bind_log, 1, "initial conversation update");
+    assert_eq!(
+        updates[0]["args"],
+        serde_json::json!(["--update-conversation"])
+    );
+    assert_eq!(updates[0]["conv"], CONV_1);
 
     // 1. Live `r` (Resume): keeps CONV_1 and switches to named xats-agy + MCP bridge.
     daemon.bind_identity(&slot_key);
@@ -278,10 +346,7 @@ fn antigravity_launch_resume_and_fresh_preserve_xats_identity() {
     assert_pid_exited(launches[0]["pid"].as_u64().unwrap());
     assert_eq!(launches[1]["mode"], "named");
     assert_eq!(launches[1]["expected_agent"], AGENT_ID);
-    assert_eq!(
-        launches[1]["tail"].as_array().unwrap(),
-        &[Value::from("--conversation"), Value::from(CONV_1)]
-    );
+    assert_agentapi_launch(&launches[1], true, Some(CONV_1));
     let mcp_runs = wait_for_jsonl_count(&mcp_log, 1, "named MCP run");
     assert_named_mcp_run(&mcp_runs[0]);
 
@@ -293,11 +358,7 @@ fn antigravity_launch_resume_and_fresh_preserve_xats_identity() {
     assert_pid_exited(launches[1]["pid"].as_u64().unwrap());
     assert_eq!(launches[2]["mode"], "named");
     assert_eq!(launches[2]["expected_agent"], AGENT_ID);
-    assert!(!launches[2]["tail"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|arg| arg == "--conversation"));
+    assert_agentapi_launch(&launches[2], true, None);
     wait_for_slot_conversation(&db, CONV_2);
     assert_eq!(
         sqlite_query(
@@ -313,10 +374,7 @@ fn antigravity_launch_resume_and_fresh_preserve_xats_identity() {
     // 3. Subsequent `r` resumes the new conversation CONV_2.
     h.send_keys("r");
     let launches = wait_for_jsonl_count(&launch_log, 4, "post-fresh resume");
-    assert_eq!(
-        launches[3]["tail"].as_array().unwrap(),
-        &[Value::from("--conversation"), Value::from(CONV_2)]
-    );
+    assert_agentapi_launch(&launches[3], true, Some(CONV_2));
     let mcp_runs = wait_for_jsonl_count(&mcp_log, 3, "post-fresh resume MCP");
     assert_named_mcp_run(&mcp_runs[2]);
 
@@ -335,12 +393,10 @@ fn antigravity_launch_resume_and_fresh_preserve_xats_identity() {
     let launches = wait_for_jsonl_count(&launch_log, 5, "cold fresh recovery");
     assert_eq!(launches[4]["mode"], "named");
     assert_eq!(launches[4]["expected_agent"], AGENT_ID);
-    assert!(!launches[4]["tail"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|arg| arg == "--conversation"));
+    assert_agentapi_launch(&launches[4], true, None);
     wait_for_slot_conversation(&db, CONV_1);
+    let updates = wait_for_jsonl_count(&bind_log, 5, "all conversation updates");
+    assert_eq!(updates[4]["conv"], CONV_1);
     let mcp_runs = wait_for_jsonl_count(&mcp_log, 4, "cold fresh MCP");
     assert_named_mcp_run(&mcp_runs[3]);
     let regs = daemon.state.lock().unwrap().named_registrations.clone();

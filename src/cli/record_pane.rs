@@ -192,7 +192,9 @@ fn capture_antigravity(profile: &str) -> anyhow::Result<()> {
         &event.conversation_id,
         std::time::Duration::from_secs(3),
         || pane_hosts_this_process(&pane) == Some(true),
-    )
+    )?;
+    crate::agents::antigravity::agentapi::notify_conversation_update(&event.conversation_id);
+    Ok(())
 }
 
 fn persist_antigravity_event(

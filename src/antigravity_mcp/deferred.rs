@@ -31,6 +31,12 @@ pub(super) fn requested(marker: Option<&OsStr>) -> Result<bool> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LauncherCapabilities {
+    pub(crate) defer_registration: bool,
+    pub(crate) agentapi_channel: bool,
+}
+
 pub(crate) fn require_deferred_bridge() -> Result<PathBuf> {
     let path = executable::resolve(PROGRAM).context("Cannot find executable xats-agy-mcp")?;
     let path = path
@@ -41,10 +47,19 @@ pub(crate) fn require_deferred_bridge() -> Result<PathBuf> {
 }
 
 pub(crate) fn require_deferred_capability(path: &Path) -> Result<()> {
+    let caps = probe_capabilities(path)?;
+    ensure!(
+        caps.defer_registration,
+        "Upgrade xats: expected defer_registration capability 1"
+    );
+    Ok(())
+}
+
+pub(crate) fn probe_capabilities(path: &Path) -> Result<LauncherCapabilities> {
     probe_with_path(path, &std::env::var_os("PATH").unwrap_or_default())
 }
 
-fn probe_with_path(path: &Path, search_path: &OsStr) -> Result<()> {
+fn probe_with_path(path: &Path, search_path: &OsStr) -> Result<LauncherCapabilities> {
     let mut command = tokio::process::Command::new(path);
     command
         .arg("--capabilities-json")
@@ -58,10 +73,12 @@ fn probe_with_path(path: &Path, search_path: &OsStr) -> Result<()> {
         .with_context(|| format!("Checking {} --capabilities-json", path.display()))
 }
 
-async fn probe(mut command: tokio::process::Command) -> Result<()> {
+async fn probe(mut command: tokio::process::Command) -> Result<LauncherCapabilities> {
     #[derive(Deserialize)]
     struct Capabilities {
         defer_registration: u64,
+        #[serde(default)]
+        agentapi_channel: u64,
     }
 
     let mut child = command.spawn().context("Starting capability probe")?;
@@ -97,11 +114,10 @@ async fn probe(mut command: tokio::process::Command) -> Result<()> {
     );
     let caps: Capabilities =
         serde_json::from_slice(&stdout).context("Invalid deferred capability response")?;
-    ensure!(
-        caps.defer_registration == 1,
-        "Upgrade xats: expected defer_registration capability 1"
-    );
-    Ok(())
+    Ok(LauncherCapabilities {
+        defer_registration: caps.defer_registration == 1,
+        agentapi_channel: caps.agentapi_channel == 1,
+    })
 }
 
 async fn probe_output(pipe: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
@@ -189,7 +205,11 @@ impl PreparedBridge {
 
     fn check(path: PathBuf, search_path: OsString) -> Result<Self> {
         let identity = file_identity(&path)?;
-        probe_with_path(&path, &search_path)?;
+        let caps = probe_with_path(&path, &search_path)?;
+        ensure!(
+            caps.defer_registration,
+            "Upgrade xats: expected defer_registration capability 1"
+        );
         Ok(Self {
             path,
             search_path,

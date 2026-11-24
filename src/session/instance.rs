@@ -2911,6 +2911,9 @@ impl Instance {
             _ => String::new(),
         };
         let prefix = launcher.map(ControlledLauncher::prefix).unwrap_or(&base);
+        let channel_args = launcher
+            .map(ControlledLauncher::agy_extra_args)
+            .unwrap_or("");
         let enabled = u8::from(pane.cross_agent_team);
         let named = u8::from(launcher.is_some());
         let deferred = u8::from(launcher.is_some_and(|launch| launch.deferred));
@@ -2920,7 +2923,7 @@ impl Instance {
             "-u XATS_IDENTITY_KEY -u AOE_ANTIGRAVITY_AGENT_ID -u AOE_ANTIGRAVITY_SLOT_DIGEST \
              -u AOE_ANTIGRAVITY_MCP_BINARY -u AOE_ANTIGRAVITY_MCP_PATH AOE_ANTIGRAVITY_PID=$$ \
              AOE_ANTIGRAVITY_XATS={enabled} AOE_ANTIGRAVITY_NAMED={named} \
-             AOE_ANTIGRAVITY_DEFERRED={deferred} /bin/bash -p -c {clean} bash {prefix}{yolo}{args}"
+             AOE_ANTIGRAVITY_DEFERRED={deferred} /bin/bash -p -c {clean} bash {prefix}{yolo}{args}{channel_args}"
         );
         let command = wrap_host_agent_command(
             &command,

@@ -1,6 +1,6 @@
 mod binding;
 mod deferred;
-pub(crate) use deferred::{require_deferred_bridge, require_deferred_capability};
+pub(crate) use deferred::{probe_capabilities, require_deferred_bridge};
 mod lease;
 mod named;
 mod stdio;

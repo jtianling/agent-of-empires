@@ -350,6 +350,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_tmux_3_8_v2_layout_and_blank_observer_pid() {
+        let data = concat!(
+            "12 101 2 $1 1 @4 1 1 {\"V\":2,\"L\":{\"t\":\"p\",\"w\":80,\"h\":24,\"x\":0,\"y\":0,\"a\":true,\"i\":0,\"I\":\"%7\"}} 1 0 %7 55 1 2|A|/a\n",
+            "12 101 2 $2 1 @5 1 1 {\"V\":2,\"L\":{\"t\":\"p\",\"w\":80,\"h\":24,\"x\":0,\"y\":0,\"a\":true,\"i\":0,\"I\":\"%8\"}} 0 0 %8  8 0|observer|\n",
+        );
+        let snapshot = parse(data.as_bytes(), 123);
+        assert_eq!(snapshot.windows["A"].panes, [(0, "%7".into())]);
+        assert_eq!(snapshot.windows["observer"].panes, [(0, "%8".into())]);
+        assert_eq!(snapshot.live.unwrap(), ["%7".into(), "%8".into()].into());
+    }
+
+    #[test]
     fn unknown_cwd_is_local_and_missing_windows_inhibit_gc() {
         let data = concat!(
             "12 101 2 $1 1 @4 1 1 0000,80x24,0,0,7 1 0 %7 55 1 2|A|/\\377\n",
