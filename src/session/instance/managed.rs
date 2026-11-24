@@ -106,6 +106,8 @@ impl Instance {
         persist(storage, instances, groups, self)?;
         crate::managed_xats::prepare(self)?;
         persist(storage, instances, groups, self)?;
+        crate::managed_codex::cleanup_retired(self)?;
+        persist(storage, instances, groups, self)?;
         if running {
             self.stop_managed_primary()?;
         }

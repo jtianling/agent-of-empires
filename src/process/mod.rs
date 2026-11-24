@@ -255,10 +255,6 @@ pub fn is_unsafe_kill_root(pid: u32) -> bool {
 /// Kill a process and all its descendants
 /// Sends SIGTERM first, then SIGKILL to any survivors
 pub fn kill_process_tree(pid: u32) {
-    // Hard guard against catastrophic kills. A dead tmux pane resolves to pane
-    // pid 0; without this, kill_process_tree(0) would tear down every process on
-    // the machine (including this one). Callers should already avoid pid <= 1,
-    // but this backstop makes the invariant unconditional.
     if is_unsafe_kill_root(pid) {
         return;
     }
@@ -277,6 +273,46 @@ pub fn kill_process_tree(pid: u32) {
     {
         let _ = pid;
         // No-op on unsupported platforms, fall back to tmux kill-session only
+    }
+}
+
+pub(crate) fn wait_for_exits(
+    pids: &[u32],
+    timeout: std::time::Duration,
+    exists: impl Fn(u32) -> bool,
+) {
+    let deadline = std::time::Instant::now() + timeout;
+    let poll = std::time::Duration::from_millis(25);
+    loop {
+        if pids.iter().all(|&p| !exists(p)) {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        std::thread::sleep(remaining.min(poll));
+    }
+}
+
+pub(crate) fn kill_process_tree_gracefully(pid: u32, grace: std::time::Duration) {
+    if is_unsafe_kill_root(pid) {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        linux::kill_process_tree_gracefully(pid, grace);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::kill_process_tree_gracefully(pid, grace);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (pid, grace);
     }
 }
 

@@ -746,6 +746,10 @@ last_seen_version = "{}"
         &self.binary_path
     }
 
+    pub fn stub_dir_path(&self) -> &Path {
+        &self.stub_path
+    }
+
     /// Install a long-lived stub for an agent binary (e.g. "claude", "codex",
     /// "copilot") into the harness stub dir so `which <name>` succeeds AND the
     /// agent pane launched for it stays alive. The default `claude` stub exits

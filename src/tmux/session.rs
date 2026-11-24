@@ -444,13 +444,56 @@ pub fn respawn_pane_target(
         .collect();
     append_remain_on_exit_args(&mut args, pane, remain_on_exit);
 
-    let output = crate::tmux::tmux_command().args(&args).output()?;
+    let output = super::tmux_command().args(&args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("Failed to respawn pane {}: {}", pane, stderr);
     }
 
+    Ok(())
+}
+
+pub(crate) fn respawn_verified_pane(
+    profile: &str,
+    pane: &str,
+    condition: &str,
+    command: &str,
+    working_dir: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        pane.strip_prefix('%')
+            .is_some_and(|s| s.parse::<u32>().is_ok()),
+        "Invalid Antigravity respawn pane"
+    );
+    let mut action = String::from("respawn-pane -k -c");
+    super::control::word(&mut action, &super::control::literal_format(working_dir));
+    action.push_str(&format!(" -t {pane} --"));
+    super::control::word(&mut action, command);
+    action.push_str(&format!(
+        " ; set-option -p -t {pane} remain-on-exit on ; display-message -p AOE_RESPAWNED"
+    ));
+    let output = super::profile_command(profile)
+        .args([
+            "-N",
+            "if-shell",
+            "-F",
+            "-t",
+            pane,
+            condition,
+            &action,
+            "display-message -p AOE_TARGET_CHANGED",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Antigravity respawn failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    anyhow::ensure!(
+        output.stdout.strip_suffix(b"\n") == Some(b"AOE_RESPAWNED"),
+        "Antigravity pane changed before respawn"
+    );
     Ok(())
 }
 

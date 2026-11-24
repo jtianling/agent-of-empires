@@ -173,7 +173,11 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
             || instance.title == args.identifier;
         if selected && crate::session::managed_pane::has_managed_state(instance) {
             instances[index].source_profile = profile.to_string();
-            crate::managed_xats::prepare_release(&mut instances[index])?;
+            crate::xats_release::warn_on_failure(
+                crate::managed_xats::prepare_release(&mut instances[index]),
+                &args.identifier,
+                "managed xats release preparation",
+            );
             crate::session::managed_pane::prepare_children_release(&mut instances[index])?;
             let tree = GroupTree::new_with_groups(&instances, &groups);
             storage.save_with_groups(&instances, &tree)?;
@@ -192,23 +196,32 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
             found = true;
             removed_title = inst.title.clone();
 
-            crate::xats_release::release_session(profile, &inst)?;
+            let release_guard = crate::xats_release::release_session(profile, &inst)?;
 
             if crate::session::managed_pane::has_managed_state(&inst) {
                 inst.source_profile = profile.to_string();
                 inst.stop()?;
-                crate::managed_xats::release(&inst)?;
+                crate::xats_release::warn_on_failure(
+                    crate::managed_xats::release(&inst),
+                    &inst.id,
+                    "managed xats release",
+                );
                 crate::managed_codex::cleanup(&inst)?;
                 crate::managed_runtimes::cleanup(&inst)?;
                 crate::session::managed_pane::release_children(&inst)?;
             }
 
+            release_guard.verify()?;
             cleanup_pane_worktrees(profile, &inst, &args, &config);
+
+            release_guard.verify()?;
 
             // Capture the session's pane ids before killing it so the durable
             // store can purge their volatile capture rows.
             let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
             let pane_ids = crate::db::reconcile::session_pane_ids(&session_name);
+
+            release_guard.verify()?;
 
             // Kill tmux session if it exists
             if let Ok(tmux_session) = crate::tmux::Session::new(&inst.id, &inst.title) {

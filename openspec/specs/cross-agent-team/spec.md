@@ -7,7 +7,7 @@ TBD - created by archiving change cross-agent-team-launch. Update Purpose after 
 
 New Session SHALL 为 primary pane 和已选择的 secondary pane 分别展示 Cross Agent Team checkbox。  checkbox SHALL 与同一 pane 的 YOLO Mode 位于同一行, 两者 MUST 可以独立切换。
 
-每个 checkbox 的可见性 SHALL 只取决于同一 pane 的 Tool。  Tool 为 `claude` 或 `codex` 时显示, 其他 Tool 时隐藏。  primary 与 secondary 的值 SHALL 相互独立, 初始值分别取自 active profile 解析后的 `cross_agent_team_default`。
+每个 checkbox 的可见性 SHALL 由同一 pane 的 Tool 在 agent 注册表中声明的 Cross Agent Team 能力决定.  primary 与 secondary 的值 SHALL 相互独立, 初始值分别取自 active profile 解析后的 `cross_agent_team_default`.
 
 #### Scenario: Primary Claude 显示独立开关
 - **WHEN** primary Tool 为 `claude`
@@ -20,7 +20,7 @@ New Session SHALL 为 primary pane 和已选择的 secondary pane 分别展示 C
 - **AND**切换它 SHALL 不改变 primary pane
 
 #### Scenario: 不支持的 Tool 只隐藏自己的开关
-- **WHEN**一个 pane 的 Tool 不是 `claude` 或 `codex`
+- **WHEN** 一个 pane 的 Tool 在注册表中不支持 Cross Agent Team
 - **THEN**该 pane 的 Cross Agent Team checkbox SHALL 不显示
 - **AND**另一个 pane 的可见性 SHALL 不受影响
 
@@ -29,6 +29,38 @@ New Session SHALL 为 primary pane 和已选择的 secondary pane 分别展示 C
 - **AND** primary 与 secondary 都使用支持的 Tool
 - **THEN**两个 pane 的 checkbox SHALL 分别初始化为选中
 - **AND**用户 SHALL 可以只关闭其中一个
+
+### Requirement: Antigravity 原生 TUI 的团队通信
+
+AoE SHALL 为启用 Cross Agent Team 的 Antigravity 宿主机窗格提供本机 MCP 服务, 分别管理窗格的 xats 身份与原生对话 UUID.
+
+#### Scenario: 首次注册和重连
+
+- **WHEN** 宿主机上的 `antigravity` 窗格启用 Cross Agent Team
+- **THEN** AoE SHALL 在未命名的受控 PTY 中启动原生 `agy`, 等待用户通过本机 stdio MCP 服务明确提供名称和团队
+- **AND** 首次注册成功时 SHALL 在同一 agy 进程中完成 `antigravity-pty` 投递绑定, 保留原对话 UUID, 无需恢复重启
+- **AND** 服务 SHALL 先验证启动进程及 pane 归属, 从该窗格的持久 slot 读取身份 key
+- **AND** 在已有身份的窗格重启后, 服务 SHALL 使用原 key 重连, 保留未读邮件
+
+#### Scenario: 已注册的普通窗格恢复并启用空闲唤醒
+
+- **WHEN** 用户恢复一个启用 Cross Agent Team 且其 slot key 已有 xats 身份的 Antigravity 窗格
+- **THEN** 在支持命名启动器的环境中, AoE SHALL 使用原名称、团队和 conversation UUID 通过 `xats-agy` 启动
+- **AND** 本机 MCP 服务 SHALL 核对本次启动的 agy 子进程与窗格归属, 使用同一 slot key 和本次 launch ID 注册 PTY 投递
+- **AND** 重新打开 AoE 首页 SHALL 保留现有 agy 进程, 直到用户恢复重启该会话
+
+#### Scenario: 同目录两个 agy 窗格
+
+- **WHEN** 两个窗格在同一个目录使用不同的 conversation 和团队身份
+- **THEN** 恢复一个窗格时 SHALL 使用该 slot 记录的 conversation UUID 和身份 key
+- **AND** 缺少可信 UUID 时, 显式恢复 SHALL 报错
+
+#### Scenario: 清空上下文并恢复原 xats 运行身份
+
+- **WHEN** 用户对已启用 Cross Agent Team 的 Antigravity 窗格执行 `c` / `C` (Fresh 重启或冷恢复)
+- **THEN** AoE SHALL 不传 `--conversation` 并清空该 slot 的旧 `native_session_id`
+- **AND** 该窗格的持久化 `xats_identity_key` SHALL 保持不变
+- **AND** 若该身份 key 已在 xats 注册, AoE SHALL 使用原名称和团队通过 `xats-agy` 启动新对话并自动重新绑定 PTY 唤醒投递, 不依赖已有 conversation UUID
 
 ### Requirement: Development-channels flag on launch
 
@@ -541,9 +573,9 @@ server 启动时间和 pane ID, 并在已知时携带该 pane 自己的 durable 
 及精确 OpenCode session ID.  手动启动且没有 key 的 pane SHALL 仍按精确载体核验,
 不得按标题, name/team 猜测成员.  托管身份 SHALL 继续使用原有 fenced release.
 
-所有目标 SHALL 在一个批次中验证并释放, AoE SHALL 校验完整有序的成功响应后
-继续删除.  API 缺失, 服务不可用, 身份移位, 歧义或无效响应 SHALL 明确记录具体
-原因并阻止后续资源删除, 不得静默跳过或改用按 agent ID 删除的接口.
+所有目标 SHALL 在一个批次中尝试验证并释放.  API 缺失, 服务不可用, 身份移位,
+歧义或无效响应 SHALL 持久记录具体原因, 然后继续删除 AoE session.  未释放的身份
+SHALL 保留, 不改用按 agent ID 强删.  本地归属变化和资源清理错误仍 SHALL 阻止不安全删除.
 诊断 SHALL 隐去 identity key 和 bearer token.
 
 #### Scenario: 左右 pane 一次释放后删除
@@ -553,18 +585,34 @@ server 启动时间和 pane ID, 并在已知时携带该 pane 自己的 durable 
 - **AND** 每个目标 SHALL 使用自己的 pane 坐标和 identity key
 - **AND** 所有目标释放成功后 SHALL 继续原有 session 删除流程
 
-#### Scenario: 身份冲突保留 session
+#### Scenario: 身份释放失败仍删除 session
 
 - **WHEN** xats 拒绝任意目标, 或返回缺少目标的成功响应
-- **THEN** AoE SHALL 保留 session 及其资源
-- **AND** 显示和记录具体错误, 方便用户重试
+- **THEN** AoE SHALL 继续删除 session
+- **AND** 在 debug.log 持久记录具体错误和 session ID, 保留未释放的 xats 身份
 
 #### Scenario: 已停止的 pane 仍占用身份
 
 - **WHEN** durable identity key 对应的 pane 已不存在
 - **THEN** AoE SHALL 查询该 key 是否仍有成员占用
 - **AND** 只有明确的业务 not_found SHALL 允许跳过该 key
-- **AND** 仍有成员占用, 查询失败或接口缺失 SHALL 阻止删除
+- **AND** 仍有成员占用, 查询失败或接口缺失 SHALL 记录警告, 不阻止 session 删除
+
+#### Scenario: 已死 pane 的 key 确认没有持有者
+
+- **WHEN** 普通非托管 pane 已死, PID 为 0, TTY 为空, 且存在该 slot 自己的持久 key
+- **THEN** AoE SHALL 在原批次中保留该目标, 显式请求 `allow_dead_if_identity_unclaimed: true`
+- **AND** xats SHALL 独立验证物理代次, 并在同批事务中核对 key 没有 agent holder 和未释放的 managed claim
+- **AND** AoE SHALL 仅为带此标记的目标接受 `dead_key_unclaimed` 且 `agent: null` 的响应
+- **AND** 旧 daemon 拒绝新字段时 SHALL 记录释放失败并继续本地删除, 不重试身份强删
+- **AND** 历史绑定已迁移的其他身份及未知 logical owner SHALL 保留
+
+#### Scenario: 已死 pane 在删除过程中被重新启动
+
+- **WHEN** 使用已死 pane 缺席证明的 session 在释放前后或最终物理删除前发生 pane 集合, server 代次, PID, TTY 或 slot 身份代次变化
+- **THEN** AoE SHALL 停止后续资源删除并显示具体原因
+- **AND** 不得自动重启 agent 或把已变化的 pane 当成原已死目标
+- **AND** 本地操作锁 SHALL 串行化 AoE 控制操作, 不宣称能锁住外部 tmux 操作
 
 #### Scenario: 未使用 xats 且本机未安装 daemon
 

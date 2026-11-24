@@ -3,6 +3,7 @@
 mod agent_switch;
 mod group_restart;
 mod input;
+mod mouse;
 mod on_create;
 mod operations;
 mod render;
@@ -110,6 +111,7 @@ pub struct HomeView {
     /// First visible row of the session list, kept across frames so the
     /// viewport only scrolls as far as the cursor requires
     pub(super) list_offset: usize,
+    pub(super) list_area: ratatui::layout::Rect,
     pub(super) selected_session: Option<String>,
     pub(super) selected_group: Option<String>,
     pub(super) sort_order: SortOrder,
@@ -285,6 +287,7 @@ impl HomeView {
             stable_session_index_cache,
             cursor: 0,
             list_offset: 0,
+            list_area: ratatui::layout::Rect::default(),
             selected_session: None,
             selected_group: None,
             sort_order,

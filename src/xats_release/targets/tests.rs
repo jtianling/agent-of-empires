@@ -34,6 +34,9 @@ fn pane(id: &str, primary: bool) -> Pane {
         index: u32::from(!primary),
         left: 0,
         top: 0,
+        dead: false,
+        root_pid: 1000,
+        tty: "/dev/pts/1".into(),
     }
 }
 
@@ -87,4 +90,33 @@ fn never_splits_an_oversized_atomic_release() {
         .collect::<Vec<_>>();
     let plan = plan(&instance, &[], &panes);
     assert!(crate::xats_release::validate_plan(&plan).is_err());
+}
+
+#[test]
+fn dead_with_own_key_remains_in_the_atomic_batch() {
+    let instance = Instance::new("test", "/tmp");
+    let slots = [slot(0, "%1", "live-key"), slot(1, "%2", "dead-key")];
+    let mut dead = pane("%2", false);
+    dead.dead = true;
+    dead.root_pid = 0;
+    dead.tty.clear();
+    let plan = plan(&instance, &slots, &[pane("%1", true), dead]);
+    assert_eq!(plan.targets.len(), 2);
+    assert!(!plan.targets[0].allow_dead_if_identity_unclaimed);
+    assert!(plan.targets[1].allow_dead_if_identity_unclaimed);
+    assert!(plan.missing_keys.is_empty());
+}
+
+#[test]
+fn dead_without_own_key_or_with_live_evidence_is_not_opted_in() {
+    let instance = Instance::new("test", "/tmp");
+    let slots = [slot(1, "%2", "dead-key")];
+    let mut dead = pane("%2", false);
+    dead.dead = true;
+    let evidence = plan(&instance, &slots, &[dead.clone()]);
+    assert!(!evidence.targets[0].allow_dead_if_identity_unclaimed);
+    dead.root_pid = 0;
+    dead.tty.clear();
+    let no_key = plan(&instance, &[], &[dead]);
+    assert!(!no_key.targets[0].allow_dead_if_identity_unclaimed);
 }

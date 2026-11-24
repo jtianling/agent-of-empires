@@ -1,6 +1,7 @@
 //! Agent of Empires library - Core functionality for the terminal session manager
 
 pub mod agents;
+pub mod antigravity_mcp;
 pub mod cli;
 pub mod codex_launch;
 mod codex_name;
@@ -19,6 +20,7 @@ pub mod migrations;
 pub mod opencode_runtime;
 pub mod opencode_xats;
 pub mod process;
+pub mod runtime_handoff;
 pub mod session;
 pub mod sound;
 pub mod terminal;

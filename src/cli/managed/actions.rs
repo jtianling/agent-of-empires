@@ -69,8 +69,9 @@ fn build(profile: &str, owner: &str, args: &CreateArgs) -> Result<Instance> {
     let mut xats = match (&args.xats_name, &args.xats_team) {
         (Some(name), Some(team)) => {
             ensure!(
-                args.tool != "kimi",
-                "Managed xats launch is not supported for kimi"
+                !matches!(args.tool.as_str(), "kimi" | "antigravity"),
+                "Managed xats launch is not supported for {}",
+                args.tool
             );
             ensure!(
                 Instance::supports_cross_agent_team_tool(&args.tool),
@@ -303,7 +304,11 @@ pub(super) fn remove(
     let id = instance.id.clone();
     crate::xats_release::release_session(storage.profile(), instance)?;
     instance.stop()?;
-    crate::managed_xats::release(instance)?;
+    crate::xats_release::warn_on_failure(
+        crate::managed_xats::release(instance),
+        &instance.id,
+        "managed xats release",
+    );
     if instance.tool == "codex" {
         crate::managed_codex::cleanup(instance)?;
     }
@@ -322,7 +327,12 @@ fn persist_release_preparation(
     groups: &[Group],
     index: usize,
 ) -> Result<()> {
-    crate::managed_xats::prepare_release(&mut instances[index])?;
+    let id = instances[index].id.clone();
+    crate::xats_release::warn_on_failure(
+        crate::managed_xats::prepare_release(&mut instances[index]),
+        &id,
+        "managed xats release preparation",
+    );
     save(storage, instances, groups)
 }
 

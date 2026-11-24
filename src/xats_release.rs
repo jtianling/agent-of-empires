@@ -5,9 +5,37 @@ use crate::xats_control::{self, ControlPlane};
 use crate::xats_identity::KeyHolder;
 
 mod client;
+mod guard;
 mod targets;
+pub(crate) use guard::ReleaseGuard;
 
-pub(crate) fn release_session(profile: &str, instance: &Instance) -> Result<()> {
+pub(crate) fn warn_on_failure<T>(result: Result<T>, session: &str, operation: &str) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            let message =
+                format!("Session {session}: {operation} failed; continuing deletion: {error:#}");
+            tracing::warn!("{message}");
+            if let Err(log_error) = append_warning(&message) {
+                tracing::error!("Cannot persist deletion warning: {log_error:#}");
+            }
+            None
+        }
+    }
+}
+
+fn append_warning(message: &str) -> Result<()> {
+    use std::io::Write;
+    let path = crate::session::get_app_dir()?.join("debug.log");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{} WARN {message}", chrono::Utc::now())?;
+    Ok(())
+}
+
+pub(crate) fn release_session(profile: &str, instance: &Instance) -> Result<ReleaseGuard> {
     let profile = profile.to_string();
     let instance = instance.clone();
     let result = xats_control::block_on_control("xats-pane-release", move || {
@@ -19,7 +47,7 @@ pub(crate) fn release_session(profile: &str, instance: &Instance) -> Result<()> 
     result
 }
 
-async fn release(profile: &str, instance: &Instance) -> Result<()> {
+async fn release(profile: &str, instance: &Instance) -> Result<ReleaseGuard> {
     let slots = crate::db::Store::open_with_schema(profile)?
         .read_slots_for_instance_with_diagnostics(&instance.id)?;
     ensure!(
@@ -30,15 +58,26 @@ async fn release(profile: &str, instance: &Instance) -> Result<()> {
     let panes = crate::tmux::inventory::observe_session(profile, &session).await?;
     let plan = targets::plan(instance, &slots.slots, &panes);
     if plan.targets.is_empty() && plan.missing_keys.is_empty() {
-        return Ok(());
+        return Ok(ReleaseGuard::default());
     }
-    let control = match xats_control::discover_control_plane() {
-        Ok(control) => control,
-        Err(error) if !plan.requires_daemon && missing_daemon(&error) => return Ok(()),
-        Err(error) => return Err(error).context("Cannot contact xats before session deletion"),
+    let guard = if plan
+        .targets
+        .iter()
+        .any(|target| target.allow_dead_if_identity_unclaimed)
+    {
+        ReleaseGuard::new(profile, &instance.id, &session, &panes, &slots.slots)
+    } else {
+        ReleaseGuard::default()
     };
-    validate_plan(&plan)?;
-    redact(release_plan(&control, &plan).await, &plan, &control)
+    guard.verify_async().await?;
+    let result = match validate_plan(&plan).and_then(|()| xats_control::discover_control_plane()) {
+        Ok(control) => redact(release_plan(&control, &plan).await, &plan, &control),
+        Err(error) if !plan.requires_daemon && missing_daemon(&error) => Ok(()),
+        Err(error) => Err(error).context("Cannot contact xats before session deletion"),
+    };
+    warn_on_failure(result, &instance.id, "xats identity release");
+    guard.verify_async().await?;
+    Ok(guard)
 }
 
 fn redact(result: Result<()>, plan: &targets::Plan, control: &ControlPlane) -> Result<()> {

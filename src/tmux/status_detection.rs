@@ -476,6 +476,9 @@ pub fn detect_agent_type_from_command(pane_current_command: &str) -> Option<&'st
         return Some("shell");
     }
 
+    if crate::agents::agent_from_process_name(&cmd_lower) == Some("antigravity") {
+        return Some("antigravity");
+    }
     if cmd_lower.contains("claude") {
         return Some("claude");
     }
@@ -719,6 +722,34 @@ pub fn detect_kimi_status(raw_content: &str) -> Status {
         .any(|line| line.trim_start().starts_with('❯') && line.contains(" 1."))
     {
         return Status::Waiting;
+    }
+    Status::Idle
+}
+
+pub fn detect_antigravity_status(content: &str) -> Status {
+    let recent = content
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(12);
+    let mut allow = false;
+    let mut deny = false;
+    for line in recent {
+        if (line.contains('…') && line.ends_with("esc to cancel)"))
+            || SPINNER_CHARS
+                .iter()
+                .any(|spinner| line.starts_with(spinner))
+        {
+            return Status::Running;
+        }
+        allow |= line.contains("Yes, and always allow")
+            || line.contains("Yes, allow ")
+            || line.contains("Yes, run command");
+        deny |= line.contains("No, ");
+        if allow && deny {
+            return Status::Waiting;
+        }
     }
     Status::Idle
 }
@@ -1158,6 +1189,35 @@ mod tests {
         assert_eq!(detect_agent_type_from_command("bash"), Some("shell"));
         assert_eq!(detect_agent_type_from_command("2.1.81"), None);
         assert_eq!(detect_agent_type_from_command(""), None);
+    }
+
+    #[test]
+    fn antigravity_process_matches_the_executable_basename() {
+        for cmd in ["agy", "antigravity", "/tmp/codex/agy"] {
+            assert_eq!(detect_agent_type_from_command(cmd), Some("antigravity"));
+        }
+        for cmd in ["bagy", "agy-helper", "/tmp/agy/editor"] {
+            assert_eq!(detect_agent_type_from_command(cmd), None);
+        }
+    }
+
+    #[test]
+    fn antigravity_status_uses_recent_activity_and_permission_choices() {
+        let busy = "Thinking… (2s · \x1b[33mesc to cancel\x1b[0m)";
+        let permission = "Run this command?\n❯ Yes, run command\n  No, deny";
+        let detect = |text: &str| detect_status_from_content(text, "antigravity", None);
+        assert_eq!(detect(busy), Status::Running);
+        assert_eq!(detect("⠋ Searching"), Status::Running);
+        assert_eq!(detect(&format!("{busy}\n{permission}")), Status::Waiting);
+        assert_eq!(detect(&format!("{permission}\n{busy}")), Status::Running);
+        assert_eq!(
+            detect("> Explain how to allow or deny access"),
+            Status::Idle
+        );
+        assert_eq!(
+            detect(&format!("{permission}\n{busy}\n{}", "log\n".repeat(15))),
+            Status::Idle
+        );
     }
 
     #[test]

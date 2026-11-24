@@ -19,6 +19,8 @@ mod harness;
 
 mod agent_session_store;
 mod agent_switch;
+mod antigravity;
+mod antigravity_mock;
 mod attach_reconcile;
 mod background_new_session;
 mod background_restart;

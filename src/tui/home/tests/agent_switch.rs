@@ -31,7 +31,7 @@ fn unsupported_agent_explains_instead_of_opening() {
     let mut env = create_test_env_with_sessions(1);
     let id = env.view.instances[0].id.clone();
     env.view.mutate_instance(&id, |inst| {
-        inst.tool = "opencode".to_string();
+        inst.tool = "shell".to_string();
         inst.sync_primary_pane_from_legacy();
     });
 

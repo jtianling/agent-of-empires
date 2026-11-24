@@ -18,6 +18,11 @@ impl Instance {
         identity: Option<&str>,
         native: Option<&str>,
     ) -> Result<Option<RuntimeSettings>> {
+        if agent == "antigravity" && primary {
+            let args = shell_words::split(&self.extra_args)
+                .context("Invalid persisted Antigravity arguments")?;
+            crate::agents::antigravity::validate_args(&args)?;
+        }
         if agent != "codex" {
             return Ok(None);
         }

@@ -160,6 +160,9 @@ impl Instance {
         self.managed_panes[index].capture_runtime(&projection)?;
         persist(storage, instances, groups, self)?;
         prepared?;
+        crate::managed_codex::cleanup_retired(&mut projection)?;
+        self.managed_panes[index].capture_runtime(&projection)?;
+        persist(storage, instances, groups, self)?;
         if replacement.is_none() {
             let target = record
                 .tmux_pane

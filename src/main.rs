@@ -26,6 +26,12 @@ async fn main() -> Result<()> {
         }
     };
 
+    if let Some(Commands::AntigravityLaunch { command }) = cli.command {
+        return cli::antigravity_launch::run(&command);
+    }
+    if matches!(cli.command, Some(Commands::AntigravityMcp)) {
+        return agent_of_empires::antigravity_mcp::run().await;
+    }
     if let Some(Commands::Overview(args)) = cli.command {
         return cli::overview::run(session::resolve_profile(cli.profile), args).await;
     }
@@ -130,6 +136,10 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Commands::CodexProvider(args)) => return cli::codex_provider::run(args),
+        Some(Commands::CompleteRuntimeHandoff(args)) => {
+            let profile = session::resolve_profile(cli.profile);
+            return agent_of_empires::runtime_handoff::run(&profile, args);
+        }
         Some(Commands::CodexName(args)) => return cli::codex_name::run(args).await,
         Some(Commands::CodexArguments) => return agent_of_empires::codex_launch::write_arguments(),
         Some(Commands::CodexLaunch(args)) => {

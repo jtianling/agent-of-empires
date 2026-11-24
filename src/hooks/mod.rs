@@ -6,6 +6,9 @@
 //!
 //! Hook events are agent-specific and defined in `AgentHookConfig::events`.
 
+pub(crate) mod antigravity;
+mod antigravity_config;
+pub(crate) mod antigravity_xats;
 mod status_file;
 
 use std::path::Path;
@@ -309,6 +312,12 @@ pub fn uninstall_hooks(settings_path: &Path) -> Result<bool> {
 /// the hook status base directory. Called during `aoe uninstall`.
 pub fn uninstall_all_hooks() {
     if let Some(home) = dirs::home_dir() {
+        if let Err(error) = antigravity_xats::uninstall(&home) {
+            tracing::warn!("Removing Antigravity xats MCP entry: {error:#}");
+        }
+        if let Err(error) = antigravity::uninstall(&home) {
+            tracing::warn!("Removing Antigravity capture hook: {error:#}");
+        }
         for agent in crate::agents::AGENTS {
             if let Some(hook_cfg) = &agent.hook_config {
                 let settings_path = home.join(hook_cfg.settings_rel_path);

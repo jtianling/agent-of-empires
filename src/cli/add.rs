@@ -59,6 +59,10 @@ pub struct AddArgs {
     #[arg(short = 'y', long)]
     yolo: bool,
 
+    /// Enable Cross Agent Team for this host session
+    #[arg(long, conflicts_with_all = ["sandbox", "sandbox_image"])]
+    cross_agent_team: bool,
+
     /// Automatically trust repository hooks without prompting
     #[arg(long = "trust-hooks")]
     trust_hooks: bool,
@@ -91,7 +95,61 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         bail!("--repo requires --worktree to specify a branch\nTip: aoe add /path --repo /other -w branch-name");
     }
 
-    let config = resolve_config(profile).unwrap_or_default();
+    let config = match resolve_config(profile) {
+        Ok(config) => config,
+        Err(error) if args.cross_agent_team => return Err(error),
+        Err(error) => {
+            tracing::warn!("Could not load profile {profile}: {error:#}");
+            Default::default()
+        }
+    };
+    let resolve_tool = if args.cross_agent_team {
+        crate::agents::agent_from_command
+    } else {
+        crate::agents::resolve_tool_name
+    };
+    let tool = match args.command.as_deref() {
+        Some(cmd) => resolve_tool(cmd).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown tool in command: {}\nSupported tools: {}",
+                cmd,
+                crate::agents::agent_names().join(", ")
+            )
+        })?,
+        None => match config.session.default_tool.as_deref() {
+            Some(cmd) if args.cross_agent_team => resolve_tool(cmd).ok_or_else(|| {
+                anyhow::anyhow!("Unknown default tool for Cross Agent Team: {cmd}")
+            })?,
+            default => default
+                .and_then(resolve_tool)
+                .or_else(|| {
+                    crate::tmux::AvailableTools::detect()
+                        .available_list()
+                        .first()
+                        .copied()
+                })
+                .unwrap_or("claude"),
+        },
+    };
+    if args.cross_agent_team {
+        if !Instance::supports_cross_agent_team_tool(tool) {
+            bail!("Cross Agent Team is unsupported for '{tool}'");
+        }
+        if config.sandbox.enabled_by_default {
+            bail!("Cross Agent Team requires a host session; sandbox is enabled by default");
+        }
+    }
+
+    let (command, extra_args) = launch_arguments(
+        tool,
+        args.command.as_deref(),
+        args.extra_args.as_deref(),
+        config
+            .session
+            .agent_extra_args
+            .get(tool)
+            .map(String::as_str),
+    )?;
 
     let mut worktree_info_opt = None;
     let mut workspace_info_opt = None;
@@ -223,27 +281,9 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         instance.parent_session_id = Some(parent);
     }
 
-    if let Some(cmd) = &args.command {
-        let tool_name = detect_tool(cmd)?;
-        instance.tool = tool_name;
-        // Only store a custom command when the user passed extra args
-        // (e.g. "claude --resume xyz"). A bare tool name/alias should resolve
-        // through the agent definition so the correct binary is used.
-        if cmd.trim().contains(' ') {
-            instance.command = cmd.clone();
-        }
-    } else {
-        // Use default_tool from resolved config, then first available tool, then "claude"
-        let available_tools = crate::tmux::AvailableTools::detect();
-        instance.tool = config
-            .session
-            .default_tool
-            .as_deref()
-            .and_then(crate::agents::resolve_tool_name)
-            .or_else(|| available_tools.available_list().first().copied())
-            .unwrap_or("claude")
-            .to_string();
-    }
+    instance.tool = tool.to_owned();
+    instance.command = command;
+    instance.extra_args = extra_args;
 
     // Apply set_default_command for agents that need it (e.g., opencode, codex)
     if instance.command.is_empty() {
@@ -262,16 +302,11 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     }
 
     instance.yolo_mode = args.yolo || config.session.yolo_mode_default;
-    instance.sync_primary_pane_from_legacy();
-
-    // Apply extra_args and command override: CLI flags take priority, then config defaults
-    if let Some(ref extra) = args.extra_args {
-        instance.extra_args = extra.clone();
-    } else if let Some(extra) = config.session.agent_extra_args.get(&instance.tool) {
-        if !extra.is_empty() {
-            instance.extra_args = extra.clone();
-        }
+    if args.cross_agent_team {
+        instance.cross_agent_team = true;
+        instance.cross_agent_team_channel = config.session.cross_agent_team_channel.clone();
     }
+    instance.sync_primary_pane_from_legacy();
 
     if let Some(ref cmd) = args.cmd_override {
         instance.command = cmd.clone();
@@ -481,16 +516,152 @@ fn trust_and_run_on_create(
     Ok(())
 }
 
-fn detect_tool(cmd: &str) -> Result<String> {
-    crate::agents::resolve_tool_name(cmd)
-        .map(|name| name.to_string())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unknown tool in command: {}\n\
-                 Supported tools: {}\n\
-                 Tip: Command must contain one of the supported tool names",
-                cmd,
-                crate::agents::agent_names().join(", ")
+fn launch_arguments(
+    tool: &str,
+    command: Option<&str>,
+    extra: Option<&str>,
+    defaults: Option<&str>,
+) -> Result<(String, String)> {
+    if tool == "antigravity" {
+        return crate::agents::antigravity::launch_arguments(command, extra, defaults);
+    }
+    let custom = command
+        .filter(|cmd| cmd.trim().contains(' '))
+        .unwrap_or_default();
+    Ok((
+        custom.to_owned(),
+        extra.or(defaults).unwrap_or_default().to_owned(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install_fixture(dir: &Path, binary: &str, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(binary);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' '{version}' \"$AOE_ANTIGRAVITY_XATS\" \"$@\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn check_native_invocation(
+        instance: &Instance,
+        bin: &Path,
+        version: &str,
+        token: Option<&str>,
+    ) {
+        let cmd = instance.build_agent_command(token).unwrap();
+        let outer = shell_words::split(&cmd).unwrap();
+        let (_, invocation) = outer.last().unwrap().split_once("exec env ").unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("exec /usr/bin/env {invocation}")])
+            .env_clear()
+            .env("PATH", bin)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut expected = vec![version, "0", "--dangerously-skip-permissions"];
+        if let Some(id) = token {
+            expected.extend(["--conversation", id]);
+        }
+        expected.extend(["--model", "test model", "--effort", "high"]);
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn antigravity_cli_model_and_yolo_survive_exact_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::session::scoped_test_home(temp.path());
+        let id = "01234567-89ab-cdef-0123-456789abcdef";
+        let bin = temp.path().join("default bin");
+        install_fixture(&bin, "agy", "1.4.9");
+        let alternate = temp.path().join("user's alternate bin");
+        let agy = install_fixture(&alternate, "agy", "1.5.14");
+        let antigravity = install_fixture(&alternate, "antigravity", "1.5.14");
+        for (name, absolute) in [
+            ("antigravity", false),
+            ("agy", false),
+            (agy.to_str().unwrap(), true),
+            (antigravity.to_str().unwrap(), true),
+        ] {
+            let mut instance = Instance::new("test", "/tmp");
+            let source = format!("{} --model 'test model'", shell_words::quote(name));
+            instance.tool = crate::agents::resolve_tool_name(&source).unwrap().into();
+            (instance.command, instance.extra_args) = launch_arguments(
+                &instance.tool,
+                Some(&source),
+                Some("--effort high"),
+                Some("--effort low"),
             )
-        })
+            .unwrap();
+            instance.yolo_mode = true;
+            instance.sync_primary_pane_from_legacy();
+            let mut saved: Instance =
+                serde_json::from_value(serde_json::to_value(&instance).unwrap()).unwrap();
+            let expected_command = if absolute {
+                crate::session::environment::shell_escape(name)
+            } else {
+                String::new()
+            };
+            assert_eq!(saved.command, expected_command);
+            assert!(!saved.has_command_override());
+            let version = if absolute { "1.5.14" } else { "1.4.9" };
+            for token in [None, Some(id)] {
+                check_native_invocation(&saved, &bin, version, token);
+            }
+            saved.extra_args = "--continue".into();
+            assert!(saved.build_agent_command(None).is_none());
+            assert!(saved.build_agent_command(Some(id)).is_none());
+        }
+    }
+
+    #[test]
+    fn antigravity_cli_rejects_persistent_session_selectors_from_each_source() {
+        for flag in [
+            "--conversation uuid",
+            "--conversation=uuid",
+            "--continue",
+            "-c",
+            "-continue=true",
+        ] {
+            let cmd = format!("agy {flag}");
+            for (command, extra, defaults) in [
+                (Some(cmd.as_str()), None, None),
+                (None, Some(flag), None),
+                (None, None, Some(flag)),
+            ] {
+                let err = launch_arguments("antigravity", command, extra, defaults).unwrap_err();
+                assert!(err.to_string().contains("selects a conversation"), "{err}");
+            }
+        }
+        let (_, args) = launch_arguments(
+            "antigravity",
+            Some("agy --model 'test model'"),
+            None,
+            Some("--effort low"),
+        )
+        .unwrap();
+        assert_eq!(
+            shell_words::split(&args).unwrap(),
+            ["--effort", "low", "--model", "test model"]
+        );
+    }
 }

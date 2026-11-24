@@ -14,6 +14,8 @@ pub(super) struct Target {
     pub identity_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opencode_session_id: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub allow_dead_if_identity_unclaimed: bool,
 }
 
 pub(super) struct Plan {
@@ -62,12 +64,21 @@ fn target(instance: &Instance, slots: &[AgentSlot], pane: &Pane) -> Target {
                 .flatten()
         })
         .filter(|key| !key.is_empty());
+    let opencode_session_id = slot
+        .filter(|slot| slot.agent == "opencode")
+        .and_then(|slot| nonempty(&slot.native_session_id));
+    let allow_dead_if_identity_unclaimed =
+        !crate::session::managed_pane::has_managed_state(instance)
+            && pane.dead
+            && pane.root_pid == 0
+            && pane.tty.is_empty()
+            && slot.is_some_and(|slot| !slot.xats_identity_key.is_empty())
+            && opencode_session_id.is_none();
     Target {
         tmux: pane.target.clone(),
         identity_key,
-        opencode_session_id: slot
-            .filter(|slot| slot.agent == "opencode")
-            .and_then(|slot| nonempty(&slot.native_session_id)),
+        opencode_session_id,
+        allow_dead_if_identity_unclaimed,
     }
 }
 
@@ -116,6 +127,10 @@ fn ordinary_keys(instance: &Instance, slots: &[AgentSlot]) -> Vec<String> {
 
 fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[cfg(test)]

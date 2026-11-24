@@ -24,6 +24,7 @@ impl HomeView {
         theme: &Theme,
         update_info: Option<&UpdateInfo>,
     ) {
+        self.list_area = Rect::default();
         // Settings view takes over the whole screen
         if let Some(ref mut settings) = self.settings_view {
             settings.render(frame, area, theme);
@@ -213,6 +214,7 @@ impl HomeView {
             .with_offset(self.list_offset)
             .with_selected(Some(self.cursor));
         frame.render_stateful_widget(list, list_area, &mut list_state);
+        self.list_area = list_area;
         self.list_offset = list_state.offset();
 
         // Render search bar if active

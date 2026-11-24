@@ -66,16 +66,53 @@ impl DeletionPoller {
         if crate::session::managed_pane::has_managed_state(&request.instance) {
             return Self::perform_managed_deletion(request);
         }
-        if let Err(error) =
-            crate::xats_release::release_session(&request.profile, &request.instance)
+        let storage = match crate::session::Storage::new(&request.profile) {
+            Ok(storage) => storage,
+            Err(error) => return Self::failed(request, format!("{error:#}")),
+        };
+        let _operation = match storage.operation_lock() {
+            Ok(operation) => operation,
+            Err(error) => return Self::failed(request, format!("{error:#}")),
+        };
+        let request = match Self::current_ordinary_request(request, &storage) {
+            Ok(request) => request,
+            Err(error) => return Self::failed(request, format!("{error:#}")),
+        };
+        let guard = match crate::xats_release::release_session(&request.profile, &request.instance)
         {
-            return DeletionResult {
-                session_id: request.session_id.clone(),
-                success: false,
-                error: Some(format!("{error:#}")),
-            };
+            Ok(guard) => guard,
+            Err(error) => return Self::failed(&request, format!("{error:#}")),
+        };
+        Self::perform_resources_deletion(&request, &guard)
+    }
+
+    fn current_ordinary_request(
+        request: &DeletionRequest,
+        storage: &crate::session::Storage,
+    ) -> anyhow::Result<DeletionRequest> {
+        use anyhow::{ensure, Context};
+        let mut current = storage
+            .load()?
+            .into_iter()
+            .find(|instance| instance.id == request.session_id)
+            .context("Session disappeared before deletion")?;
+        ensure!(
+            same_ordinary_launch(&current, &request.instance),
+            "Session changed before deletion; reload and retry"
+        );
+        current.source_profile = request.profile.clone();
+        Ok(DeletionRequest {
+            instance: current,
+            ..request.clone()
+        })
+    }
+
+    fn failed(request: &DeletionRequest, error: String) -> DeletionResult {
+        DeletionResult {
+            session_id: request.session_id.clone(),
+            success: false,
+            error: Some(error),
         }
-        Self::perform_resources_deletion(request)
     }
 
     fn perform_managed_deletion(request: &DeletionRequest) -> DeletionResult {
@@ -104,14 +141,22 @@ impl DeletionPoller {
             "Managed session changed before deletion; reload and retry"
         );
         instances[index].source_profile = request.profile.clone();
-        crate::managed_xats::prepare_release(&mut instances[index])?;
+        crate::xats_release::warn_on_failure(
+            crate::managed_xats::prepare_release(&mut instances[index]),
+            &request.session_id,
+            "managed xats release preparation",
+        );
         crate::session::managed_pane::prepare_children_release(&mut instances[index])?;
         storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))?;
         let mut instance = instances[index].clone();
         instance.source_profile = request.profile.clone();
-        crate::xats_release::release_session(&request.profile, &instance)?;
+        let release_guard = crate::xats_release::release_session(&request.profile, &instance)?;
         instance.stop()?;
-        crate::managed_xats::release(&instance)?;
+        crate::xats_release::warn_on_failure(
+            crate::managed_xats::release(&instance),
+            &instance.id,
+            "managed xats release",
+        );
         crate::managed_codex::cleanup(&instance)?;
         crate::managed_runtimes::cleanup(&instance)?;
         crate::session::managed_pane::release_children(&instance)?;
@@ -119,13 +164,19 @@ impl DeletionPoller {
             instance,
             ..request.clone()
         };
-        let result = Self::perform_resources_deletion(&exact);
+        let result = Self::perform_resources_deletion(&exact, &release_guard);
         ensure!(result.success, "{}", result.error.unwrap_or_default());
         instances.remove(index);
         storage.save_with_groups(&instances, &GroupTree::new_with_groups(&instances, &groups))
     }
 
-    fn perform_resources_deletion(request: &DeletionRequest) -> DeletionResult {
+    fn perform_resources_deletion(
+        request: &DeletionRequest,
+        release_guard: &crate::xats_release::ReleaseGuard,
+    ) -> DeletionResult {
+        if let Err(error) = release_guard.verify() {
+            return Self::failed(request, format!("{error:#}"));
+        }
         let mut errors = Vec::new();
         if request.delete_worktree || request.delete_branch {
             let pane_configs = Self::pane_configs_for_deletion(request, &mut errors);
@@ -153,6 +204,10 @@ impl DeletionPoller {
         let session_name =
             crate::tmux::Session::generate_name(&request.instance.id, &request.instance.title);
         let pane_ids = crate::db::reconcile::session_pane_ids(&session_name);
+
+        if let Err(error) = release_guard.verify() {
+            return Self::failed(request, format!("{error:#}"));
+        }
 
         // Tmux kill - non-fatal if session already gone
         let _ = request.instance.kill();
@@ -310,6 +365,17 @@ impl DeletionPoller {
     }
 }
 
+fn same_ordinary_launch(current: &Instance, requested: &Instance) -> bool {
+    !crate::session::managed_pane::has_managed_state(current)
+        && !crate::session::managed_pane::has_managed_state(requested)
+        && current.xats_identity_key == requested.xats_identity_key
+        && current.primary_pane_config() == requested.primary_pane_config()
+        && current.project_path == requested.project_path
+        && current.title == requested.title
+        && current.command == requested.command
+        && current.extra_args == requested.extra_args
+}
+
 fn same_managed_launch(current: &Instance, requested: &Instance) -> bool {
     crate::session::managed_pane::has_managed_state(current)
         && current.managed_owner == requested.managed_owner
@@ -334,6 +400,55 @@ mod tests {
 
     fn create_test_instance() -> Instance {
         Instance::new("Test Session", "/tmp/test-project")
+    }
+
+    fn persisted_instance() -> (tempfile::TempDir, crate::session::TestHomeGuard, Instance) {
+        let directory = tempfile::tempdir().unwrap();
+        let guard = crate::session::scoped_test_home(directory.path());
+        let instance = create_test_instance();
+        crate::session::Storage::new("default")
+            .unwrap()
+            .save(std::slice::from_ref(&instance))
+            .unwrap();
+        (directory, guard, instance)
+    }
+
+    #[test]
+    fn ordinary_deletion_rejects_managed_or_replaced_queued_launch() {
+        let requested = create_test_instance();
+        assert!(same_ordinary_launch(&requested, &requested));
+        let mut current = requested.clone();
+        current.managed_primary_marked = true;
+        assert!(!same_ordinary_launch(&current, &requested));
+        let mut current = requested.clone();
+        current.xats_identity_key = Some("replacement-key".into());
+        assert!(!same_ordinary_launch(&current, &requested));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn queued_ordinary_request_is_reloaded_before_release() {
+        let (_directory, _home, instance) = persisted_instance();
+        let request = DeletionRequest {
+            session_id: instance.id.clone(),
+            instance: instance.clone(),
+            profile: "default".into(),
+            delete_worktree: false,
+            delete_branch: false,
+            delete_sandbox: false,
+            force_delete: false,
+        };
+        let storage = crate::session::Storage::new("default").unwrap();
+        assert!(DeletionPoller::current_ordinary_request(&request, &storage).is_ok());
+        let mut changed = instance;
+        changed.managed_primary_marked = true;
+        storage.save(&[changed]).unwrap();
+        let error = DeletionPoller::current_ordinary_request(&request, &storage)
+            .err()
+            .expect("Queued deletion must reject newly managed state");
+        assert!(error
+            .to_string()
+            .contains("Session changed before deletion"));
     }
 
     #[test]
@@ -392,8 +507,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_deletion_result_success_when_no_worktree_or_sandbox() {
-        let instance = create_test_instance();
+        let (_directory, _home, instance) = persisted_instance();
         let request = DeletionRequest {
             session_id: instance.id.clone(),
             instance,
@@ -412,8 +528,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_deletion_result_success_even_with_delete_worktree_flag_when_no_worktree() {
-        let instance = create_test_instance();
+        let (_directory, _home, instance) = persisted_instance();
         let request = DeletionRequest {
             session_id: instance.id.clone(),
             instance,
@@ -431,9 +548,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_deletion_poller_channel_communication() {
+        let (_directory, _home, instance) = persisted_instance();
         let poller = DeletionPoller::new();
-        let instance = create_test_instance();
         let session_id = instance.id.clone();
 
         poller.request_deletion(DeletionRequest {
@@ -468,8 +586,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_deletion_request_preserves_session_id() {
-        let instance = create_test_instance();
+        let (_directory, _home, instance) = persisted_instance();
         let custom_id = "custom-session-id-123".to_string();
 
         let request = DeletionRequest {

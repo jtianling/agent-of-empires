@@ -447,6 +447,17 @@ pub fn build_instance(
         Config::default()
     });
 
+    let configured_args = config.session.agent_extra_args.get(&params.primary.tool);
+    let extra_args = if !params.extra_args.is_empty() {
+        params.extra_args.as_str()
+    } else {
+        configured_args.map_or("", String::as_str)
+    };
+    let extra_args = if params.primary.tool == "antigravity" {
+        crate::agents::antigravity::launch_arguments(None, Some(extra_args), None)?.1
+    } else {
+        extra_args.to_owned()
+    };
     let resolved_primary = resolve_pane_config(params.primary.clone(), None, profile)?;
     let mut primary_config = resolved_primary.config.clone();
     if params.sandbox {
@@ -489,13 +500,7 @@ pub fn build_instance(
         instance.command = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     }
 
-    if !params.extra_args.is_empty() {
-        instance.extra_args = params.extra_args;
-    } else if let Some(extra) = config.session.agent_extra_args.get(&params.primary.tool) {
-        if !extra.is_empty() {
-            instance.extra_args = extra.clone();
-        }
-    }
+    instance.extra_args = extra_args;
 
     if params.sandbox {
         instance.sandbox_info = Some(SandboxInfo {
@@ -564,6 +569,30 @@ pub fn cleanup_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn antigravity_session_builder_validates_before_resolving_the_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::session::scoped_test_home(temp.path());
+        let params = InstanceParams {
+            title: "test".into(),
+            group: String::new(),
+            primary: PaneDraft {
+                tool: "antigravity".into(),
+                path: temp.path().join("missing").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            sandbox: false,
+            sandbox_image: String::new(),
+            cross_agent_team_channel: String::new(),
+            extra_env: Vec::new(),
+            extra_args: "--conversation=old".into(),
+            command_override: String::new(),
+        };
+        let result = build_instance(params, &[], "default");
+        assert!(matches!(result, Err(error) if error.to_string().contains("--conversation")));
+    }
 
     #[test]
     fn build_instance_keeps_the_resolved_primary_pane_authoritative() {

@@ -13,6 +13,7 @@
 //! safely.
 
 mod agent_switch;
+mod antigravity;
 pub mod claude_transcript;
 mod codex_binding;
 pub(crate) mod codex_capture;

@@ -339,7 +339,7 @@ pub fn prepare_children_release(parent: &mut Instance) -> Result<()> {
         let mut runtime = parent.managed_panes[index].project(parent)?;
         let result = crate::managed_xats::prepare_release(&mut runtime);
         parent.managed_panes[index].capture_runtime(&runtime)?;
-        result?;
+        crate::xats_release::warn_on_failure(result, &parent.id, "child xats release preparation");
     }
     Ok(())
 }
@@ -347,7 +347,11 @@ pub fn prepare_children_release(parent: &mut Instance) -> Result<()> {
 pub fn release_children(parent: &Instance) -> Result<()> {
     for pane in &parent.managed_panes {
         let runtime = pane.project(parent)?;
-        crate::managed_xats::release(&runtime)?;
+        crate::xats_release::warn_on_failure(
+            crate::managed_xats::release(&runtime),
+            &runtime.id,
+            "child xats release",
+        );
         crate::managed_codex::cleanup(&runtime)?;
         crate::managed_runtimes::cleanup(&runtime)?;
     }

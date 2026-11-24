@@ -44,6 +44,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(name = "__antigravity-launch", hide = true)]
+    AntigravityLaunch {
+        #[arg(last = true, required = true)]
+        command: Vec<std::ffi::OsString>,
+    },
+    #[command(name = "__antigravity-mcp", hide = true)]
+    AntigravityMcp,
+    #[command(name = "__complete-runtime-handoff", hide = true)]
+    CompleteRuntimeHandoff(crate::runtime_handoff::CompleteArgs),
     #[command(name = "__managed-launch", hide = true)]
     ManagedLaunch(crate::managed_runtimes::ManagedLaunchArgs),
 

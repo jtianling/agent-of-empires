@@ -618,6 +618,40 @@ pub(crate) fn cleanup(instance: &Instance) -> Result<()> {
     }
 }
 
+pub(crate) fn cleanup_retired(instance: &mut Instance) -> Result<()> {
+    let Some(retired) = instance
+        .managed_xats
+        .as_ref()
+        .and_then(|identity| identity.retiring_codex.clone())
+    else {
+        return Ok(());
+    };
+    let mut previous = instance.clone();
+    previous.tool = "codex".into();
+    previous.primary_pane.tool = "codex".into();
+    let identity = previous
+        .managed_xats
+        .as_mut()
+        .context("Missing retired Codex identity")?;
+    identity.client_config = Some(retired.client_config);
+    identity.launch_instance_id = retired.launch_instance_id;
+    identity.retiring_codex = None;
+    if let Some(fence) = retired.fence {
+        identity
+            .claim
+            .as_mut()
+            .context("Missing retired Codex claim")?
+            .fence = fence;
+    }
+    cleanup(&previous)?;
+    instance
+        .managed_xats
+        .as_mut()
+        .context("Missing managed identity")?
+        .retiring_codex = None;
+    Ok(())
+}
+
 fn validate_endpoint(endpoint: &str) -> Result<()> {
     let url = url::Url::parse(endpoint)?;
     ensure!(

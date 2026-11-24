@@ -78,10 +78,15 @@ pub(super) async fn release(
         );
         bytes.extend_from_slice(&chunk);
     }
-    decode(status, &bytes, targets.len())
+    let dead = targets
+        .iter()
+        .map(|target| target.allow_dead_if_identity_unclaimed)
+        .collect::<Vec<_>>();
+    decode(status, &bytes, &dead)
 }
 
-fn decode(status: StatusCode, bytes: &[u8], count: usize) -> Result<()> {
+fn decode(status: StatusCode, bytes: &[u8], dead: &[bool]) -> Result<()> {
+    let count = dead.len();
     let value: Value = serde_json::from_slice(bytes)
         .with_context(|| format!("Invalid xats pane release JSON (HTTP {status})"))?;
     if status != StatusCode::OK || value.get("ok") == Some(&Value::Bool(false)) {
@@ -109,9 +114,10 @@ fn decode(status: StatusCode, bytes: &[u8], count: usize) -> Result<()> {
             result.index == index,
             "Xats pane release target order mismatch"
         );
-        match (&*result.state, &result.agent) {
-            ("released", Some(agent)) => validate_agent(agent)?,
-            ("already_unregistered", None) => {}
+        match (&*result.state, &result.agent, dead[index]) {
+            ("released", Some(agent), false) => validate_agent(agent)?,
+            ("already_unregistered", None, false) => {}
+            ("dead_key_unclaimed", None, true) => {}
             _ => anyhow::bail!("Invalid xats pane release state"),
         }
     }

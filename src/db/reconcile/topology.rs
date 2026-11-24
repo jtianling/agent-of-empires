@@ -56,6 +56,79 @@ impl Window {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PaneGeneration {
+    server: Server,
+    session_id: u32,
+    window_id: u32,
+    root_pid: u32,
+    root_start: Option<String>,
+}
+
+impl PaneGeneration {
+    pub(crate) fn respawn_condition(&self, primary: bool) -> String {
+        format!(
+            "#{{==:#{{pid}}|#{{start_time}}|#{{session_id}}|#{{window_id}}|#{{pane_pid}}|\
+             #{{==:#{{@aoe_agent_pane}},#{{pane_id}}}},{0}|{1}|${2}|@{3}|{4}|{5}}}",
+            self.server.pid,
+            self.server.started,
+            self.session_id,
+            self.window_id,
+            self.root_pid,
+            u8::from(primary)
+        )
+    }
+
+    pub(crate) fn observe(profile: &str, name: &str, pane: &str, primary: bool) -> Result<Self> {
+        let snapshot = read(profile, Some(name))?;
+        let window = snapshot
+            .windows
+            .get(name)
+            .context("Target tmux session disappeared")?;
+        ensure!(
+            (window.primary.as_deref() == Some(pane)) == primary,
+            "Target pane primary assignment changed"
+        );
+        let (pid, _) = window
+            .processes
+            .get(pane)
+            .context("Pane no longer belongs to target window")?;
+        let root_start = if *pid == 0 {
+            None
+        } else {
+            Some(crate::process::start_identity(*pid)?.context("Pane root process disappeared")?)
+        };
+        Ok(Self {
+            server: window.server,
+            session_id: window.session_id,
+            window_id: window.window_id,
+            root_pid: *pid,
+            root_start,
+        })
+    }
+
+    pub(crate) fn has_live_root(&self) -> bool {
+        !crate::process::is_unsafe_kill_root(self.root_pid) && self.root_start.is_some()
+    }
+
+    /// Terminate the previously observed pane process tree after `respawn-pane -k`
+    /// has atomically replaced the pane root. Verifies `start_identity` so a
+    /// recycled PID is never signalled, and waits up to `grace` for a clean exit.
+    pub(crate) fn terminate_previous_process_tree(&self, grace: std::time::Duration) {
+        if crate::process::is_unsafe_kill_root(self.root_pid) {
+            return;
+        }
+        let Some(expected) = self.root_start.as_deref() else {
+            return;
+        };
+        if let Ok(Some(actual)) = crate::process::start_identity(self.root_pid) {
+            if actual == expected {
+                crate::process::kill_process_tree_gracefully(self.root_pid, grace);
+            }
+        }
+    }
+}
+
 pub(super) struct Snapshot {
     pub sampled_before: u64,
     pub windows: HashMap<String, Window>,
@@ -208,6 +281,40 @@ fn parse(bytes: &[u8], sampled_before: u64) -> Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_rejects_reused_server_window_or_process_at_respawn() {
+        let observed = || PaneGeneration {
+            server: Server {
+                pid: 10,
+                started: 20,
+            },
+            session_id: 1,
+            window_id: 2,
+            root_pid: 30,
+            root_start: Some("birth".into()),
+        };
+        let target = observed();
+        assert_eq!(target, observed());
+        assert_eq!(
+            target.respawn_condition(true),
+            "#{==:#{pid}|#{start_time}|#{session_id}|#{window_id}|#{pane_pid}|\
+             #{==:#{@aoe_agent_pane},#{pane_id}},10|20|$1|@2|30|1}"
+        );
+        let mut current = observed();
+        current.root_pid = 0;
+        current.root_start = None;
+        assert_ne!(target, current);
+        let mut current = observed();
+        current.server.started += 1;
+        assert_ne!(target, current);
+        let mut current = observed();
+        current.window_id += 1;
+        assert_ne!(target, current);
+        let mut current = observed();
+        current.root_start = Some("reused".into());
+        assert_ne!(target, current);
+    }
 
     #[test]
     fn only_the_active_window_assigns_slots_but_both_protect_captures() {

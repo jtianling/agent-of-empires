@@ -34,7 +34,7 @@ allowfullscreen
 
 ## Supported Agents
 
-Claude Code, Codex CLI, OpenCode, Kimi Code, Mistral Vibe, Cursor CLI, Copilot CLI, and Pi. AoE auto-detects which are installed.
+Claude Code, Codex CLI, OpenCode, Kimi Code, Mistral Vibe, Cursor CLI, Copilot CLI, Pi, and [Antigravity CLI](guides/antigravity.md). AoE auto-detects which are installed.
 
 <div class="cta-box">
 <p><strong>Ready to get started?</strong></p>

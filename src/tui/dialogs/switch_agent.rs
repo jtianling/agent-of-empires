@@ -1,7 +1,7 @@
 //! Switch-agent dialog.
 //!
 //! Opens on `a`/`A` from the home view for the selected session. Shows one row
-//! per claude/codex pane, each set either to keep its agent or to switch to
+//! per switchable agent pane, each set either to keep its agent or to switch to
 //! another one; a switched pane discards its conversation and keeps its xats
 //! identity, and a kept pane is left alone.
 
@@ -19,6 +19,7 @@ pub struct SwitchPane {
     pub slot: i64,
     pub label: String,
     pub agent: String,
+    pub retry: bool,
     /// Who xats says holds the pane's identity key: the identity the new agent
     /// will come back as. `None` when the pane is not on xats.
     pub identity: Option<KeyHolder>,
@@ -52,7 +53,7 @@ impl SwitchAgentDialog {
             .map(|pane| {
                 tools
                     .iter()
-                    .position(|&tool| (tool == pane.agent) != lone)
+                    .position(|&tool| (tool == pane.agent) != (lone && !pane.retry))
                     .unwrap_or(0)
             })
             .collect();
@@ -80,7 +81,7 @@ impl SwitchAgentDialog {
             .iter()
             .zip(&self.choices)
             .map(|(pane, &choice)| (pane, self.tools[choice]))
-            .filter(|(pane, target)| pane.agent != *target)
+            .filter(|(pane, target)| pane.retry || pane.agent != *target)
             .map(|(pane, target)| SwitchChoice {
                 slot: pane.slot,
                 target: target.to_string(),
@@ -146,7 +147,10 @@ impl SwitchAgentDialog {
             spans.push(Span::styled(if is_selected { "● " } else { "○ " }, style));
             spans.push(Span::styled(*tool, style));
             if *tool == pane.agent {
-                spans.push(Span::styled(" (now)", Style::default().fg(theme.dimmed)));
+                spans.push(Span::styled(
+                    if pane.retry { " (retry)" } else { " (now)" },
+                    Style::default().fg(theme.dimmed),
+                ));
             }
         }
         Line::from(spans)
@@ -160,7 +164,7 @@ impl SwitchAgentDialog {
             .iter()
             .zip(&self.choices)
             .enumerate()
-            .filter(|(_, (pane, &choice))| pane.agent != self.tools[choice])
+            .filter(|(_, (pane, &choice))| pane.retry || pane.agent != self.tools[choice])
             .map(|(idx, _)| idx)
             .collect();
         let identity_lines: Vec<Line> = switching
@@ -301,6 +305,7 @@ mod tests {
             slot,
             label: label.to_string(),
             agent: agent.to_string(),
+            retry: false,
             identity: None,
         }
     }
@@ -344,12 +349,43 @@ mod tests {
             submitted(d.handle_key(key(KeyCode::Enter))),
             choices(&[(0, "claude")])
         );
+        let mut d = dialog(vec![pane(0, "Pane 1", "opencode")]);
+        assert_eq!(
+            submitted(d.handle_key(key(KeyCode::Enter))),
+            choices(&[(0, "claude")])
+        );
+    }
+
+    #[test]
+    fn lone_pane_can_select_opencode() {
+        let mut d = dialog(vec![pane(0, "Pane 1", "claude")]);
+        d.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            submitted(d.handle_key(key(KeyCode::Enter))),
+            choices(&[(0, "opencode")])
+        );
+    }
+
+    #[test]
+    fn retrying_an_incomplete_switch_targets_only_that_pane() {
+        let mut left = pane(0, "Left", "opencode");
+        left.retry = true;
+        let mut d = dialog(vec![left.clone(), pane(1, "Right", "codex")]);
+        assert_eq!(
+            submitted(d.handle_key(key(KeyCode::Enter))),
+            choices(&[(0, "opencode")])
+        );
+        let mut d = dialog(vec![left]);
+        assert_eq!(
+            submitted(d.handle_key(key(KeyCode::Enter))),
+            choices(&[(0, "opencode")])
+        );
     }
 
     #[test]
     fn choosing_the_current_agent_cancels() {
         let mut d = dialog(vec![pane(0, "Pane 1", "claude")]);
-        d.handle_key(key(KeyCode::Right));
+        d.handle_key(key(KeyCode::Left));
         assert!(matches!(
             d.handle_key(key(KeyCode::Enter)),
             DialogResult::Cancel
@@ -372,7 +408,7 @@ mod tests {
         d.handle_key(key(KeyCode::Right));
         assert_eq!(
             submitted(d.handle_key(key(KeyCode::Enter))),
-            choices(&[(1, "claude")])
+            choices(&[(1, "opencode")])
         );
 
         let mut d = split();

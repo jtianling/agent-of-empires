@@ -104,6 +104,13 @@ E2E tests can produce asciinema recordings (`.cast`) and GIF files automatically
   - **macOS/Windows**: `~/.agent-of-empires/`
 - Keep user data out of commits. For repo-local experiments, use ignored paths like `./.agent-of-empires/`, `.env`, and `.mcp.json`.
 
+## Worktree 创建耗时排查经验
+
+- 创建慢时分开测量 git worktree 建造, `on_create` 和 agent 启动, 不只记录总时长.  CLI add 与 TUI 的 hook 来源不同, CLI 基线不能当作全局 hook 已执行的证据.
+- 本机全局 `clone-node-modules.sh` 曾递归查找所有 `node_modules`, 把 `.e2e-test` 的历史构建副本和 `.next` 缓存也复制到新 worktree.  2026-11-06 的 share worktree 额外复制了 65 份测试副本依赖, 现场目录时间线跨度约两分钟.
+- 经 jt 确认, 2026-11-06 已在依赖扫描中按目录名排除 `.e2e-test` 和 `.next`, 包括嵌套缓存.  正常 root/workspace 依赖, skills 与 `.sharp-runtime` 保留, 不通过跳过整个 agent 配置目录提速.
+- 测试依赖克隆 hook 时, 使用临时仓库对照正常根目录, workspace 与测试副本, 明确断言哪些依赖被复制.  不重跑真实项目 hook 来探测耗时, 不自动清理用户 worktree 或修改全局 hook.
+
 ## Tmux Session Safety (never disrupt live AoE sessions)
 
 AoE runs as a developer tool, so the machine compiling and testing this code is
@@ -119,6 +126,45 @@ Hard rules for both production code AND tests:
 - Any new `kill-server`/`kill-session`/pattern-based cleanup in a sweep helper (even guarded by `#[cfg(test)]`) must be scoped to the e2e-private socket, the way `reap_stale_aoe_test_sessions` already is.
 
 If a change needs broad tmux cleanup, scope it to a private socket or to exact session names. When in doubt, do not destroy sessions. **Do not run ad-hoc `tmux` probe/cleanup commands on a machine with live AoE sessions while `$TMUX` is set.**
+
+## xats agent 切换经验
+
+- 旧版 AoE 直接启动的 agy 首次注册得到 `custom/Antigravity` 和 `delivery=none`, 需恢复重启一次切换启动器.  新版新建时即使用 `xats-agy --defer-registration`, 由官方 stdio 在首次注册时绑定 `antigravity-pty`.  2026-11-23 独立验收确认首次注册前后 agy PID 和 conversation UUID 一致, 连续两封唤醒回信, 草稿保留, 全程只有一次启动.
+
+- 2026-11-23 用两个不同团队的同名成员验证 Antigravity 回信.  当前 xats 的 `send_message_by_id` 按发送方团队核对收件人, 即使使用正确的 `from_agent_id`, 跨团队也会得到 `unknown_recipient`.  跨团队按原邮件的 `from_name` 和 `from_team` 调用 `send_message`, 已验证只投递给目标成员.
+
+- Antigravity 原生 TUI 由 `agy` 启动.  同目录可同时存在多个 conversation, 恢复须使用目标窗格的 `SessionStart.conversationId` 和 `--conversation <UUID>`.  2026-11-23 在 1.5.14 同目录先创建 A、再创建 B, 已实测按 A 的 UUID 恢复只显示 A 的合成标记.  `agy acp` 提供的定址接口属于 ACP 会话, 不能据此推断原生 TUI 也能被空闲唤醒.
+
+- xats pane lookup/release 返回 `tmux_response_invalid` 时, 同时检查整个 socket 的 pane 元数据.  2026-11-13 的 10, 11 号目标均正常, 但其他 pane 的 `pane_pid=0` 和空 TTY 被 xats 当作非法记录, 导致所有目标查询失败.  未运行 pane 不应污染活目标的校验, 目标自身未运行仍须明确拒绝释放, 不清理无关 pane 来绕过问题.
+- 增加可切换 agent 时, 必须核对 xats 的跨类型交接合同.  OpenCode 同类型 runtime 的 reserve/commit 会拒绝仍注册为 Codex 的 identity key, 仅扩展 AoE 选项与保存 tool 不足以完成切换.
+- 不得通过跳过类型检查, 删除旧身份或直接修改 xats 数据库完成切换.  保留同一 agent 身份及 name/team/key, 新 runtime 验证并提交交接后才完成切换.
+- AoE slot 的 `xats_runtime_generation` 与 xats 的 `register_generation` 是不同的 fence, 不得混用.  停止旧 pane 前持久保存源状态和交接请求, 支持失败后恢复.
+- 诊断 TUI session 编号时, 读取 tmux 的 `@aoe_index` 映射, 不按 `sessions.json` 数组位置猜编号.  2026-11-04 的 13 号实际是 `monkeys-blue-7`, 并非数组第 13 条.
+- 新控制面接口未在共享 daemon 激活时, 不得让已支持的 Claude/Codex 非托管切换无条件依赖它.  2026-11-05 的 18 号切换因 handoff prepare 路由未部署而回归.  兼容处理仅限明确路由不存在且无已接受交接证据, 不绕过服务端校验, OpenCode 和已受控身份不得降级.
+- Codex 配置快照可能位于几十 MB 历史文件的较早位置.  2026-11-05 的 9, 11 号右 pane 恢复因只扫描最后 4 MB 误判缺少快照而失败.  持久化恢复需流式扫描并选取精确 thread 的最后完整快照, 不因固定 tail 窗口丢失已知状态.
+- 普通 xats Codex 的原生 thread UUID 必须在界面启动前持久化, 不依赖模型完成 xats 注册.  2026-11-13 的正常创建会话因注册挑战过期而没有保存 UUID, 冷恢复又先创建 pane 后验证, 最终只剩 shell.  冷恢复须先只读验证, provider 和权限准备仍在旧订阅退出后执行.
+- 2026-11-22 重启前核对发现旧式直接启动的 Codex 可以正常聊天但缺少 slot UUID.  经用户授权, 对精确且空闲的窗格发送原生 `/status` 取得当前 UUID, 再用同一 app-server 的 `thread/read` 核对 UUID 和 cwd.  正常退出后仍须等线程状态变为 `notLoaded` 再显式补绑; 同号窗格的旧注册可能属于另一身份.
+- Codex 索引和服务端可以返回逻辑 `.jsonl` 路径, 而磁盘仅有 `.jsonl.zst`.  冷恢复先核对全部所需历史的线程、目录和设置, 再创建任何窗格.  13 份现场压缩历史均有可读快照; 只核对索引记录或线程存在性不足以确认设置可恢复.
+- tmux 重建后会复用 pane ID, 不能仅凭同名 pane 判断 xats 身份归属.  2026-11-14 的 11, 12 号删除被前一 server 代次的身份残留阻止, 需同时核对 socket, server PID, server start time, 绑定时间和旧载体进程.  目标 key 无 holder 不代表 pane 没有其他绑定, 不得绕过 `pane_unverifiable` 强删.
+- 已死 pane 不能作为 live-only xats release 目标, 也不能只凭 key lookup 的 `not_found` 静默跳过.  该接口不排除尚无 agent row 的 prepared managed claim.  2026-11-15 的 26 号删除因此被 `pane_not_running` 阻止; 自动处理需把 dead 目标留在原批次, 由服务端核验物理缺席和 managed claim, 删除前再次核对代次, 保护已经迁移的旧身份.
+
+- 2026-11-16 jt 明确调整删除规则: xats 身份释放属于尽力清理, 远端拒绝, 不可用或协议错误不能阻止 AoE session 删除.  保留未释放身份并在 debug.log 记录具体原因; 本地归属变化, 进程及资源清理错误仍严格处理.  此规则取代此前要求身份释放失败阻止 session 删除的产品语义.
+
+## macOS 上的 AoE 短命进程排查
+
+- 2026-11-22 只读核对到 20 个 AoE 进程, 其中 18 个是各自跟踪单个 session 的 Codex 标题监视器, 另有 1 个通知监视器和 1 个无子命令的 AoE.  按进程名计数会把不同职责混在一起.  当时 20 个进程映射了 5 个不同的可执行文件 inode, 仅 3 个与磁盘安装文件一致.
+- `run_codex_title_monitor` 稳态每轮执行 1 次 `has-session`, 2 次 `show-options` 读取 owner PID 和标题, 1 次 `capture-pane`, 完成后休眠 500ms.  18 个监视器的这四项合计理论上限约 144 次/秒.  独立 10 秒采样捕获到 626 次读取上述两项的 `show-options`.  整机约 2500 个新进程/秒和 launchd 拒绝日志是不同口径, AoE 占比及系统拒绝原因尚未确定.
+- 验证降频时按父进程角色, tmux 子命令和目标统计相同时间窗的唯一子进程, 同时记录存量监视器的可执行文件代次.  保留标题等待标记, 切换活动 pane 和脱离首页后的行为.
+- 修复后的 Codex 标题由每个 profile 的通知监视器维护.  新监视器接管时清除对应 session 的旧 owner 选项, 让旧标题进程自行退出.  仅替换磁盘上的二进制不会激活这次交接.
+- 2026-11-22 新版接管后, 主界面和通知监视器的运行映像均与安装文件 inode 一致, 活动标题监视器从 18 个降为 0 个.  同一采样器的两个 10 秒窗口中, AoE 直接 tmux 子进程从修前 1411 / 1497 个降至 225 / 265 个, 两轮旧 owner/title 查询均为 0.  另一采样器独立观察到 195 个及 0 次旧字段查询.  这些是采样下界, 全机进程创建率的变化不能全部归因于此次修复.
+- 后续用 kqueue 的 NOTE_FORK 按父 PID 计数, 同期 10.002 秒观察到共享通知监视器 5332 次 fork 通知.  进程快照会漏掉短命和未完成 exec 的子进程.  本机同一条只读 ps 查询的两组对照中, 使用名称各观察到 21 次 fork 通知, 使用绝对路径各 1 次.  21 仅是 ps 在该 PATH 的实测, 不能直接套用到 tmux.  性能验收同时核对父进程 fork 事件与成功命令分类, 前者也可能因内核合并事件而少计.
+- Linux ARM64 / tmux 3.4 独立 E2E 中, 将通知清单、抓屏和恢复对账分别批量执行后, 通知监视器在约 10 秒内启动的 tmux 客户端从 27 / 90 / 300 个降为 6 / 6 / 18 个, 分别对应 1 个空闲会话、8 个空闲会话和 8 个报告 Running 的会话.  这是容器内的直接命令计数, macOS 实际 fork 降幅须在新监视器接管后另测.
+- 2026-11-22 02:47, 确认 macOS 主界面与通知监视器都已加载 R5 安装映像.  三个连续 10 秒窗口观测到通知监视器 65 / 72 / 86 个 NOTE_FORK 事件, 同时主界面均为 0.  独立复测两个对齐窗口为 86 / 65 个, 对比上一版约 533 次/秒, 监视器的观测速率下降约 98.6%.  同期 xats binding/lookup 共 74 / 67 次, 覆盖所有调用方, 无法据此判断 AoE 的缓存命中率.
+- tmux 3.4 的 display-message 会把 0x1e 输出成字面量反斜线和 036.  抓屏分帧使用每批随机生成的可打印整行标记.  E2E 手动启动 monitor 时必须传入 harness 的 TMUX_TMPDIR, 因为 profile 的 -L 优先于继承的 TMUX.  验证附着期间的恢复时要确认客户端实际连到了目标 session.
+- 隔离环境中的 tmux 3.4 长连接对照: 同一个 control-mode 客户端连续执行 120 轮查询、抓屏和标题写入, PID 与启动时间保持一致.  直接附到业务 session 时, 普通用户离开后附着数仍为 1; 改附独立观察 session 后, 可用 pane ID 跨 session 操作, 业务附着数正常归零, server 上额外保留 1 个 session.  未附着的单次查询在 stdin 保持打开时仍返回 %exit.  这是机制验证, R5 仍使用批量短命令.
+- 长连接版本使用每个 profile 的专用 `aoe-observer-*` session.  正常业务客户端的计数和导航应排除带 `@aoe_control_observer` 标记的观察客户端.  Linux ARM64 / tmux 3.4 的独立 ptrace 验收覆盖空闲、运行、多 pane 通知和附着期间的恢复写入, 五个稳态窗口均为零子进程创建和零 exec.  启动、断线重连及退出单独计数.
+- 2026-11-22 macOS 现场独立验收: 主界面和通知监视器的运行映像均匹配长连接版安装文件.  启动后三个 10 秒窗口中, 两个 AoE 进程及其各自的常驻 tmux 子进程均观测到 0 次 NOTE_FORK, 窗口结束后 tmux PID 保持一致.  同期整机进程唯一编号仍有增长, HTTP 请求来源未在此次测量中核验.
+- 控制连接中写通知 option 使用精确目标 `=session:`.  直接把 tmux 返回的展示字节与内部原始长度比较, 会在值包含美元符号等字符时误判.  等长通知更新用服务端字面值比较验证, 同时确认无变化时不重复写入.
 
 ## Tmux Keybinding Lifecycle
 

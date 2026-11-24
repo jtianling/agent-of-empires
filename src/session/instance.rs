@@ -10,6 +10,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agents::antigravity::launcher::ControlledLauncher;
 use crate::containers::{self, ContainerRuntimeInterface, DockerContainer};
 use crate::tmux;
 
@@ -18,6 +19,10 @@ use super::environment::{build_docker_env_args, shell_escape};
 use super::PaneConfig;
 
 mod agent_switch;
+mod antigravity;
+#[cfg(test)]
+#[path = "instance/antigravity_launch_tests.rs"]
+mod antigravity_launch_tests;
 mod codex_restart;
 mod managed;
 mod managed_claude;
@@ -26,6 +31,8 @@ mod managed_panes;
 mod managed_recovery;
 mod relaunch_dir;
 mod runtime_settings;
+
+type AntigravityPlans = HashMap<i64, (PaneConfig, (String, bool))>;
 
 pub(crate) trait PaneConfigTarget {
     fn resolve_for(self, instance: &Instance) -> PaneConfig;
@@ -1220,6 +1227,11 @@ pub struct Instance {
 }
 
 impl Instance {
+    pub(crate) fn handoff_codex_endpoint() -> Result<String> {
+        codex_app_server_endpoint()
+            .map(|endpoint| endpoint.url)
+            .map_err(anyhow::Error::msg)
+    }
     pub fn new(title: &str, project_path: &str) -> Self {
         Self {
             id: generate_id(),
@@ -1375,15 +1387,18 @@ impl Instance {
     /// moment that distinction exists: afterwards the key is simply present, and
     /// nothing on it says whether this launch wrote it.
     fn ensure_xats_identity_key(&mut self) -> IdentityKeyOrigin {
+        let (key, origin) = self.primary_launch_key();
+        self.xats_identity_key = key;
+        origin
+    }
+
+    fn primary_launch_key(&self) -> (Option<String>, IdentityKeyOrigin) {
         if !self.is_cross_agent_team() {
-            return IdentityKeyOrigin::Absent;
+            return (self.xats_identity_key.clone(), IdentityKeyOrigin::Absent);
         }
-        match self.xats_identity_key.as_deref() {
-            None => {
-                self.xats_identity_key = Some(Uuid::new_v4().to_string());
-                IdentityKeyOrigin::Minted
-            }
-            Some(key) => IdentityKeyOrigin::of_existing_key(key),
+        match &self.xats_identity_key {
+            Some(key) => (Some(key.clone()), IdentityKeyOrigin::of_existing_key(key)),
+            None => (Some(Uuid::new_v4().to_string()), IdentityKeyOrigin::Minted),
         }
     }
 
@@ -1409,31 +1424,39 @@ impl Instance {
         store: &crate::db::Store,
         slots: &mut [crate::db::AgentSlot],
     ) -> HashMap<i64, IdentityKeyOrigin> {
+        let stage = self.has_controlled_antigravity(slots);
         slots
             .iter_mut()
             .map(|slot| {
-                let origin = if self.slot_needs_identity_key(slot) {
-                    Self::mint_slot_identity_key(store, slot, &self.title)
-                } else {
+                let origin = if !self.slot_needs_identity_key(slot) {
                     IdentityKeyOrigin::of_existing_key(&slot.xats_identity_key)
+                } else if stage {
+                    // Commit these keys only once the entire PTY preflight succeeds.
+                    IdentityKeyOrigin::Minted
+                } else if let Err(e) = Self::mint_slot_identity_key(store, slot) {
+                    tracing::warn!("Could not persist xats key for slot {}: {e:#}", slot.slot);
+                    IdentityKeyOrigin::Absent
+                } else {
+                    IdentityKeyOrigin::Minted
                 };
                 (slot.slot, origin)
             })
             .collect()
     }
 
-    /// Mint and persist one slot's key.
-    ///
-    /// A key that could not be persisted is reported as absent, not as minted: it
-    /// will not be there next launch, so nothing may be built on it having been
-    /// this pane's. The slot keeps its empty key and the next launch mints again.
+    fn has_controlled_antigravity(&self, slots: &[crate::db::AgentSlot]) -> bool {
+        !self.is_sandboxed()
+            && slots
+                .iter()
+                .any(|s| s.agent == "antigravity" && s.cross_agent_team)
+    }
+
     fn mint_slot_identity_key(
         store: &crate::db::Store,
         slot: &mut crate::db::AgentSlot,
-        title: &str,
-    ) -> IdentityKeyOrigin {
+    ) -> Result<()> {
         let key = Uuid::new_v4().to_string();
-        match store.upsert_agent_slot_config(
+        store.upsert_agent_slot_config(
             &slot.instance_id,
             slot.slot,
             &slot.pane_config(),
@@ -1441,21 +1464,62 @@ impl Instance {
             &slot.tmux_pane,
             &key,
             slot.last_seen_at,
-        ) {
-            Ok(()) => {
-                slot.xats_identity_key = key;
-                IdentityKeyOrigin::Minted
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Could not persist xats identity key for slot {} of '{}': {}",
-                    slot.slot,
-                    title,
-                    e
+        )?;
+        slot.xats_identity_key = key;
+        Ok(())
+    }
+
+    fn stage_slot_keys<'a>(
+        &self,
+        slots: &'a [crate::db::AgentSlot],
+        origins: &HashMap<i64, IdentityKeyOrigin>,
+    ) -> Result<std::borrow::Cow<'a, [crate::db::AgentSlot]>> {
+        let mut staged = std::borrow::Cow::Borrowed(slots);
+        if self.has_controlled_antigravity(slots) {
+            for (index, slot) in slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| self.slot_needs_identity_key(s))
+            {
+                anyhow::ensure!(
+                    slot_identity_origin(origins, slot.slot) == IdentityKeyOrigin::Minted,
+                    "Missing prepared identity for slot {}",
+                    slot.slot
                 );
-                IdentityKeyOrigin::Absent
+                staged.to_mut()[index].xats_identity_key = Uuid::new_v4().to_string();
             }
         }
+        Ok(staged)
+    }
+
+    fn persist_staged_keys(
+        &self,
+        store: &crate::db::Store,
+        original: &[crate::db::AgentSlot],
+        staged: &[crate::db::AgentSlot],
+    ) -> Result<()> {
+        if !self.has_controlled_antigravity(original) {
+            return Ok(());
+        }
+        let current = store.read_slots_for_instance(&self.id)?;
+        anyhow::ensure!(
+            original.iter().all(|s| current.contains(s)),
+            "Tracked slots changed during Antigravity preflight"
+        );
+        for (before, slot) in original.iter().zip(staged) {
+            if before.xats_identity_key != slot.xats_identity_key {
+                store.upsert_agent_slot_config(
+                    &self.id,
+                    slot.slot,
+                    &slot.pane_config(),
+                    &slot.native_session_id,
+                    &slot.tmux_pane,
+                    &slot.xats_identity_key,
+                    slot.last_seen_at,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// The identity key to inject into a pane being launched. Durable slot state
@@ -1522,8 +1586,14 @@ impl Instance {
         origin: IdentityKeyOrigin,
         is_primary: bool,
     ) -> LaunchedClaudePane {
+        let handoff =
+            crate::runtime_handoff::handles_bootstrap(&self.managed_profile(), &self.id, &pane_id)
+                .unwrap_or_else(|error| {
+                    tracing::warn!("Cannot inspect runtime handoff bootstrap: {error:#}");
+                    true
+                });
         LaunchedClaudePane {
-            reclaims_identity: !(is_primary && self.managed_xats.is_some())
+            reclaims_identity: !(handoff || is_primary && self.managed_xats.is_some())
                 && self.reclaims_xats_identity(config, origin),
             pane: pane_id,
         }
@@ -1949,6 +2019,10 @@ impl Instance {
         if self.command.is_empty() {
             return false;
         }
+        if self.tool == "antigravity" && crate::agents::antigravity::is_native_binary(&self.command)
+        {
+            return false;
+        }
         crate::agents::get_agent(&self.tool)
             .map(|a| self.command != a.binary)
             .unwrap_or(true)
@@ -2020,9 +2094,16 @@ impl Instance {
         if super::managed_pane::has_managed_state(self) {
             return self.restart_managed_container(None, mode);
         }
+        if self.restart_antigravity_slots(mode, false)? {
+            return Ok(());
+        }
         let snapshot = self.begin_fresh_identity(mode);
         let resume_token = self.resume_token.clone();
-        let result = self.start_with_size(None);
+        let result = if self.tool == "antigravity" && mode == RestartMode::Fresh {
+            self.start_with_size_inner(None, false, SessionLaunch::Agent, mode)
+        } else {
+            self.start_with_size(None)
+        };
         self.rollback_fresh_identity_on_failure(snapshot, result.is_ok());
         if result.is_err() {
             self.resume_token = resume_token;
@@ -2046,6 +2127,9 @@ impl Instance {
         }
         if super::managed_pane::has_managed_state(self) {
             return self.start_managed_container(size, skip_on_launch, RestartMode::Resume);
+        }
+        if self.restart_antigravity_slots(RestartMode::Resume, true)? {
+            return Ok(());
         }
         self.start_with_size_inner(
             size,
@@ -2073,13 +2157,30 @@ impl Instance {
         launch: SessionLaunch,
         mode: RestartMode,
     ) -> Result<()> {
-        self.clear_resume_token();
-        let identity_origin = self.ensure_xats_identity_key();
         let session = self.tmux_session()?;
 
         if session.exists() {
             return Ok(());
         }
+
+        let (key, identity_origin) = self.primary_launch_key();
+        let agy_command = if launch == SessionLaunch::Agent {
+            let command = self.prepare_controlled_antigravity(
+                &self.primary_pane,
+                true,
+                None,
+                key.as_deref().unwrap_or_default(),
+                identity_origin,
+                &self.managed_profile(),
+            )?;
+            crate::hooks::antigravity::install_for(&self.primary_pane, self.is_sandboxed())
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+            command
+        } else {
+            None
+        };
+        self.xats_identity_key = key;
+        self.clear_resume_token();
 
         if launch == SessionLaunch::Agent && self.tool == "codex" && !self.has_command_override() {
             self.capture_primary_runtime_settings()?;
@@ -2165,6 +2266,7 @@ impl Instance {
         // running. A brand new session has no slot and therefore no model.
         let observed_model = self.observed_primary_model();
         let cmd = match launch {
+            SessionLaunch::Agent if agy_command.is_some() => agy_command,
             SessionLaunch::Agent => self.build_pane_command_with_runtime(
                 &self.primary_pane,
                 if super::managed_pane::has_managed_state(self)
@@ -2187,6 +2289,9 @@ impl Instance {
             SessionLaunch::Placeholder => None,
         };
         let cmd = require_launch_command(launch, cmd, &self.primary_pane.tool)?;
+        let _agy_launch = (launch == SessionLaunch::Agent && self.tool == "antigravity")
+            .then(|| super::Storage::new(&self.managed_profile())?.operation_lock())
+            .transpose()?;
         tracing::debug!(
             "agent cmd: {}",
             cmd.as_ref().map_or_else(
@@ -2244,15 +2349,18 @@ impl Instance {
         exact_runtime: Option<&ExactSessionRuntimeContext>,
         mode: RestartMode,
     ) -> Result<()> {
-        let profile = Self::current_profile();
+        let profile = self.managed_profile();
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
         let pane_id = tmux::get_agent_pane_id(&session_name)
             .ok_or_else(|| anyhow::anyhow!("primary pane id was not recorded"))?;
         let store = crate::db::Store::open_with_schema(&profile)?;
         if let Some(runtime) = exact_runtime {
             runtime.bind_launched_pane(&store, &self.id, &self.primary_pane, &pane_id)
-        } else if self.managed_owner.is_some() || self.managed_primary_marked {
-            let native = if mode == RestartMode::Resume {
+        } else if self.tool == "antigravity"
+            || self.managed_owner.is_some()
+            || self.managed_primary_marked
+        {
+            let native = if self.tool != "antigravity" && mode == RestartMode::Resume {
                 store
                     .read_slots_for_instance(&self.id)?
                     .into_iter()
@@ -2354,8 +2462,14 @@ impl Instance {
     /// `cwd` is the directory the pane will be split into. Only a shell pane
     /// needs it in the command itself; an agent pane inherits it from the split.
     pub fn build_extra_pane_config_command(&self, pane: &PaneConfig) -> Option<ExtraPaneLaunch> {
+        self.extra_pane_command(&self.managed_profile(), pane)
+            .map_err(|error| tracing::error!("Preparing extra pane: {error:#}"))
+            .ok()
+    }
+
+    fn extra_pane_command(&self, profile: &str, pane: &PaneConfig) -> Result<ExtraPaneLaunch> {
         if pane.tool == "shell" {
-            return Some(ExtraPaneLaunch {
+            return Ok(ExtraPaneLaunch {
                 command: self.build_extra_shell_pane_command(&pane.working_dir),
                 agent: pane.tool.clone(),
                 native_session_id: String::new(),
@@ -2372,13 +2486,20 @@ impl Instance {
         } else {
             String::new()
         };
-        let command = self.build_pane_command(
+        let command = match self.prepare_controlled_antigravity(
             pane,
-            None,
             false,
-            Some(identity_key.as_str()).filter(|k| !k.is_empty()),
-        )?;
-        Some(ExtraPaneLaunch {
+            None,
+            &identity_key,
+            IdentityKeyOrigin::Minted,
+            profile,
+        )? {
+            Some(command) => command,
+            None => self
+                .build_pane_command(pane, None, false, Some(&identity_key))
+                .with_context(|| format!("No launch command for pane tool '{}'", pane.tool))?,
+        };
+        Ok(ExtraPaneLaunch {
             command,
             agent: pane.tool.clone(),
             native_session_id: String::new(),
@@ -2395,9 +2516,10 @@ impl Instance {
         pane: &PaneConfig,
     ) -> Result<ExtraPaneLaunch> {
         let Some(shape) = self.pane_exact_session_runtime(pane) else {
-            return self
-                .build_extra_pane_config_command(pane)
-                .ok_or_else(|| anyhow::anyhow!("No launch command for pane tool '{}'", pane.tool));
+            let launch = self.extra_pane_command(profile, pane)?;
+            crate::hooks::antigravity::install_for(pane, self.is_sandboxed())
+                .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            return Ok(launch);
         };
         let store = crate::db::Store::open_with_schema(profile)?;
         let identity_key = if pane.cross_agent_team {
@@ -2497,6 +2619,8 @@ impl Instance {
         identity_key: &str,
         mode: RestartMode,
     ) -> Result<ExactSessionRuntimeContext> {
+        let storage = super::Storage::new(&self.managed_profile())?;
+        let _operation = storage.operation_lock()?;
         let shape = self.pane_exact_session_runtime(pane).ok_or_else(|| {
             anyhow::anyhow!(
                 "runtime preparation requires a host pane whose agent has an exact session runtime"
@@ -2521,6 +2645,7 @@ impl Instance {
             .into_iter()
             .find(|row| row.slot == slot)
             .ok_or_else(|| anyhow::anyhow!("{} slot {slot} was not provisioned", pane.tool))?;
+        crate::runtime_handoff::ensure_for_slot(&self.managed_profile(), self, &existing, true)?;
         let identity_key = if existing.xats_identity_key.is_empty() {
             identity_key
         } else {
@@ -2572,7 +2697,7 @@ impl Instance {
         pane: &PaneConfig,
         mode: RestartMode,
     ) -> Result<ExactSessionRuntimeContext> {
-        let prepared = store.prepare_opencode_runtime(
+        let mut prepared = store.prepare_opencode_runtime(
             &self.id,
             slot,
             match mode {
@@ -2580,12 +2705,32 @@ impl Instance {
                 RestartMode::Resume => crate::db::RuntimePreparationMode::Resume,
             },
         )?;
+        if let Some(previous) =
+            crate::runtime_handoff::runtime_generation(&self.managed_profile(), &self.id, slot)?
+        {
+            let next = previous
+                .checked_add(1)
+                .context("OpenCode runtime generation exhausted")?;
+            if next > prepared.generation {
+                store.align_opencode_runtime_generation(
+                    &self.id,
+                    slot,
+                    prepared.generation,
+                    next,
+                    &prepared.xats_identity_key,
+                )?;
+                prepared.generation = next;
+            }
+        }
         debug_assert!(
             mode != RestartMode::Resume
                 || crate::opencode_runtime::validate_session_id(&prepared.native_session_id)
                     .is_ok()
         );
-        if pane.cross_agent_team && !(slot == 0 && self.managed_xats.is_some()) {
+        if pane.cross_agent_team
+            && !(slot == 0 && self.managed_xats.is_some())
+            && !crate::runtime_handoff::has_prepared(&self.managed_profile(), &self.id, slot)?
+        {
             if prepared.xats_identity_key.is_empty() {
                 anyhow::bail!("OpenCode Cross Agent Team slot {slot} has no identity key");
             }
@@ -2729,6 +2874,151 @@ impl Instance {
         crate::agents::agent_from_process_name(&running).filter(|agent| *agent != self.tool)
     }
 
+    fn native_antigravity(&self, pane: &PaneConfig, primary: bool) -> bool {
+        pane.tool == "antigravity"
+            && !self.is_sandboxed()
+            && !(primary && self.pane_runs_instance_tool(&pane.tool) && self.has_command_override())
+    }
+
+    fn antigravity_command(
+        &self,
+        pane: &PaneConfig,
+        primary: bool,
+        resume: Option<&str>,
+        launcher: Option<&ControlledLauncher>,
+        profile: &str,
+    ) -> Result<String> {
+        let primary = primary && self.pane_runs_instance_tool(&pane.tool);
+        let agent =
+            crate::agents::get_agent(&pane.tool).context("Missing Antigravity definition")?;
+        let base = self.pane_base_command(&pane.tool, primary);
+        anyhow::ensure!(
+            resume.map_or(true, crate::hooks::antigravity::valid_id),
+            "Invalid Antigravity conversation UUID"
+        );
+        let extra = if primary {
+            crate::agents::antigravity::launch_arguments(None, Some(&self.extra_args), None)?.1
+        } else {
+            String::new()
+        };
+        let command =
+            self.build_base_pane_command(Some(agent), resume, primary, None, Some(&extra));
+        let args = command
+            .strip_prefix(&base)
+            .context("Unexpected Antigravity binary")?;
+        let yolo = match (&agent.yolo, pane.yolo_mode) {
+            (Some(crate::agents::YoloMode::CliFlag(flag)), true) => format!(" {flag}"),
+            _ => String::new(),
+        };
+        let prefix = launcher.map(ControlledLauncher::prefix).unwrap_or(&base);
+        let enabled = u8::from(pane.cross_agent_team);
+        let named = u8::from(launcher.is_some());
+        let deferred = u8::from(launcher.is_some_and(|launch| launch.deferred));
+        let clean =
+            shell_escape(r#"unset XATS_IDENTITY_KEY "${!XATS_AGY_@}"; exec /usr/bin/env "$@""#);
+        let command = format!(
+            "-u XATS_IDENTITY_KEY -u AOE_ANTIGRAVITY_AGENT_ID -u AOE_ANTIGRAVITY_SLOT_DIGEST \
+             -u AOE_ANTIGRAVITY_MCP_BINARY -u AOE_ANTIGRAVITY_MCP_PATH AOE_ANTIGRAVITY_PID=$$ \
+             AOE_ANTIGRAVITY_XATS={enabled} AOE_ANTIGRAVITY_NAMED={named} \
+             AOE_ANTIGRAVITY_DEFERRED={deferred} /bin/bash -p -c {clean} bash {prefix}{yolo}{args}"
+        );
+        let command = wrap_host_agent_command(
+            &command,
+            &[
+                ("AGENT_OF_EMPIRES_PROFILE", profile),
+                ("AOE_INSTANCE_ID", &self.id),
+            ],
+            Some(agent),
+        );
+        Ok(if deferred == 1 {
+            format!("exec env {command}")
+        } else {
+            command
+        })
+    }
+
+    fn prepare_controlled_antigravity(
+        &self,
+        pane: &PaneConfig,
+        primary: bool,
+        resume: Option<&str>,
+        key: &str,
+        origin: IdentityKeyOrigin,
+        profile: &str,
+    ) -> Result<Option<String>> {
+        if pane.tool != "antigravity" || !pane.cross_agent_team || self.is_sandboxed() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            self.native_antigravity(pane, primary),
+            "Controlled Antigravity requires a native agy executable"
+        );
+        let base = self.pane_base_command(&pane.tool, primary);
+        let launcher = ControlledLauncher::prepare(
+            key,
+            origin == IdentityKeyOrigin::Minted,
+            &base,
+            &pane.working_dir,
+        )
+        .map_err(|error| anyhow::anyhow!("Preparing controlled Antigravity: {error:#}"))?;
+        self.antigravity_command(pane, primary, resume, Some(&launcher), profile)
+            .map(Some)
+    }
+
+    fn tracked_antigravity_command(
+        &self,
+        slot: &crate::db::AgentSlot,
+        pane: &PaneConfig,
+        mode: RestartMode,
+        origin: IdentityKeyOrigin,
+    ) -> Result<Option<(String, bool)>> {
+        if slot.agent != "antigravity" || !slot.cross_agent_team {
+            return Ok(None);
+        }
+        let primary = slot.slot == 0;
+        let resume = (mode == RestartMode::Resume).then_some(slot.native_session_id.as_str());
+        anyhow::ensure!(
+            resume.map_or(true, crate::hooks::antigravity::valid_id),
+            "Antigravity slot {} has no verified conversation UUID",
+            slot.slot
+        );
+        Ok(self
+            .prepare_controlled_antigravity(
+                pane,
+                primary,
+                resume,
+                &slot.xats_identity_key,
+                origin,
+                &self.managed_profile(),
+            )
+            .map_err(|error| anyhow::anyhow!("Antigravity slot {}: {error:#}", slot.slot))?
+            .map(|command| (command, resume.is_some())))
+    }
+
+    fn prepare_tracked_antigravity(
+        &mut self,
+        slots: &[crate::db::AgentSlot],
+        mode: RestartMode,
+        identity_origins: &HashMap<i64, IdentityKeyOrigin>,
+    ) -> Result<AntigravityPlans> {
+        let mut agy_commands = HashMap::new();
+        for slot in slots
+            .iter()
+            .filter(|s| s.agent == "antigravity" && s.cross_agent_team)
+        {
+            let pane = self.relaunch_pane_config(slot);
+            if let Some(command) = self.tracked_antigravity_command(
+                slot,
+                &pane,
+                mode,
+                slot_identity_origin(identity_origins, slot.slot),
+            )? {
+                agy_commands.insert(slot.slot, (pane, command));
+            }
+        }
+        Ok(agy_commands)
+    }
+
     /// Build the launch command for a single pane, applying the full launch
     /// context (resume flag, YOLO mode, cross-agent-team flag, `AOE_INSTANCE_ID`
     /// for hook-config agents, sandbox `docker exec` wrapping, custom instruction,
@@ -2782,6 +3072,22 @@ impl Instance {
         let pane = target.resolve_for(self);
         let agent = crate::agents::get_agent(&pane.tool);
         let is_primary = is_primary && self.pane_runs_instance_tool(&pane.tool);
+        if self.native_antigravity(&pane, is_primary) {
+            if pane.cross_agent_team {
+                tracing::error!("Antigravity team launch requires a prepared PTY launcher");
+                return None;
+            }
+            return self
+                .antigravity_command(
+                    &pane,
+                    is_primary,
+                    resume_token,
+                    None,
+                    &self.managed_profile(),
+                )
+                .map_err(|error| tracing::error!("Cannot prepare Antigravity launch: {error:#}"))
+                .ok();
+        }
         let settings = if is_primary && self.has_command_override() {
             None
         } else if let Some(settings) = runtime_settings {
@@ -2811,15 +3117,36 @@ impl Instance {
         } else {
             None
         };
-        let decorate = |command| match &settings {
-            Some(settings) => match settings.append_command(command, &pane.tool) {
+        let decorate = |command| {
+            let command = match &settings {
+                Some(settings) => match settings.append_command(command, &pane.tool) {
+                    Ok(command) => Some(command),
+                    Err(error) => {
+                        tracing::error!("Cannot restore pane settings: {error:#}");
+                        None
+                    }
+                },
+                None => Some(command),
+            }?;
+            match crate::runtime_handoff::bootstrap_command(
+                &self.managed_profile(),
+                self,
+                &pane.tool,
+                slot_identity_key,
+                is_primary,
+                command,
+            ) {
+                Ok(command) if pane.tool == "antigravity" && !self.is_sandboxed() => Some(format!(
+                    "-u XATS_IDENTITY_KEY -u AOE_ANTIGRAVITY_AGENT_ID -u AOE_ANTIGRAVITY_SLOT_DIGEST \
+             -u AOE_ANTIGRAVITY_MCP_BINARY -u AOE_ANTIGRAVITY_MCP_PATH AOE_ANTIGRAVITY_PID=$$ \
+                         AOE_ANTIGRAVITY_XATS=0 AOE_ANTIGRAVITY_NAMED=0 AOE_ANTIGRAVITY_DEFERRED=0 {command}"
+                )),
                 Ok(command) => Some(command),
                 Err(error) => {
-                    tracing::error!("Cannot restore pane settings: {error:#}");
+                    tracing::error!("Cannot prepare runtime handoff bootstrap: {error:#}");
                     None
                 }
-            },
-            None => Some(command),
+            }
         };
 
         if self.is_sandboxed() {
@@ -3773,12 +4100,90 @@ impl Instance {
         }
     }
 
+    fn respawn_untracked_antigravity(&mut self) -> Result<bool> {
+        let profile = self.managed_profile();
+        let _lock = super::Storage::new(&profile)?.operation_lock()?;
+        let store = crate::db::Store::open_with_schema(&profile)?;
+        let read = store.read_slots_for_instance_with_diagnostics(&self.id)?;
+        anyhow::ensure!(
+            read.skipped == 0,
+            "Cannot restart with invalid durable slots"
+        );
+        if read.slots.iter().any(|slot| slot.slot == 0) {
+            return Ok(false);
+        }
+        let pane = &self.primary_pane;
+        let (key, origin) = self.primary_launch_key();
+        let key = key.context("Missing Antigravity primary identity")?;
+        let command = self
+            .prepare_controlled_antigravity(pane, true, None, &key, origin, &profile)?
+            .context("Missing controlled Antigravity launch command")?;
+        crate::hooks::antigravity::install_for(pane, false)
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+        let session = tmux::Session::generate_name(&self.id, &self.title);
+        let target =
+            tmux::get_agent_pane_id(&session).context("Missing Antigravity primary pane")?;
+        store.record_launched_slot_config_if_absent(
+            &self.id,
+            0,
+            pane,
+            &target,
+            &key,
+            crate::db::now_unix(),
+        )?;
+        let slot = store
+            .read_slots_for_instance(&self.id)?
+            .into_iter()
+            .find(|s| {
+                s.slot == 0
+                    && s.agent == pane.tool
+                    && s.tmux_pane == target
+                    && s.xats_identity_key == key
+            })
+            .context("Antigravity primary slot changed before launch")?;
+        if let Some(hooks) = self.resolve_on_launch_hooks() {
+            self.execute_on_launch_hooks(&hooks);
+        }
+        let result = self.resume_launch_pane(
+            pane,
+            "",
+            &target,
+            true,
+            RestartMode::Fresh,
+            Some(&key),
+            None,
+            None,
+            &slot,
+            true,
+            None,
+            Some((command, false)),
+        );
+        if let PaneResumeOutcome::Error(error) = result {
+            anyhow::bail!("{error}");
+        }
+        self.xats_identity_key = Some(key);
+        self.clear_resume_token();
+        self.apply_tmux_options(&profile);
+        self.status = Status::Starting;
+        self.last_start_time = Some(Instant::now());
+        Ok(true)
+    }
+
     fn respawn_single_pane(&mut self, mode: RestartMode) -> Result<()> {
         if self.managed_xats.is_some() {
             return self.managed_lifecycle(Some(mode), None, false);
         }
         if super::managed_pane::has_managed_state(self) {
             return self.restart_managed_container(None, mode);
+        }
+        if self.tool == "antigravity" {
+            if mode == RestartMode::Fresh
+                && self.is_cross_agent_team()
+                && self.respawn_untracked_antigravity()?
+            {
+                return Ok(());
+            }
+            return self.respawn_single_antigravity(mode);
         }
         if self.tool == "codex" && self.primary_pane.cross_agent_team {
             return self.respawn_single_codex(mode);
@@ -3939,9 +4344,19 @@ impl Instance {
                     .find(|parent| parent.id == self.id)
                     .context("Managed session disappeared")?;
                 parent.source_profile = profile.clone();
-                let slots = crate::db::Store::open_with_schema(&profile)?
+                let persisted = crate::db::Store::open_with_schema(&profile)?
                     .read_slots_for_instance(&self.id)?;
-                Ok::<_, anyhow::Error>((parent, slots, guard))
+                let selected = slots
+                    .iter()
+                    .map(|wanted| {
+                        persisted
+                            .iter()
+                            .find(|current| current.slot == wanted.slot)
+                            .cloned()
+                            .with_context(|| format!("Selected pane {} disappeared", wanted.slot))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok::<_, anyhow::Error>((parent, selected, guard))
             })();
             match result {
                 Ok((parent, fresh_slots, guard)) => {
@@ -3961,9 +4376,32 @@ impl Instance {
             slots
         };
         let _operation = operation;
+        self.relaunch_notes.clear();
+        let mut agy_commands = HashMap::new();
+        let prepared;
+        let slots = if self.has_controlled_antigravity(slots) {
+            let preflight = (|| {
+                let profile = self.managed_profile();
+                let _lock = super::Storage::new(&profile)?.operation_lock()?;
+                let staged = self.stage_slot_keys(slots, identity_origins)?;
+                agy_commands = self.prepare_tracked_antigravity(&staged, mode, identity_origins)?;
+                self.preflight_antigravity(slots, mode)?;
+                let store = crate::db::Store::open(&profile)?;
+                self.persist_staged_keys(&store, slots, &staged)?;
+                Ok::<_, anyhow::Error>(staged)
+            })();
+            match preflight {
+                Ok(updated) => {
+                    prepared = updated;
+                    prepared.as_ref()
+                }
+                Err(error) => return vec![PaneResumeOutcome::Error(format!("{error:#}"))],
+            }
+        } else {
+            slots
+        };
         self.status = Status::Restarting;
         self.last_error = None;
-        self.relaunch_notes.clear();
         self.ensure_xats_identity_key();
 
         // A fresh restart must not reuse the pre-allocated `--session-id` for the
@@ -4023,7 +4461,10 @@ impl Instance {
                 }
                 continue;
             }
-            let pane = self.relaunch_pane_config(slot);
+            let (pane, agy_command) = match agy_commands.remove(&slot.slot) {
+                Some((pane, command)) => (pane, Some(command)),
+                None => (self.relaunch_pane_config(slot), None),
+            };
             let mut native_session_id = self.slot_resume_source(slot, mode);
             let mut identity_key = slot.xats_identity_key.clone();
             let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
@@ -4074,6 +4515,7 @@ impl Instance {
                 slot,
                 true,
                 None,
+                agy_command,
             );
             // Every Claude pane this fan-out actually relaunched raises its own
             // startup screens, not just the primary one.
@@ -4111,7 +4553,9 @@ impl Instance {
         }
         self.rollback_fresh_identity_on_failure(snapshot, primary_respawned);
 
+        drop(_operation);
         self.auto_confirm_panes(&confirmable_panes);
+        self.finish_runtime_handoffs(slots, &mut outcomes);
         self.apply_tmux_options(&Self::current_profile());
 
         self.status = Status::Starting;
@@ -4167,7 +4611,24 @@ impl Instance {
             self.source_profile.clone()
         };
         let storage = super::Storage::new(&profile)?;
-        let _operation = managed.then(|| storage.operation_lock()).transpose()?;
+        let has_antigravity = slots.iter().any(|slot| slot.agent == "antigravity");
+        let _operation = (managed || has_antigravity)
+            .then(|| storage.operation_lock())
+            .transpose()?;
+        if has_antigravity {
+            anyhow::ensure!(
+                !self.tmux_session()?.exists(),
+                "Cold recovery target is already running"
+            );
+            let current = store.read_slots_for_instance(&self.id)?;
+            anyhow::ensure!(
+                slots
+                    .iter()
+                    .filter(|s| s.agent == "antigravity")
+                    .all(|s| current.contains(s)),
+                "Antigravity slot changed before cold recovery"
+            );
+        }
         if managed {
             *self = storage
                 .load()?
@@ -4183,8 +4644,15 @@ impl Instance {
         if slots.is_empty() {
             anyhow::bail!("no persisted slots to recover");
         }
-        let cold_settings = self.preflight_codex_recovery(store, slots, mode)?;
         self.relaunch_notes.clear();
+        let prepared = self.stage_slot_keys(slots, identity_origins)?;
+        let mut agy_commands =
+            self.prepare_tracked_antigravity(&prepared, mode, identity_origins)?;
+        self.preflight_antigravity(slots, mode)?;
+        let cold_settings = self.preflight_codex_recovery(store, slots, mode)?;
+
+        self.persist_staged_keys(store, slots, &prepared)?;
+        let slots = prepared.as_ref();
 
         let mut ordered: Vec<crate::db::AgentSlot> = if managed {
             self.prepare_managed_recovery(store)?
@@ -4295,7 +4763,10 @@ impl Instance {
                 );
                 continue;
             }
-            let pane = self.relaunch_pane_config(slot);
+            let (pane, agy_command) = match agy_commands.remove(&slot.slot) {
+                Some((pane, command)) => (pane, Some(command)),
+                None => (self.relaunch_pane_config(slot), None),
+            };
             let mut native_session_id = slot.native_session_id.clone();
             let mut identity_key = slot.xats_identity_key.clone();
             let exact_runtime = if let Some(shape) = self.pane_exact_session_runtime(&pane) {
@@ -4339,6 +4810,7 @@ impl Instance {
                 slot,
                 false,
                 cold_settings.get(&slot.slot),
+                agy_command,
             );
             let outcome = if pane.tool == "codex" && pane.cross_agent_team {
                 match &outcome {
@@ -4377,7 +4849,8 @@ impl Instance {
                     err
                 );
             }
-            if let Err(e) = (pane.tool != "codex" || !pane.cross_agent_team)
+            if let Err(e) = (pane.tool != "antigravity"
+                && (pane.tool != "codex" || !pane.cross_agent_team))
                 .then(|| {
                     store.upsert_agent_slot_config(
                         &slot.instance_id,
@@ -4435,7 +4908,10 @@ impl Instance {
             self.persist_managed_snapshot()?;
         }
 
+        drop(_operation);
         self.auto_confirm_panes(&confirmable_panes);
+        let handoff_slots: Vec<_> = paired.iter().map(|(slot, _)| slot.clone()).collect();
+        self.finish_runtime_handoffs(&handoff_slots, &mut outcomes);
         self.apply_tmux_options(&Self::current_profile());
         self.status = Status::Starting;
         self.last_start_time = Some(Instant::now());
@@ -4523,6 +4999,7 @@ impl Instance {
     /// nothing.
     fn slot_resume_source(&self, slot: &crate::db::AgentSlot, mode: RestartMode) -> String {
         let stands_in = mode == RestartMode::Resume
+            && slot.agent != "antigravity"
             && (slot.agent != "codex" || !slot.cross_agent_team)
             && slot.slot == 0
             && slot.native_session_id.is_empty()
@@ -4605,6 +5082,9 @@ impl Instance {
         }
         if super::managed_pane::has_managed_state(self) {
             return self.restart_managed_container(size, RestartMode::Resume);
+        }
+        if self.restart_antigravity_slots(RestartMode::Resume, false)? {
+            return Ok(());
         }
         let session = self.tmux_session()?;
 
@@ -5375,6 +5855,15 @@ impl Instance {
 
         // `Fresh` forces the no-resume path: still build the full launch context
         // via `build_pane_command`, but never append a resume flag.
+        if pane.tool == "antigravity"
+            && mode == RestartMode::Resume
+            && (!crate::hooks::antigravity::valid_id(native_session_id)
+                || (is_primary
+                    && self.pane_runs_instance_tool(&pane.tool)
+                    && self.has_command_override()))
+        {
+            return None;
+        }
         let resumed = mode == RestartMode::Resume
             && def.resume.is_some()
             && is_valid_resume_token(native_session_id);
@@ -5417,7 +5906,62 @@ impl Instance {
         slot: &crate::db::AgentSlot,
         live_source: bool,
         cold_settings: Option<&crate::db::runtime_settings::RuntimeSettings>,
+        agy_command: Option<(String, bool)>,
     ) -> PaneResumeOutcome {
+        let operation = super::Storage::new(&self.managed_profile())
+            .and_then(|storage| storage.operation_lock());
+        let _operation = match operation {
+            Ok(operation) => operation,
+            Err(error) => return PaneResumeOutcome::Error(format!("{error:#}")),
+        };
+        let session_name = tmux::Session::generate_name(&self.id, &self.title);
+        let observe_target = || {
+            crate::db::reconcile::PaneGeneration::observe(
+                &self.managed_profile(),
+                &session_name,
+                tmux_pane,
+                is_primary,
+            )
+        };
+        let generation = if pane.tool == "antigravity" {
+            if slot.instance_id != self.id || (live_source && slot.tmux_pane != tmux_pane) {
+                return PaneResumeOutcome::Error(
+                    "Antigravity slot belongs to another target".into(),
+                );
+            }
+            if mode == RestartMode::Resume
+                && !crate::hooks::antigravity::valid_id(native_session_id)
+            {
+                return PaneResumeOutcome::Error(format!(
+                    "Antigravity slot {} has no verified conversation UUID",
+                    slot.slot
+                ));
+            }
+            match observe_target() {
+                Ok(value) => Some(value),
+                Err(error) => return PaneResumeOutcome::Error(format!("{error:#}")),
+            }
+        } else {
+            None
+        };
+        if live_source && agy_command.is_none() {
+            if let Err(error) = crate::hooks::antigravity::install_for(pane, self.is_sandboxed()) {
+                return PaneResumeOutcome::Error(format!("{error:#}"));
+            }
+        }
+        if let Err(error) = crate::runtime_handoff::ensure_for_slot(
+            &self.managed_profile(),
+            self,
+            slot,
+            live_source,
+        ) {
+            return PaneResumeOutcome::Error(format!("{error:#}"));
+        }
+        if let Err(error) =
+            crate::runtime_handoff::begin_launch(&self.managed_profile(), &self.id, slot.slot)
+        {
+            return PaneResumeOutcome::Error(format!("{error:#}"));
+        }
         if let Some(shape) = self.pane_exact_session_runtime(pane) {
             if mode == RestartMode::Resume
                 && validate_exact_session_id(shape, native_session_id).is_err()
@@ -5449,7 +5993,9 @@ impl Instance {
             Ok(settings) => settings,
             Err(error) => return PaneResumeOutcome::Error(format!("{error:#}")),
         };
-        let plan = if pane_agent_is_shell(&pane.tool) {
+        let plan = if let Some(command) = agy_command {
+            Some(command)
+        } else if pane_agent_is_shell(&pane.tool) {
             Some((
                 self.build_extra_shell_pane_command(&pane.working_dir),
                 false,
@@ -5497,13 +6043,16 @@ impl Instance {
         // what runs in the pane, so the slot comes back either way, and the cost
         // of skipping is orphaned grandchildren rather than a destroyed pane and
         // a lost slot.
-        match tmux::set_pane_remain_on_exit(tmux_pane, true) {
+        let stop_previous = || match tmux::set_pane_remain_on_exit(tmux_pane, true) {
             Ok(()) => tmux::kill_pane_process_tree_target(tmux_pane),
             Err(err) => tracing::warn!(
                 "Could not hold pane {} open for relaunch, skipping its process-tree kill: {}",
                 tmux_pane,
                 err
             ),
+        };
+        if pane.tool != "antigravity" {
+            stop_previous();
         }
 
         let prepared = codex_restart
@@ -5522,12 +6071,52 @@ impl Instance {
             });
         }
 
-        if let Err(err) = tmux::respawn_pane_target(
-            tmux_pane,
-            &command,
-            &pane.working_dir,
-            !pane_agent_is_shell(&pane.tool),
-        ) {
+        let launch = || {
+            tmux::respawn_pane_target(
+                tmux_pane,
+                &command,
+                &pane.working_dir,
+                !pane_agent_is_shell(&pane.tool),
+            )
+        };
+        let result = if let Some(generation) = generation {
+            crate::db::Store::open(&self.managed_profile()).and_then(|store| {
+                store.relaunch_antigravity(slot, pane, tmux_pane, resumed, || {
+                    anyhow::ensure!(
+                        observe_target()? == generation,
+                        "Antigravity pane generation changed"
+                    );
+                    // Stage a short-lived placeholder when replacing a live Antigravity pane so
+                    // `pane-died` never fires, then wait for the old launcher and `agy` to exit
+                    // cleanly (releasing its conversation lock and xats control socket) before
+                    // spawning the replacement.
+                    let launch_generation = if live_source && generation.has_live_root() {
+                        tmux::respawn_verified_pane(
+                            &self.managed_profile(),
+                            tmux_pane,
+                            &generation.respawn_condition(is_primary),
+                            "exec sleep 60",
+                            &pane.working_dir,
+                        )?;
+                        generation
+                            .terminate_previous_process_tree(std::time::Duration::from_secs(2));
+                        observe_target()?
+                    } else {
+                        generation
+                    };
+                    tmux::respawn_verified_pane(
+                        &self.managed_profile(),
+                        tmux_pane,
+                        &launch_generation.respawn_condition(is_primary),
+                        &command,
+                        &pane.working_dir,
+                    )
+                })
+            })
+        } else {
+            launch()
+        };
+        if let Err(err) = result {
             if let Some(restart) = codex_restart {
                 if let Err(rollback) = restart.abort() {
                     return PaneResumeOutcome::Error(format!(

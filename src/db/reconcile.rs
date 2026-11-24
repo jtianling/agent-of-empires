@@ -19,6 +19,7 @@ mod driver;
 mod topology;
 
 pub use topology::ObservedPane;
+pub(crate) use topology::PaneGeneration;
 
 /// One pane of a managed session, after slot assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]

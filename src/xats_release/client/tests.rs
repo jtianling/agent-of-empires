@@ -14,12 +14,39 @@ fn response() -> Value {
 }
 
 fn decode_value(value: &Value, count: usize) -> Result<()> {
-    decode(StatusCode::OK, &serde_json::to_vec(value).unwrap(), count)
+    decode(
+        StatusCode::OK,
+        &serde_json::to_vec(value).unwrap(),
+        &vec![false; count],
+    )
 }
 
 #[test]
 fn accepts_complete_ordered_release_and_idempotent_absence() {
     assert!(decode_value(&response(), 2).is_ok());
+}
+
+#[test]
+fn dead_key_unclaimed_requires_the_matching_request_flag() {
+    let mut value = response();
+    value["results"][1]["state"] = json!("dead_key_unclaimed");
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert!(decode(StatusCode::OK, &bytes, &[false, true]).is_ok());
+    assert!(decode(StatusCode::OK, &bytes, &[false, false]).is_err());
+    assert!(decode(StatusCode::OK, &bytes, &[true, false]).is_err());
+    assert!(decode(
+        StatusCode::OK,
+        &serde_json::to_vec(&response()).unwrap(),
+        &[false, true]
+    )
+    .is_err());
+    value["results"][1]["agent"] = value["results"][0]["agent"].clone();
+    assert!(decode(
+        StatusCode::OK,
+        &serde_json::to_vec(&value).unwrap(),
+        &[false, true]
+    )
+    .is_err());
 }
 
 #[test]
@@ -60,13 +87,13 @@ fn preserves_specific_error_and_rejects_invalid_error_target() {
     let error = decode(
         StatusCode::CONFLICT,
         &serde_json::to_vec(&failure).unwrap(),
-        2,
+        &[false, false],
     )
     .unwrap_err();
     assert!(error.to_string().contains("identity_mismatch"));
     assert!(error.to_string().contains("identity moved to another pane"));
     assert!(decode_value(&failure, 1).is_err());
-    assert!(decode(StatusCode::UNAUTHORIZED, b"{}", 2).is_err());
+    assert!(decode(StatusCode::UNAUTHORIZED, b"{}", &[false, false]).is_err());
 }
 
 #[test]
@@ -89,6 +116,7 @@ fn sends_both_targets_in_one_authenticated_request() {
         },
         identity_key: Some(format!("key-{pane_id}")),
         opencode_session_id: None,
+        allow_dead_if_identity_unclaimed: false,
     });
     xats_control::block_on_control("test-pane-release", move || {
         Box::pin(async move {

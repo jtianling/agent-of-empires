@@ -106,7 +106,7 @@ def main():
             '#!/bin/sh\n'
             '[ -z "$TMUX" ] && [ -z "$TMUX_PANE" ] || exit 99\n'
             '[ "$1" = "-L" ] && [ "$3" = "list-panes" ] || exit 98\n'
-            'echo "/tmp/private-smoke|123|1700000000|%9|aoe_human_01234567|%9||0|0|0"\n'
+            'echo "/tmp/private-smoke|123|1700000000|%9|aoe_human_01234567|%9||0|0|0|0|456|/dev/pts/1"\n'
         )
         live_result = call("-p", "alpha", "overview")
         live_session = live_result["profiles"][0]["sessions"][0]

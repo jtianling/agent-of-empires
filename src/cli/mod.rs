@@ -1,6 +1,7 @@
 //! CLI command implementations
 
 pub mod add;
+pub mod antigravity_launch;
 pub mod codex_name;
 pub mod codex_provider;
 pub mod definition;

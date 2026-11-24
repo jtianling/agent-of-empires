@@ -14,6 +14,7 @@ pub(crate) mod utils;
 
 pub use input::submit_text_to_pane_target;
 pub use notification_monitor::write_ack_signal;
+pub(crate) use session::respawn_verified_pane;
 pub use session::{
     apply_window_layout, capture_pane_screen, kill_pane_exact, kill_pane_process_tree_target,
     respawn_pane_target, send_keys_to_pane_target, session_window_layout, set_pane_remain_on_exit,

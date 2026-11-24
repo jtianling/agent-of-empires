@@ -57,8 +57,22 @@ pub struct ManagedXats {
     pub pending_restart: Option<String>,
     #[serde(default)]
     pub prepared_previous: Option<Fence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retiring_codex: Option<RetiringCodex>,
     #[serde(default)]
     pub client_config: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiringCodex {
+    pub client_config: Value,
+    pub launch_instance_id: String,
+    pub fence: Option<Fence>,
 }
 
 impl ManagedXats {
@@ -72,6 +86,9 @@ impl ManagedXats {
             claim: None,
             pending_restart: None,
             prepared_previous: None,
+            previous_agent_type: None,
+            prepared_agent_type: None,
+            retiring_codex: None,
             client_config: None,
         };
         identity.validate()?;
@@ -79,6 +96,13 @@ impl ManagedXats {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(previous) = &self.previous_agent_type {
+            ensure!(
+                self.claim.is_some()
+                    && matches!(previous.as_str(), "codex" | "claude-code" | "opencode"),
+                "Invalid previous managed agent type"
+            );
+        }
         if let Some(effort) = &self.effort {
             if self.model.is_none()
                 || effort.is_empty()
@@ -124,8 +148,24 @@ impl ManagedXats {
 
 pub fn stage_restart(instance: &mut Instance) -> Result<()> {
     if let Some(identity) = &mut instance.managed_xats {
+        let target_type = agent_type(&instance.tool)?.to_string();
         identity.validate()?;
         if identity.claim.is_some() && identity.pending_restart.is_none() {
+            let source_type = identity
+                .prepared_agent_type
+                .clone()
+                .or_else(|| {
+                    identity
+                        .claim
+                        .as_ref()
+                        .and_then(|claim| claim.runtime.as_ref())
+                        .and_then(|runtime| runtime.get("agent_type"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| identity.previous_agent_type.clone())
+                .unwrap_or_else(|| target_type.clone());
+            identity.previous_agent_type = (source_type != target_type).then_some(source_type);
             identity.pending_restart = Some(Uuid::new_v4().to_string());
         }
     }
@@ -165,6 +205,9 @@ pub fn prepare(instance: &mut Instance) -> Result<()> {
     };
     if let Some(previous) = &previous {
         request["previous"] = json!(previous);
+        if let Some(previous_type) = &identity.previous_agent_type {
+            request["previous_agent_type"] = json!(previous_type);
+        }
     }
     let response = transport::call("prepare", request, key, None)?;
     ensure!(
@@ -196,6 +239,7 @@ pub fn prepare(instance: &mut Instance) -> Result<()> {
     identity.launch_instance_id = response.fence.instance_id.clone();
     identity.pending_restart = None;
     identity.prepared_previous = previous;
+    identity.prepared_agent_type = Some(agent_type(&instance.tool)?.to_string());
     identity.claim = Some(Claim {
         fence: response.fence,
         mcp_token: token,
@@ -219,12 +263,16 @@ pub fn bind(instance: &mut Instance, runtime: Value) -> Result<()> {
         response.fence == claim.fence && response.runtime.as_ref() == Some(&runtime),
         "xats bind returned mismatched runtime or fence"
     );
-    instance
+    let identity = instance
         .managed_xats
         .as_mut()
-        .and_then(|x| x.claim.as_mut())
+        .context("missing xats identity")?;
+    identity
+        .claim
+        .as_mut()
         .context("missing xats claim")?
         .runtime = Some(runtime);
+    identity.previous_agent_type = None;
     Ok(())
 }
 
@@ -411,5 +459,64 @@ mod tests {
             generation: 1,
         });
         assert!(identity.validate().is_err());
+    }
+
+    #[test]
+    fn switching_a_claim_keeps_its_source_type_and_fence_across_restart() {
+        let mut instance = Instance::new("worker", "/tmp/worktree");
+        instance.tool = "codex".into();
+        instance.sync_primary_pane_from_legacy();
+        let mut identity = ManagedXats::new("worker".into(), "team".into()).unwrap();
+        let source = Fence {
+            claim_id: Uuid::new_v4().to_string(),
+            instance_id: identity.launch_instance_id.clone(),
+            generation: 4,
+        };
+        identity.claim = Some(Claim {
+            fence: source.clone(),
+            mcp_token: "private-test-token".into(),
+            runtime: Some(json!({"agent_type": "codex"})),
+        });
+        instance.managed_xats = Some(identity);
+        instance
+            .switch_agent("opencode", &crate::session::Config::default())
+            .unwrap();
+        stage_restart(&mut instance).unwrap();
+        let restored: Instance =
+            serde_json::from_str(&serde_json::to_string(&instance).unwrap()).unwrap();
+        let identity = restored.managed_xats.unwrap();
+        identity.validate().unwrap();
+        assert_eq!(identity.previous_agent_type.as_deref(), Some("codex"));
+        assert_eq!(identity.claim.as_ref().unwrap().fence, source);
+        assert_ne!(
+            identity.pending_restart.as_deref(),
+            Some(source.instance_id.as_str())
+        );
+        assert_eq!((&*identity.name, &*identity.team), ("worker", "team"));
+    }
+
+    #[test]
+    fn a_prepared_new_type_does_not_reuse_the_old_source_on_its_next_restart() {
+        let mut instance = Instance::new("worker", "/tmp/worktree");
+        instance.tool = "opencode".into();
+        instance.sync_primary_pane_from_legacy();
+        let mut identity = ManagedXats::new("worker".into(), "team".into()).unwrap();
+        identity.claim = Some(Claim {
+            fence: Fence {
+                claim_id: Uuid::new_v4().to_string(),
+                instance_id: identity.launch_instance_id.clone(),
+                generation: 5,
+            },
+            mcp_token: "private-test-token".into(),
+            runtime: None,
+        });
+        identity.prepared_agent_type = Some("opencode".into());
+        identity.previous_agent_type = Some("codex".into());
+        instance.managed_xats = Some(identity);
+        stage_restart(&mut instance).unwrap();
+        let identity = instance.managed_xats.unwrap();
+        assert!(identity.previous_agent_type.is_none());
+        assert_eq!(identity.prepared_agent_type.as_deref(), Some("opencode"));
+        assert!(identity.pending_restart.is_some());
     }
 }

@@ -411,6 +411,7 @@ Add a new session
 * `-s`, `--sandbox` — Run session in Docker sandbox
 * `--sandbox-image <SANDBOX_IMAGE>` — Custom Docker image for sandbox (implies --sandbox)
 * `-y`, `--yolo` — Enable YOLO mode (skip permission prompts)
+* `--cross-agent-team` — Enable Cross Agent Team for this host session
 * `--trust-hooks` — Automatically trust repository hooks without prompting
 * `--extra-args <EXTRA_ARGS>` — Extra arguments to append after the agent binary
 * `--cmd-override <CMD_OVERRIDE>` — Override the agent binary command

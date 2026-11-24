@@ -11,6 +11,7 @@ mod command;
 mod frame;
 
 pub(super) use command::native_args;
+pub(crate) use command::word;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 

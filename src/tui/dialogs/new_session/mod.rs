@@ -382,7 +382,13 @@ impl NewSessionDialog {
             .cloned()
             .unwrap_or(launch_dir_str);
 
-        let available_tools = tools.available_list();
+        let mut available_tools = tools.available_list();
+        available_tools.sort_by_key(|&tool| match tool {
+            "claude" => 0,
+            "codex" => 1,
+            "antigravity" => 2,
+            _ => 3,
+        });
         // Load resolved config (global merged with profile overrides)
         let config = resolve_config(profile).unwrap_or_default();
 

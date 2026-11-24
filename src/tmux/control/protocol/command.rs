@@ -8,7 +8,7 @@ fn invalid(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason)
 }
 
-fn word(out: &mut String, value: &str) {
+pub(crate) fn word(out: &mut String, value: &str) {
     out.push_str(" \"");
     for ch in value.chars() {
         match ch {

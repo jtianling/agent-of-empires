@@ -4,6 +4,53 @@ use rusqlite::{params, OptionalExtension};
 use super::Store;
 
 impl Store {
+    pub(crate) fn record_handoff_native(
+        &self,
+        id: &str,
+        slot: i64,
+        key: &str,
+        tool: &str,
+        native: &str,
+    ) -> Result<()> {
+        match tool {
+            "codex" => {
+                uuid::Uuid::parse_str(native)?;
+            }
+            "opencode" => crate::opencode_runtime::validate_session_id(native)?,
+            _ => bail!("Unsupported handoff native capture"),
+        }
+        let changed = self.conn.execute(
+            "UPDATE agent_slot SET native_session_id=?1 WHERE instance_id=?2 \
+             AND slot=?3 AND agent=?4 AND xats_identity_key=?5",
+            params![native, id, slot, tool, key],
+        )?;
+        anyhow::ensure!(changed == 1, "Handoff pane changed before native capture");
+        Ok(())
+    }
+    pub(crate) fn align_opencode_runtime_generation(
+        &self,
+        id: &str,
+        slot: i64,
+        previous: i64,
+        next: i64,
+        key: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            next > previous && next <= super::MAX_XATS_RUNTIME_GENERATION,
+            "Invalid OpenCode runtime generation"
+        );
+        let changed = self.conn.execute(
+            "UPDATE agent_slot SET xats_runtime_generation=?1 WHERE instance_id=?2 \
+             AND slot=?3 AND agent='opencode' AND xats_runtime_generation=?4 \
+             AND xats_identity_key=?5",
+            params![next, id, slot, previous, key],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "OpenCode pane changed while aligning its generation"
+        );
+        Ok(())
+    }
     /// Hand one switchable slot of an instance to `target`, discarding the
     /// conversation that slot held. Every other slot is left untouched.
     ///
@@ -129,11 +176,74 @@ mod tests {
         store
             .upsert_agent_slot("inst", 1, "shell", "", "/w", "%2", "", 1)
             .unwrap();
-        assert!(store.switch_slot_agent("inst", 0, "opencode").is_err());
+        assert!(store.switch_slot_agent("inst", 0, "shell").is_err());
         assert!(store.switch_slot_agent("inst", 1, "codex").is_err());
         assert!(store.switch_slot_agent("inst", 2, "codex").is_err());
         let slots = store.read_slots_for_instance("inst").unwrap();
         assert_eq!(slots[0].agent, "claude");
         assert_eq!(slots[1].agent, "shell");
+    }
+
+    #[test]
+    fn opencode_switch_preserves_worktree_and_resumes_only_the_new_conversation() {
+        let store = store();
+        let directory = "/project/.worktrees/feature";
+        let mut pane = crate::session::PaneConfig::new("claude", directory, true, true);
+        pane.worktree = Some(crate::session::PaneWorktreeInfo {
+            worktree_path: Some(directory.into()),
+            ..Default::default()
+        });
+        store
+            .upsert_agent_slot_config("inst", 1, &pane, "old-claude", "%2", "key", 1)
+            .unwrap();
+        store.switch_slot_agent("inst", 1, "opencode").unwrap();
+        let prepared = store
+            .prepare_opencode_runtime("inst", 1, crate::db::RuntimePreparationMode::Fresh)
+            .unwrap();
+        assert!(prepared.native_session_id.is_empty());
+        assert_eq!(prepared.xats_identity_key, "key");
+        assert!(store
+            .record_opencode_runtime_session(
+                "inst",
+                1,
+                prepared.generation,
+                "%2",
+                "ses_switched",
+                directory,
+                2
+            )
+            .unwrap());
+        let resumed = store
+            .prepare_opencode_runtime("inst", 1, crate::db::RuntimePreparationMode::Resume)
+            .unwrap();
+        assert_eq!(resumed.native_session_id, "ses_switched");
+        let slot = store
+            .read_slots_for_instance("inst")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(slot.agent, "opencode");
+        assert_eq!(slot.cwd, directory);
+        assert_eq!(slot.worktree_info, pane.worktree);
+        store.switch_slot_agent("inst", 1, "claude").unwrap();
+        assert!(!store
+            .record_opencode_runtime_session(
+                "inst",
+                1,
+                resumed.generation,
+                "%2",
+                "ses_stale",
+                directory,
+                3
+            )
+            .unwrap());
+        let slot = store
+            .read_slots_for_instance("inst")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(slot.agent, "claude");
+        assert!(slot.native_session_id.is_empty());
+        assert_eq!(slot.cwd, directory);
     }
 }

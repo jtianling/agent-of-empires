@@ -29,7 +29,7 @@ impl HomeView {
             Some("Sandboxed sessions cannot switch agents.".to_string())
         } else if panes.is_empty() {
             Some(format!(
-                "'{}' runs {}; only claude and codex panes can switch agents.",
+                "'{}' runs {}; only claude, codex and opencode panes can switch agents.",
                 inst.title, inst.tool
             ))
         } else if panes.len() > 1 && !session_running(inst) {
@@ -60,6 +60,7 @@ impl HomeView {
             key: inst.xats_identity_key.clone().unwrap_or_default(),
             pane: String::new(),
             xats: inst.cross_agent_team,
+            native_empty: inst.agent_session_id.is_none(),
         };
         let (seats, read_error) = match slots {
             Ok(slots) if !slots.is_empty() => (
@@ -73,6 +74,7 @@ impl HomeView {
                         // Rows recorded before panes carried their own config
                         // say nothing; the session's setting covers them.
                         xats: slot.cross_agent_team || inst.cross_agent_team,
+                        native_empty: slot.native_session_id.is_empty(),
                     })
                     .collect(),
                 None,
@@ -107,12 +109,14 @@ impl HomeView {
             .zip(identities)
             .zip(corners)
             .map(|(((seat, label), identity), corner)| {
+                let retry = needs_switch_retry(&seat, identity.as_ref());
                 (
                     corner,
                     SwitchPane {
                         slot: seat.slot,
                         label,
                         agent: seat.agent,
+                        retry,
                         identity,
                     },
                 )
@@ -180,6 +184,7 @@ impl HomeView {
     /// the background worker merges back nothing that says which agent it is.
     /// Only the primary pane (slot 0) is mirrored on the instance itself.
     pub(super) fn commit_agent_switch(&mut self, id: &str, slot: i64, target: &str) -> Result<()> {
+        let _operation = self.storage.operation_lock()?;
         let mut switched = self
             .get_instance(id)
             .cloned()
@@ -212,12 +217,30 @@ impl HomeView {
         // A session that never ran has no pane to hand over yet; its next
         // start reads the agent from the instance alone.
         if tracked || slot != 0 {
+            let source = store
+                .read_slots_for_instance(id)?
+                .into_iter()
+                .find(|row| row.slot == slot)
+                .context("pane is no longer tracked")?;
+            anyhow::ensure!(
+                crate::agents::is_switchable_agent(&source.agent),
+                "'{}' is not a switchable agent",
+                source.agent
+            );
+            crate::runtime_handoff::prepare_switch(&profile, &switched, &source, target, true)?;
+        }
+        switched.switch_pane_agent(slot, target, &config)?;
+        if tracked || slot != 0 {
             store.switch_slot_agent(id, slot, target)?;
         }
-        if slot != 0 {
+        if slot != 0
+            && !switched
+                .managed_panes
+                .iter()
+                .any(|pane| pane.slot == Some(slot))
+        {
             return Ok(());
         }
-        switched.switch_agent(target, &config)?;
         self.mutate_instance(id, |inst| *inst = switched);
         self.save()
     }
@@ -237,6 +260,26 @@ struct SwitchSeat {
     key: String,
     pane: String,
     xats: bool,
+    native_empty: bool,
+}
+
+fn needs_switch_retry(seat: &SwitchSeat, identity: Option<&KeyHolder>) -> bool {
+    let Some(KeyHolder::Held {
+        agent_type: Some(source),
+        ..
+    }) = identity
+    else {
+        return false;
+    };
+    let source = if source == "claude-code" {
+        "claude"
+    } else {
+        source
+    };
+    seat.xats
+        && seat.native_empty
+        && crate::agents::is_switchable_agent(source)
+        && source != seat.agent
 }
 
 /// Name each pane the way the user sees it: two panes side by side (or
@@ -306,6 +349,7 @@ mod tests {
             key: String::new(),
             pane: String::new(),
             xats: false,
+            native_empty: false,
         }
     }
 

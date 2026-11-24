@@ -6,6 +6,7 @@
 use crate::session::Status;
 use crate::tmux::status_detection;
 
+pub(crate) mod antigravity;
 pub(crate) mod executable;
 
 /// How to check whether an agent binary is installed on the host.
@@ -162,7 +163,7 @@ impl AgentDef {
     /// a shared-server agent additionally leaks the key to every sibling agent
     /// on that server if it reaches the pane at all.
     pub fn identity_key_in_pane_env(&self) -> bool {
-        self.exact_session_runtime.is_none()
+        self.exact_session_runtime.is_none() && self.name != "antigravity"
     }
 }
 
@@ -184,7 +185,7 @@ pub fn identity_key_in_pane_env(tool: &str) -> bool {
 }
 
 /// Agents a session can be switched between in place.
-pub const SWITCHABLE_AGENTS: &[&str] = &["claude", "codex"];
+pub const SWITCHABLE_AGENTS: &[&str] = &["claude", "codex", "opencode"];
 
 pub fn is_switchable_agent(tool: &str) -> bool {
     SWITCHABLE_AGENTS.contains(&tool)
@@ -447,6 +448,35 @@ pub const AGENTS: &[AgentDef] = &[
         exact_session_runtime: None,
         supports_cross_agent_team: false,
     },
+    AgentDef {
+        name: "antigravity",
+        binary: "agy",
+        aliases: &["agy"],
+        detection: DetectionMethod::Which("agy"),
+        yolo: Some(YoloMode::CliFlag("--dangerously-skip-permissions")),
+        default_permission_flag: None,
+        instruction_flag: None,
+        fixed_args: &[],
+        set_default_command: false,
+        supports_host_launch: true,
+        detect_status: status_detection::detect_antigravity_status,
+        container_env: &[],
+        hook_config: None,
+        resume: Some(ResumeConfig {
+            exit_sequence: &[&["C-c"], &["C-c"]],
+            resume_pattern: concat!(
+                r"(?m)^[ \t]*agy --conversation(?:=|[ \t]+)",
+                r"([[:xdigit:]]{8}(?:-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12})[ \t]*\r?$",
+            ),
+            resume_flag: "--conversation {}",
+            timeout_secs: 10,
+        }),
+        fork_template: None,
+        session_id_flag: None,
+        sets_own_title: false,
+        exact_session_runtime: None,
+        supports_cross_agent_team: true,
+    },
 ];
 
 /// Look up an agent by canonical name.
@@ -482,12 +512,33 @@ pub fn agent_from_process_name(process: &str) -> Option<&'static str> {
 
 /// Given a command string (e.g. `"claude --resume xyz"` or `"open-code"`),
 /// return the canonical agent name if one is recognised.
+pub(crate) fn agent_from_command(cmd: &str) -> Option<&'static str> {
+    let words = shell_words::split(cmd).ok()?;
+    let binary = words.first()?.rsplit('/').next()?;
+    AGENTS
+        .iter()
+        .find(|agent| {
+            agent.name.eq_ignore_ascii_case(binary)
+                || agent.binary.eq_ignore_ascii_case(binary)
+                || agent
+                    .aliases
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(binary))
+        })
+        .map(|agent| agent.name)
+}
+
 pub fn resolve_tool_name(cmd: &str) -> Option<&'static str> {
     let cmd_lower = cmd.to_lowercase();
     if cmd_lower.is_empty() {
         return Some("claude");
     }
-    for agent in AGENTS {
+    if let Some(name) = agent_from_command(cmd) {
+        return Some(name);
+    }
+    // Preserve legacy wrapper detection without treating "agy" in arbitrary
+    // paths or arguments as evidence of an Antigravity session.
+    for agent in AGENTS.iter().filter(|a| a.name != "antigravity") {
         if cmd_lower.contains(agent.name) {
             return Some(agent.name);
         }
@@ -584,7 +635,18 @@ mod tests {
         let names = agent_names();
         assert_eq!(
             names,
-            vec!["claude", "codex", "opencode", "kimi", "shell", "vibe", "cursor", "copilot", "pi"]
+            vec![
+                "claude",
+                "codex",
+                "opencode",
+                "kimi",
+                "shell",
+                "vibe",
+                "cursor",
+                "copilot",
+                "pi",
+                "antigravity"
+            ]
         );
     }
 
@@ -619,6 +681,7 @@ mod tests {
         assert_eq!(settings_index_from_name(Some("cursor")), 7);
         assert_eq!(settings_index_from_name(Some("copilot")), 8);
         assert_eq!(settings_index_from_name(Some("pi")), 9);
+        assert_eq!(settings_index_from_name(Some("antigravity")), 10);
 
         assert_eq!(name_from_settings_index(0), None);
         assert_eq!(name_from_settings_index(1), Some("claude"));
@@ -630,6 +693,7 @@ mod tests {
         assert_eq!(name_from_settings_index(7), Some("cursor"));
         assert_eq!(name_from_settings_index(8), Some("copilot"));
         assert_eq!(name_from_settings_index(9), Some("pi"));
+        assert_eq!(name_from_settings_index(10), Some("antigravity"));
         assert_eq!(name_from_settings_index(99), None);
     }
 
@@ -666,13 +730,14 @@ mod tests {
         for agent in AGENTS {
             assert_eq!(
                 agent.identity_key_in_pane_env(),
-                !agent.uses_exact_session_runtime(),
+                !agent.uses_exact_session_runtime() && agent.name != "antigravity",
                 "{}",
                 agent.name
             );
         }
         assert!(!identity_key_in_pane_env("opencode"));
         assert!(!identity_key_in_pane_env("kimi"));
+        assert!(!identity_key_in_pane_env("antigravity"));
         assert!(identity_key_in_pane_env("claude"));
         assert!(identity_key_in_pane_env("unknown-tool"));
     }

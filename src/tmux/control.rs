@@ -5,6 +5,7 @@ use std::process::{Command, Output};
 
 mod observer;
 mod protocol;
+pub(super) use protocol::word;
 
 // These slots undergo one tmux format expansion. A final semicolon also
 // separates commands in native argv before format expansion takes place.

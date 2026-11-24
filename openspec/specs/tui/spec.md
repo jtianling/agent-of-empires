@@ -582,6 +582,26 @@ New Session 对话框 SHALL 先展示 session 元数据, 再展示 primary pane 
 - **FR-013**: The TUI SHALL optimize the session preview refresh rate and rendering to reduce the performance impact of background `tmux capture-pane` calls.
 - **FR-013a**: The TUI SHALL throttle background refreshes of the preview content to a stable rate (e.g., 250ms interval) and only trigger TUI redraws when the content has actually changed.
 
+### Requirement: Session 列表滚轮滚动
+
+主界面 SHALL 支持触控板和鼠标滚轮的垂直滚动事件.  指针位于 session 列表内容区域时, 每次上下滚动移动三行视口, 在列表起点和终点停止.  选中行 SHALL 保持在可见范围内, 下一次渲染不得将滚动视口拉回旧位置.  预览区, 状态栏, 搜索输入行和弹窗 SHALL 不触发后台列表滚动.  diff 视图继续使用自己的滚动处理.
+
+#### Scenario: 触控板向下滚动
+
+- **WHEN** session 列表超出视口高度, 指针在列表内产生向下滚动事件
+- **THEN** 列表视口立即向下移动三行, 到底部时停止
+- **AND** 选中行保持可见, 后续渲染保留该视口位置
+
+#### Scenario: 其他区域和弹窗隔离
+
+- **WHEN** 指针位于预览区, 状态栏或搜索输入行, 或界面存在弹窗
+- **THEN** 滚轮不会移动后台 session 列表或其选择
+
+#### Scenario: 空列表和小视口
+
+- **WHEN** 列表为空, 内容不足一屏或列表可见高度为零
+- **THEN** 滚动安全停止, 不产生越界选择
+
 ## Success Criteria
 
 - **SC-001**: Users can manage all session operations without leaving the TUI.

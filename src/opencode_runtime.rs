@@ -95,6 +95,20 @@ async fn run_with_server(
         None => create_session(&client, base_url, &args.working_directory).await?,
     };
 
+    let handoff = if args.cross_agent_team && managed.is_none() {
+        let profile = profile.to_string();
+        let id = args.instance_id.clone();
+        let slot = args.slot;
+        let endpoint = base_url.to_string();
+        let native = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::runtime_handoff::commit_opencode(&profile, &id, slot, &endpoint, &native)
+        })
+        .await
+        .context("OpenCode handoff worker failed")??
+    } else {
+        None
+    };
     record_exact_session(profile, args, &session_id).await?;
     if let Some(mut managed) = managed {
         if managed.managed_xats.is_some() {
@@ -110,7 +124,21 @@ async fn run_with_server(
         crate::managed_runtimes::target::mark_ready(profile, &managed)?;
     } else if args.cross_agent_team {
         let identity_key = identity_key.context("OpenCode runtime identity key is missing")?;
-        crate::opencode_xats::commit(identity_key, args.generation, base_url, &session_id).await?;
+        if let Some((generation, name, team)) = handoff {
+            send_handoff_reconnect(
+                &client,
+                base_url,
+                &session_id,
+                &args.working_directory,
+                generation,
+                &name,
+                &team,
+            )
+            .await?;
+        } else {
+            crate::opencode_xats::commit(identity_key, args.generation, base_url, &session_id)
+                .await?;
+        }
     }
 
     let mut attach = Command::new("opencode");
@@ -123,6 +151,45 @@ async fn run_with_server(
     let status = attach.status().await.context("starting OpenCode attach")?;
     if !status.success() {
         bail!("OpenCode attach exited with {}", status);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_handoff_reconnect(
+    client: &reqwest::Client,
+    base_url: &str,
+    session: &str,
+    directory: &Path,
+    generation: i64,
+    name: &str,
+    team: &str,
+) -> Result<()> {
+    let text = format!(
+        "AoE 已将当前 pane 的 xats 身份交接到 OpenCode. \
+        请使用当前进程环境的 XATS_IDENTITY_KEY 调用 reconnect, agent_type=opencode, \
+        base_url={base_url}, session_id={session}, runtime_generation={generation}. \
+        保持 name={name}, team={team}, 不使用缺省 session 的 register_agent, 不输出身份 key."
+    );
+    let mut url = url::Url::parse(base_url)?;
+    url.set_path(&format!("/session/{session}/prompt_async"));
+    url.query_pairs_mut()
+        .append_pair("directory", &directory.to_string_lossy());
+    let response = client
+        .post(url)
+        .json(&serde_json::json!({"parts": [
+            {"type": "text", "text": text}
+        ]}))
+        .send()
+        .await
+        .context("Sending OpenCode handoff reconnect prompt")?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response
+            .text()
+            .await
+            .context("Reading OpenCode handoff prompt error")?;
+        bail!("OpenCode handoff prompt failed (HTTP {status}): {detail}");
     }
     Ok(())
 }

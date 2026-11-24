@@ -66,7 +66,7 @@ fn node_version(name: &str) -> Option<[u32; 3]> {
     ])
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(super) fn is_executable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
 
     match path.metadata() {

@@ -26,7 +26,13 @@ fn read_arguments(proc: &Path, pid: u32) -> anyhow::Result<Vec<String>> {
 /// Kill a process and all its descendants
 /// Uses SIGTERM first, then SIGKILL after a short delay for stragglers
 pub fn kill_process_tree(pid: u32) {
-    // Collect all descendant PIDs first (children, grandchildren, etc.)
+    kill_process_tree_gracefully(pid, std::time::Duration::from_millis(100));
+}
+
+/// Kill a process and all its descendants, waiting up to `grace` for clean
+/// SIGTERM exit before escalating to SIGKILL. Returns as soon as all targeted
+/// processes have exited.
+pub fn kill_process_tree_gracefully(pid: u32, grace: std::time::Duration) {
     let mut pids_to_kill = vec![pid];
     collect_descendants(pid, &mut pids_to_kill);
 
@@ -36,20 +42,26 @@ pub fn kill_process_tree(pid: u32) {
         "Killing process tree"
     );
 
-    // Kill in reverse order (children first, then parent) with SIGTERM
     for &p in pids_to_kill.iter().rev() {
         let _ = kill(Pid::from_raw(p as i32), Signal::SIGTERM);
     }
 
-    // Brief pause to let processes handle SIGTERM gracefully
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    super::wait_for_exits(&pids_to_kill, grace, process_exists);
 
-    // SIGKILL any survivors
+    let mut escalated = false;
     for &p in pids_to_kill.iter().rev() {
         if process_exists(p) {
             debug!(pid = p, "Process survived SIGTERM, sending SIGKILL");
             let _ = kill(Pid::from_raw(p as i32), Signal::SIGKILL);
+            escalated = true;
         }
+    }
+    if escalated {
+        super::wait_for_exits(
+            &pids_to_kill,
+            std::time::Duration::from_millis(500),
+            process_exists,
+        );
     }
 }
 

@@ -110,6 +110,14 @@ fn parent_pid(pid: u32) -> Option<u32> {
 /// Run the capture. Always returns success; capture failures are swallowed so
 /// the hook never blocks or errors the agent.
 pub fn run(profile: &str, args: RecordPaneArgs) {
+    if args.agent.as_deref() == Some("antigravity") {
+        if let Err(error) = capture_antigravity(profile) {
+            tracing::warn!("Antigravity capture skipped: {error:#}");
+            eprintln!("AoE could not record the Antigravity conversation: {error:#}");
+        }
+        println!("{{}}");
+        return;
+    }
     if let Err(e) = try_capture(profile, &args) {
         // Best-effort: log at debug only. The hook must still exit 0.
         tracing::debug!("__record-pane capture skipped: {}", e);
@@ -149,4 +157,144 @@ fn try_capture(profile: &str, args: &RecordPaneArgs) -> anyhow::Result<()> {
     let store = crate::db::Store::open_with_schema(profile)?;
     store.upsert_pane_live(&tmux_pane, &agent, &session_id, &cwd, crate::db::now_unix())?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AntigravityStart {
+    conversation_id: String,
+}
+
+fn capture_antigravity(profile: &str) -> anyhow::Result<()> {
+    let (Ok(instance), Ok(pane)) = (std::env::var("AOE_INSTANCE_ID"), std::env::var("TMUX_PANE"))
+    else {
+        return Ok(());
+    };
+    if !crate::agents::antigravity::is_launch_descendant()? {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        !instance.is_empty()
+            && pane
+                .strip_prefix('%')
+                .is_some_and(|s| s.parse::<u32>().is_ok()),
+        "Invalid Antigravity hook context"
+    );
+    let event: AntigravityStart = serde_json::from_reader(std::io::stdin().lock())?;
+    anyhow::ensure!(
+        crate::hooks::antigravity::valid_id(&event.conversation_id),
+        "Invalid Antigravity conversation UUID"
+    );
+    persist_antigravity_event(
+        profile,
+        &instance,
+        &pane,
+        &event.conversation_id,
+        std::time::Duration::from_secs(3),
+        || pane_hosts_this_process(&pane) == Some(true),
+    )
+}
+
+fn persist_antigravity_event(
+    profile: &str,
+    instance: &str,
+    pane: &str,
+    id: &str,
+    timeout: std::time::Duration,
+    owns_pane: impl Fn() -> bool,
+) -> anyhow::Result<()> {
+    let storage = crate::session::Storage::new(profile)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let reason = match storage.try_operation_lock()? {
+            None => "profile operation lock is busy",
+            Some(_guard) => match crate::db::Store::open_antigravity_capture(profile)? {
+                None => "profile database has not been created",
+                Some(store) => {
+                    anyhow::ensure!(
+                        owns_pane(),
+                        "Cannot prove Antigravity hook belongs to pane {pane}"
+                    );
+                    match store.capture_antigravity_id(instance, pane, id) {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => "no matching instance and pane binding",
+                        Err(error)
+                            if matches!(
+                                error
+                                    .downcast_ref::<rusqlite::Error>()
+                                    .and_then(rusqlite::Error::sqlite_error_code),
+                                Some(
+                                    rusqlite::ErrorCode::DatabaseBusy
+                                        | rusqlite::ErrorCode::DatabaseLocked
+                                )
+                            ) =>
+                        {
+                            "SQLite database is busy"
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            },
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        anyhow::ensure!(
+            !remaining.is_zero(),
+            "Timed out recording Antigravity pane {pane} for instance {instance}: {reason}"
+        );
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[serial_test::serial]
+    fn antigravity_hook_lock_deadline_and_unproven_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::session::scoped_test_home(dir.path());
+        let profile = "capture-test";
+        let store = crate::db::Store::open_with_schema(profile).unwrap();
+        store
+            .record_launched_slot_if_absent("s", 0, "antigravity", "/same", "%1", "", 1)
+            .unwrap();
+        let id = "ec769e89-8c51-4b1a-9094-00775eb6674d";
+        let save = |owns| {
+            persist_antigravity_event(profile, "s", "%1", id, Duration::from_millis(20), || owns)
+        };
+        let storage = crate::session::Storage::new(profile).unwrap();
+        let held = storage.operation_lock().unwrap();
+        std::thread::scope(|scope| {
+            let join = scope.spawn(|| save(true));
+            let start = Instant::now();
+            while !join.is_finished() && start.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(held);
+            assert!(join
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("operation lock is busy"));
+        });
+        let db = rusqlite::Connection::open(crate::db::db_path(profile).unwrap()).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(save(true)
+            .unwrap_err()
+            .to_string()
+            .contains("SQLite database is busy"));
+        db.execute_batch("ROLLBACK").unwrap();
+        assert!(save(false).is_err());
+        assert!(store.read_slots_for_instance("s").unwrap()[0]
+            .native_session_id
+            .is_empty());
+        save(true).unwrap();
+        assert_eq!(
+            store.read_slots_for_instance("s").unwrap()[0].native_session_id,
+            id
+        );
+    }
 }

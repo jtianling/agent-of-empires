@@ -2,6 +2,7 @@
 
 mod agent_switch;
 mod group_restart;
+mod mouse;
 mod new_session_keys;
 mod on_create;
 mod status_updates;
